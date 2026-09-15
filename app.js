@@ -143,7 +143,14 @@ function iconBox() {
         h: size
     };
 }
-
+function smallNameBox() {
+    return {
+        x: Math.round(canvas.width * 0.79),
+        y: Math.round(canvas.height * 0.60),
+        w: Math.round(canvas.width * 0.10),
+        h: Math.round(canvas.height * 0.025)
+    };
+}
 
 /* ------------------------------
    Tesseract.js
