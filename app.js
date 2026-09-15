@@ -137,8 +137,8 @@ function iconBox() {
     const size = Math.round(canvas.width * 0.085);
 
     return {
-        x: Math.round(canvas.width * 0.875),
-        y: Math.round(canvas.height * 0.63),
+        x: Math.round(canvas.width * 0.885),
+        y: Math.round(canvas.height * 0.65),
         w: size,
         h: size
     };
