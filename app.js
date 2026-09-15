@@ -55,7 +55,8 @@ function loadImage(file) {
 
 function normalize(text) {
     return String(text || "")
-        .replace(/\s+/g, "")
+        .normalize("NFKC")
+        .replace(/[^\p{L}\p{N}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Han}]/gu, "")
         .toLowerCase();
 }
 
