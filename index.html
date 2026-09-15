@@ -3,7 +3,7 @@
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Zetaスクショ黒塗りツール v6</title>
+    <title>Zetaスクショ黒塗りツール v7</title>
 
     <link rel="stylesheet" href="style.css">
 
@@ -27,12 +27,12 @@
 
         <label>
             黒塗りする文字
-            <input id="targetText" type="text" placeholder="例：ユーザー">
+            <input id="targetText" type="text" placeholder="例：にみゅ">
         </label>
 
         <label>
             置き換え文字
-            <input id="overlayText" type="text" value="user">
+            <input id="overlayText" type="text" value="{{user}}">
         </label>
 
         <label class="checkbox-label">
@@ -40,23 +40,14 @@
             黒塗り部分に置き換え文字を表示
         </label>
 
-        <label class="checkbox-label">
-            <input id="redactIcon" type="checkbox">
-            userアイコンも黒塗り
-        </label>
-
-        <label class="checkbox-label">
-            <input id="overlayIcon" type="checkbox">
-            アイコン部分に文字
-        </label>
 
         <div class="buttons">
             <button id="redactBtn" disabled>
-                実行
+                OCRして黒塗り
             </button>
 
             <button id="saveBtn" disabled>
-                保存
+                画像を保存
             </button>
         </div>
 

@@ -3,10 +3,7 @@ const $ = (id) => document.getElementById(id);
 const fileInput = $("fileInput");
 const targetText = $("targetText");
 const overlayText = $("overlayText");
-
 const overlayName = $("overlayName");
-const redactIcon = $("redactIcon");
-const overlayIcon = $("overlayIcon");
 
 const redactBtn = $("redactBtn");
 const saveBtn = $("saveBtn");
@@ -21,14 +18,8 @@ let sourceImage = null;
 let worker = null;
 let fileName = "redacted.png";
 
-
-/* ------------------------------
-   ステータス・エラー表示
------------------------------- */
-
 function status(message, error = null) {
     statusEl.textContent = message;
-
     errorEl.hidden = !error;
 
     if (error) {
@@ -42,11 +33,6 @@ function status(message, error = null) {
         errorEl.textContent = "";
     }
 }
-
-
-/* ------------------------------
-   画像読み込み
------------------------------- */
 
 function loadImage(file) {
     return new Promise((resolve, reject) => {
@@ -67,21 +53,11 @@ function loadImage(file) {
     });
 }
 
-
-/* ------------------------------
-   OCR用文字列の正規化
------------------------------- */
-
 function normalize(text) {
     return String(text || "")
         .replace(/\s+/g, "")
         .toLowerCase();
 }
-
-
-/* ------------------------------
-   黒塗り＋置き換え文字
------------------------------- */
 
 function paint(box, text, options = {}) {
     const extraLeft = options.extraLeft ?? 6;
@@ -92,7 +68,6 @@ function paint(box, text, options = {}) {
 
     const left = Math.max(0, box.x - padding - extraLeft);
     const top = Math.max(0, box.y - padding);
-
     const width = box.w + padding + (options.extraRight ?? 0);
     const height = box.h + padding * 2;
 
@@ -104,272 +79,9 @@ function paint(box, text, options = {}) {
         ctx.font = `bold ${Math.max(12, Math.round(box.h * 0.8))}px sans-serif`;
         ctx.textAlign = "center";
         ctx.textBaseline = "middle";
-
-        ctx.fillText(
-            text,
-            left + width / 2,
-            top + height / 2
-        );
+        ctx.fillText(text, left + width / 2, top + height / 2);
     }
 }
-
-
-/* ------------------------------
-   OpenCV.jsの読み込み
------------------------------- */
-
-let openCvPromise = null;
-
-function waitForOpenCV(timeout = 60000) {
-    if (openCvPromise) {
-        return openCvPromise;
-    }
-
-    openCvPromise = new Promise((resolve, reject) => {
-        let settled = false;
-        const timer = setTimeout(() => {
-            if (settled) return;
-            settled = true;
-            reject(new Error(
-                "顔アイコン検出用のOpenCV.jsを読み込めませんでした。" +
-                "通信環境を確認して、ページを再読み込みしてください。"
-            ));
-        }, timeout);
-
-        const finish = (cvInstance) => {
-            if (settled) return;
-            if (!cvInstance || !cvInstance.Mat) return;
-            settled = true;
-            clearTimeout(timer);
-            resolve(cvInstance);
-        };
-
-        /* すでに読み込まれている場合 */
-        if (window.cv) {
-            if (window.cv instanceof Promise) {
-                window.cv.then(finish).catch((error) => {
-                    if (!settled) {
-                        settled = true;
-                        clearTimeout(timer);
-                        reject(error);
-                    }
-                });
-            } else {
-                finish(window.cv);
-            }
-
-            if (settled) return;
-        }
-
-        /* OpenCV.jsは初期化完了まで時間がかかるため、
-           EmscriptenのonRuntimeInitializedも待ちます。 */
-        window.Module = window.Module || {};
-        const previousCallback = window.Module.onRuntimeInitialized;
-
-        window.Module.onRuntimeInitialized = () => {
-            if (typeof previousCallback === "function") {
-                previousCallback();
-            }
-            finish(window.cv);
-        };
-
-        const script = document.createElement("script");
-        script.src =
-            "https://cdn.jsdelivr.net/npm/@techstark/opencv-js@4.12.0-release.1/dist/opencv.js";
-        script.async = true;
-
-        script.onload = () => {
-            /* Promise形式で公開されるビルドにも対応 */
-            if (window.cv instanceof Promise) {
-                window.cv.then(finish).catch((error) => {
-                    if (!settled) {
-                        settled = true;
-                        clearTimeout(timer);
-                        reject(error);
-                    }
-                });
-                return;
-            }
-
-            /* すでに初期化済みなら即時完了 */
-            finish(window.cv);
-        };
-
-        script.onerror = () => {
-            if (settled) return;
-            settled = true;
-            clearTimeout(timer);
-            reject(new Error(
-                "OpenCV.jsの読み込みに失敗しました。" +
-                "CDNへの接続を確認してください。"
-            ));
-        };
-
-        document.head.appendChild(script);
-    });
-
-    return openCvPromise;
-}
-
-
-/* ------------------------------
-   アイコン自動検出
------------------------------- */
-
-/*
- * Zetaの丸い顔アイコンを、固定座標ではなく
- * 画像内の「円形のエッジ」として探します。
- *
- * OpenCV.jsのHoughCirclesを使うため、
- * 画像サイズが変わっても基本的には追従します。
- */
-async function detectIcons() {
-    const cv = await waitForOpenCV();
-
-    const src = cv.imread(canvas);
-    const gray = new cv.Mat();
-    const blurred = new cv.Mat();
-    const circles = new cv.Mat();
-
-    try {
-        cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY, 0);
-        cv.medianBlur(gray, blurred, 7);
-
-        cv.HoughCircles(
-            blurred,
-            circles,
-            cv.HOUGH_GRADIENT,
-            1.2,
-            Math.max(60, Math.round(canvas.width * 0.065)),
-            100,
-            28,
-            Math.max(28, Math.round(canvas.width * 0.025)),
-            Math.max(70, Math.round(canvas.width * 0.065))
-        );
-
-        const candidates = [];
-
-        for (let i = 0; i < circles.cols; i++) {
-            const x = circles.data32F[i * 3];
-            const y = circles.data32F[i * 3 + 1];
-            const r = circles.data32F[i * 3 + 2];
-
-            /*
-             * 今回隠したいのは「右側の顔アイコン」だけ。
-             * 左側のアイコンや中央の円形UIは対象外にします。
-             */
-            const nearRight = x > canvas.width * 0.82;
-
-            if (!nearRight) {
-                continue;
-            }
-
-            candidates.push({ x, y, r });
-        }
-
-        /* 重複候補をまとめる */
-        const unique = [];
-
-        for (const candidate of candidates) {
-            const duplicate = unique.some((other) => {
-                const dx = candidate.x - other.x;
-                const dy = candidate.y - other.y;
-                const distance = Math.sqrt(dx * dx + dy * dy);
-
-                return distance < Math.min(candidate.r, other.r) * 0.8;
-            });
-
-            if (!duplicate) {
-                unique.push(candidate);
-            }
-        }
-
-        return unique;
-
-    } finally {
-        src.delete();
-        gray.delete();
-        blurred.delete();
-        circles.delete();
-    }
-}
-
-
-/* ------------------------------
-   アイコン付近の小さい名前を探す
------------------------------- */
-
-function findIconNameWords(words, icon) {
-    const radius = icon.r;
-    const iconLeft = icon.x - radius;
-    const iconRight = icon.x + radius;
-    const iconTop = icon.y - radius;
-
-    /* 名前はアイコンの上端付近にあることが多いので、
-       アイコン中央より下の本文は対象外にします。 */
-    const top = iconTop - radius * 0.15;
-    const bottom = iconTop + radius * 0.65;
-
-    /* 今回は右側アイコンだけを対象にする */
-    if (icon.x < canvas.width / 2) {
-        return [];
-    }
-
-    return words.filter((word) => {
-        const box = word.bbox;
-        const cx = (box.x0 + box.x1) / 2;
-        const cy = (box.y0 + box.y1) / 2;
-        const w = box.x1 - box.x0;
-        const h = box.y1 - box.y0;
-
-        if (!normalize(word.text)) {
-            return false;
-        }
-
-        if (cy < top || cy > bottom) {
-            return false;
-        }
-
-        /* アイコン本体の中にある文字は除外 */
-        if (cx >= iconLeft && cx <= iconRight) {
-            return false;
-        }
-
-        /* 小さい名前らしい文字サイズに限定 */
-        if (h > radius * 0.65 || w > radius * 4) {
-            return false;
-        }
-
-        return cx < iconLeft + radius * 0.1 &&
-            cx > iconLeft - radius * 4;
-    });
-}
-
-
-/* ------------------------------
-   アイコンを黒塗り
------------------------------- */
-
-function paintIcon(icon, text = "") {
-    const box = {
-        x: icon.x - icon.r,
-        y: icon.y - icon.r,
-        w: icon.r * 2,
-        h: icon.r * 2
-    };
-
-    /* 円形アイコンを少し余裕を持って四角く黒塗り */
-    paint(box, text, {
-        padding: Math.max(4, Math.round(icon.r * 0.08)),
-        extraLeft: 0,
-        extraRight: Math.max(4, Math.round(icon.r * 0.08))
-    });
-}
-
-
-/* ------------------------------
-   Tesseract.js
------------------------------- */
 
 async function getWorker() {
     if (worker) {
@@ -383,10 +95,7 @@ async function getWorker() {
         );
     }
 
-    status(
-        "OCRエンジンを準備中…\n" +
-        "初回は少し時間がかかります。"
-    );
+    status("OCRエンジンを準備中…\n初回は少し時間がかかります。");
 
     worker = await Tesseract.createWorker(
         "jpn+eng",
@@ -406,11 +115,6 @@ async function getWorker() {
     return worker;
 }
 
-
-/* ------------------------------
-   OCRして黒塗り
------------------------------- */
-
 async function run() {
     errorEl.hidden = true;
 
@@ -427,12 +131,7 @@ async function run() {
 
         canvas.width = sourceImage.naturalWidth;
         canvas.height = sourceImage.naturalHeight;
-
-        ctx.drawImage(
-            sourceImage,
-            0,
-            0
-        );
+        ctx.drawImage(sourceImage, 0, 0);
 
         const ocrWorker = await getWorker();
 
@@ -455,82 +154,86 @@ async function run() {
                     w: box.x1 - box.x0,
                     h: box.y1 - box.y0
                 },
-                overlayName.checked
-                    ? overlayText.value
-                    : ""
+                overlayName.checked ? overlayText.value : ""
             );
         }
 
-        let iconCount = 0;
-        let iconNameCount = 0;
-
-        if (redactIcon.checked) {
-            status("顔アイコンを自動検出中…");
-
-            const icons = await detectIcons();
-            iconCount = icons.length;
-
-            /*
-             * アイコン付近の名前は、アイコンを黒塗りする前に
-             * OCR結果から拾います。
-             */
-            for (const icon of icons) {
-                const nameWords = findIconNameWords(words, icon);
-
-                for (const word of nameWords) {
-                    const box = word.bbox;
-
-                    paint(
-                        {
-                            x: box.x0,
-                            y: box.y0,
-                            w: box.x1 - box.x0,
-                            h: box.y1 - box.y0
-                        },
-                        "",
-                        {
-                            extraLeft: 2,
-                            padding: Math.max(2, Math.round((box.y1 - box.y0) * 0.12))
-                        }
-                    );
-
-                    iconNameCount++;
-                }
-            }
-
-            for (const icon of icons) {
-                paintIcon(
-                    icon,
-                    overlayIcon.checked
-                        ? overlayText.value
-                        : ""
-                );
-            }
-        }
-
-        const messages = [`黒塗り完了：${matches.length}箇所`];
-
-        if (redactIcon.checked) {
-            messages.push(`顔アイコン：${iconCount}個検出`);
-            messages.push(`アイコン付近の名前：${iconNameCount}箇所`);
-        }
-
-        status(messages.join("\n"));
+        status(`黒塗り完了：${matches.length}箇所`);
         saveBtn.disabled = false;
 
     } catch (error) {
         status(
-            "OCRでエラーが発生しました。" +
-            "下のエラー詳細を確認してください。",
+            "OCRでエラーが発生しました。下のエラー詳細を確認してください。",
             error
         );
     }
 }
 
+function canvasToBlob() {
+    return new Promise((resolve, reject) => {
+        canvas.toBlob((blob) => {
+            if (blob) {
+                resolve(blob);
+            } else {
+                reject(new Error("PNG画像の作成に失敗しました。"));
+            }
+        }, "image/png");
+    });
+}
 
-/* ------------------------------
-   ファイル選択
------------------------------- */
+async function saveImage() {
+    if (!sourceImage || canvas.width === 0 || canvas.height === 0) {
+        status("先に画像を処理してください。");
+        return;
+    }
+
+    saveBtn.disabled = true;
+
+    try {
+        const blob = await canvasToBlob();
+        const file = new File([blob], fileName, { type: "image/png" });
+
+        /* iPhone / iPadではWeb Shareの共有シートから「画像を保存」が使える */
+        if (
+            navigator.share &&
+            navigator.canShare &&
+            navigator.canShare({ files: [file] })
+        ) {
+            await navigator.share({
+                files: [file],
+                title: "Zetaスクショ"
+            });
+            status("画像を共有シートに渡しました。必要な場所へ保存してください。");
+            return;
+        }
+
+        /* PCなどでは通常のダウンロードを試す */
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement("a");
+        link.href = url;
+        link.download = fileName;
+        link.rel = "noopener";
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+        status("PNGを保存しました。");
+
+    } catch (error) {
+        /* 共有シートをキャンセルした場合はエラー扱いにしない */
+        if (error?.name === "AbortError") {
+            status("保存をキャンセルしました。");
+        } else {
+            status(
+                "画像の保存に失敗しました。もう一度お試しください。",
+                error
+            );
+        }
+    } finally {
+        saveBtn.disabled = false;
+    }
+}
 
 fileInput.addEventListener("change", async () => {
     const file = fileInput.files?.[0];
@@ -548,12 +251,7 @@ fileInput.addEventListener("change", async () => {
 
         canvas.width = sourceImage.naturalWidth;
         canvas.height = sourceImage.naturalHeight;
-
-        ctx.drawImage(
-            sourceImage,
-            0,
-            0
-        );
+        ctx.drawImage(sourceImage, 0, 0);
 
         redactBtn.disabled = false;
         saveBtn.disabled = true;
@@ -564,33 +262,12 @@ fileInput.addEventListener("change", async () => {
         );
 
     } catch (error) {
-        status(
-            "画像の読み込みに失敗しました。",
-            error
-        );
+        status("画像の読み込みに失敗しました。", error);
     }
 });
 
-
-/* ------------------------------
-   ボタン
------------------------------- */
-
 redactBtn.addEventListener("click", run);
-
-saveBtn.addEventListener("click", () => {
-    const link = document.createElement("a");
-
-    link.download = fileName;
-    link.href = canvas.toDataURL("image/png");
-
-    link.click();
-});
-
-
-/* ------------------------------
-   ページ終了時
------------------------------- */
+saveBtn.addEventListener("click", saveImage);
 
 window.addEventListener("beforeunload", () => {
     worker?.terminate();
