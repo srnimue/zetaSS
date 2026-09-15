@@ -135,18 +135,181 @@ async function run() {
 
         const ocrWorker = await getWorker();
 
-        status("画像をOCR中…");
+        /*
+         * OCR専用の画像を拡大します。
+         * 元画像は変更せず、Tesseractには2.5倍の画像を渡します。
+         * 小さな名前を拾いやすくするのが目的です。
+         */
+        const scale = 2.5;
+        const ocrCanvas = document.createElement("canvas");
+        ocrCanvas.width = Math.round(canvas.width * scale);
+        ocrCanvas.height = Math.round(canvas.height * scale);
+        const ocrCtx = ocrCanvas.getContext("2d");
 
-        const result = await ocrWorker.recognize(canvas);
-        const words = result?.data?.words || [];
+        ocrCtx.imageSmoothingEnabled = true;
+        ocrCtx.imageSmoothingQuality = "high";
+        ocrCtx.drawImage(
+            sourceImage,
+            0,
+            0,
+            ocrCanvas.width,
+            ocrCanvas.height
+        );
 
-        const matches = words.filter((word) => {
-            return normalize(word.text).includes(target);
+        status("画像をOCR中…\n小さい文字を読み取りやすくしています。");
+
+        const result = await ocrWorker.recognize(ocrCanvas, {
+            tessedit_pageseg_mode: "11"
         });
 
-        for (const word of matches) {
-            const box = word.bbox;
+        const data = result?.data || {};
+        const words = data.words || [];
+        const lines = data.lines || [];
 
+        const matches = [];
+        const seen = new Set();
+
+        function addMatch(bbox, source) {
+            if (!bbox) {
+                return;
+            }
+
+            const x0 = bbox.x0 / scale;
+            const y0 = bbox.y0 / scale;
+            const x1 = bbox.x1 / scale;
+            const y1 = bbox.y1 / scale;
+
+            /* 極端に小さい/巨大な誤認識を除外 */
+            const w = x1 - x0;
+            const h = y1 - y0;
+
+            if (w < 2 || h < 2 || w > canvas.width * 0.8) {
+                return;
+            }
+
+            const key = [
+                Math.round(x0),
+                Math.round(y0),
+                Math.round(x1),
+                Math.round(y1)
+            ].join(":");
+
+            if (!seen.has(key)) {
+                seen.add(key);
+                matches.push({ bbox, source });
+            }
+        }
+
+        /* まず通常のword単位で探す */
+        for (const word of words) {
+            if (normalize(word.text).includes(target)) {
+                addMatch(word.bbox, "word");
+            }
+        }
+
+        /*
+         * wordで分割されてしまった名前をline単位でも探します。
+         * 例：「にみゅ」が「に」「みゅ」のように分割された場合にも対応。
+         */
+        for (const line of lines) {
+            const text = normalize(line.text);
+
+            if (!text.includes(target)) {
+                continue;
+            }
+
+            const lineWords = (line.words || []).filter((word) => {
+                return word?.bbox;
+            });
+
+            if (lineWords.length === 0) {
+                addMatch(line.bbox, "line");
+                continue;
+            }
+
+            /*
+             * target文字列がline内のどのword付近にあるかを推定します。
+             * OCRの文字順に沿って、targetの長さぶんのwordを候補にします。
+             */
+            let found = false;
+
+            for (let i = 0; i < lineWords.length; i++) {
+                let combined = "";
+
+                for (let j = i; j < lineWords.length; j++) {
+                    combined += normalize(lineWords[j].text);
+
+                    if (!combined) {
+                        continue;
+                    }
+
+                    if (combined.includes(target)) {
+                        const selected = lineWords.slice(i, j + 1);
+                        const x0 = Math.min(...selected.map(w => w.bbox.x0));
+                        const y0 = Math.min(...selected.map(w => w.bbox.y0));
+                        const x1 = Math.max(...selected.map(w => w.bbox.x1));
+                        const y1 = Math.max(...selected.map(w => w.bbox.y1));
+
+                        addMatch({ x0, y0, x1, y1 }, "line-words");
+                        found = true;
+                        break;
+                    }
+
+                    if (combined.length >= target.length + 3) {
+                        break;
+                    }
+                }
+
+                if (found) {
+                    break;
+                }
+            }
+
+            /* word分割の推定に失敗した場合はline全体を候補にする */
+            if (!found) {
+                addMatch(line.bbox, "line");
+            }
+        }
+
+        /*
+         * 同じ名前をwordとline-wordsの両方で拾った場合に、
+         * 重なっている矩形をまとめます。
+         */
+        const finalMatches = [];
+
+        for (const match of matches) {
+            const b = match.bbox;
+            const x0 = b.x0 / scale;
+            const y0 = b.y0 / scale;
+            const x1 = b.x1 / scale;
+            const y1 = b.y1 / scale;
+
+            const duplicate = finalMatches.some((other) => {
+                const ob = other;
+                const ix0 = Math.max(x0, ob.x0);
+                const iy0 = Math.max(y0, ob.y0);
+                const ix1 = Math.min(x1, ob.x1);
+                const iy1 = Math.min(y1, ob.y1);
+
+                if (ix1 <= ix0 || iy1 <= iy0) {
+                    return false;
+                }
+
+                const intersection = (ix1 - ix0) * (iy1 - iy0);
+                const area = Math.min(
+                    (x1 - x0) * (y1 - y0),
+                    (ob.x1 - ob.x0) * (ob.y1 - ob.y0)
+                );
+
+                return area > 0 && intersection / area > 0.45;
+            });
+
+            if (!duplicate) {
+                finalMatches.push({ x0, y0, x1, y1 });
+            }
+        }
+
+        for (const box of finalMatches) {
             paint(
                 {
                     x: box.x0,
@@ -158,7 +321,7 @@ async function run() {
             );
         }
 
-        status(`黒塗り完了：${matches.length}箇所`);
+        status(`黒塗り完了：${finalMatches.length}箇所`);
         saveBtn.disabled = false;
 
     } catch (error) {
