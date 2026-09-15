@@ -109,7 +109,7 @@ function paint(box, text) {
 
     if (text) {
         ctx.fillStyle = "#fff";
-        ctx.font = `bold ${Math.max(12, Math.round(box.h * 0.8))}px sans-serif`;
+        ctx.font = `bold ${Math.max(12, Math.round(box.h * 0.6))}px sans-serif`;
         ctx.textAlign = "center";
         ctx.textBaseline = "middle";
 
