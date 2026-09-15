@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Zetaスクショ黒塗りツール</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="app">
+<h1>Zetaスクショ黒塗りツール</h1>
+<p class="note">画像はブラウザ内で処理します。画像をサーバーへ送信しません。</p>
+<section class="panel">
+<label class="file-button">スクショを選択
+<input id="fileInput" type="file" accept="image/png,image/jpeg,image/webp">
+</label>
+<div class="field"><label for="targetText">隠したい名前</label>
+<input id="targetText" type="text" placeholder="例：にみゅ"></div>
+<div class="field"><label for="overlayText">黒塗り部分に入れる文字</label>
+<input id="overlayText" type="text" value="{{user}}"></div>
+<label class="check"><input id="putTextOnName" type="checkbox" checked> 名前の黒塗りに文字を入れる</label>
+<label class="check"><input id="redactIcon" type="checkbox"> 右端のアイコンも黒塗りする</label>
+<label class="check sub"><input id="putTextOnIcon" type="checkbox"> アイコンにも文字を入れる</label>
+<div class="buttons">
+<button id="processBtn" disabled>黒塗りする</button>
+<button id="downloadBtn" disabled>PNGで保存</button>
+</div>
+<div id="status" class="status"></div>
+<pre id="errorDetails" class="error-details" hidden></pre>
+</section>
+<section class="preview-wrap"><canvas id="canvas"></canvas></section>
+</main>
+<script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"
+onerror="window.tesseractLoadError=true"></script>
+<script src="app.js"></script>
+</body>
+</html>
