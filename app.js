@@ -109,7 +109,7 @@ function paint(box, text) {
 
     if (text) {
         ctx.fillStyle = "#fff";
-        ctx.font = `bold ${Math.max(12, Math.round(box.h * 0.6))}px sans-serif`;
+        ctx.font = `bold ${Math.max(12, Math.round(box.h * 0.4))}px sans-serif`;
         ctx.textAlign = "center";
         ctx.textBaseline = "middle";
 
@@ -137,8 +137,8 @@ function iconBox() {
     const size = Math.round(canvas.width * 0.085);
 
     return {
-        x: Math.round(canvas.width * 0.885),
-        y: Math.round(canvas.height * 0.65),
+        x: Math.round(canvas.width * 0.900),
+        y: Math.round(canvas.height * 0.70),
         w: size,
         h: size
     };
