@@ -243,7 +243,7 @@ async function run() {
                         continue;
                     }
 
-                    if (combined.includes(target)) {
+                    if (fuzzyIncludes(combined, target) ) {
                         const selected = lineWords.slice(i, j + 1);
                         const x0 = Math.min(...selected.map(w => w.bbox.x0));
                         const y0 = Math.min(...selected.map(w => w.bbox.y0));
