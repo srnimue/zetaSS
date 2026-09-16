@@ -1,65 +1,58 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="ja">
 <head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Zetaスクショ黒塗りツール v8</title>
-
-    <link rel="stylesheet" href="style.css">
-
-    <!-- Tesseract.js -->
-    <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
-
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Zetaスクショ黒塗りツール V9</title>
+<link rel="stylesheet" href="style.css?v=9">
+<script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
 </head>
-
 <body>
-    <main>
-        <h1>Zetaスクショ黒塗りツール</h1>
+<main class="container">
+<h1>Zetaスクショ黒塗りツール</h1>
+<p class="description">OCRで名前を自動で黒塗りしたあと、手動で追加の黒塗りができます。</p>
 
-        <p class="note">
-            画像はブラウザ内で処理します。サーバーへアップロードしません。
-        </p>
+<section class="panel">
+<label for="fileInput">スクリーンショット</label>
+<input id="fileInput" type="file" accept="image/*">
 
-        <label>
-            スクリーンショット
-            <input id="fileInput" type="file" accept="image/*">
-        </label>
+<label for="targetText">黒塗りする文字</label>
+<input id="targetText" type="text" placeholder="例：にみゅ" autocomplete="off">
 
-        <label>
-            黒塗りする文字
-            <input id="targetText" type="text" placeholder="例：ゆーざー">
-        </label>
+<label for="overlayText">置き換え文字</label>
+<input id="overlayText" type="text" value="{{user}}" autocomplete="off">
 
-        <label>
-            置き換え文字
-            <input id="overlayText" type="text" value="user">
-        </label>
+<label class="checkbox">
+<input id="overlayName" type="checkbox">
+黒塗り部分に置き換え文字を表示
+</label>
 
-        <label class="checkbox-label">
-            <input id="overlayName" type="checkbox">
-            黒塗り部分に置き換え文字を表示
-        </label>
+<div class="button-row">
+<button id="redactBtn" type="button" disabled>OCRして黒塗り</button>
+<button id="manualBtn" type="button" disabled>手動黒塗り</button>
+<button id="undoBtn" type="button" disabled>直前の黒塗りを取り消す</button>
+</div>
 
+<p class="manual-help" id="manualHelp" hidden>
+手動黒塗り中：画像の上を指やマウスでドラッグして、隠したい範囲を選択してください。何個でも追加できます。
+</p>
+<button id="manualDoneBtn" class="secondary" type="button" hidden>手動黒塗り終了</button>
+</section>
 
-        <div class="buttons">
-            <button id="redactBtn" disabled>
-                黒塗り実行
-            </button>
+<section class="canvas-panel">
+<div id="canvasWrap">
+<canvas id="canvas"></canvas>
+<div id="selection" hidden></div>
+</div>
+</section>
 
-            <button id="saveBtn" disabled>
-                画像を保存
-            </button>
-        </div>
+<section class="actions">
+<button id="saveBtn" type="button" disabled>画像を保存</button>
+</section>
 
-        <p id="status">
-            画像を選択してください。
-        </p>
-
-        <pre id="errorDetails" hidden></pre>
-
-        <canvas id="canvas"></canvas>
-    </main>
-
-    <script src="app.js?v=8"></script>
+<pre id="status" class="status">画像を選択してください。</pre>
+<pre id="errorDetails" class="error" hidden></pre>
+</main>
+<script src="app.js?v=9"></script>
 </body>
 </html>
