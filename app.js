@@ -68,7 +68,7 @@ function paint(box, text = "") {
     const padding = Math.max(4, Math.round(Math.min(box.w, box.h) * 0.12));
     const left = Math.max(0, box.x - padding - 6);
     const top = Math.max(0, box.y - padding);
-    const width = box.w + padding;
+    const width = box.w + padding -2;
     const height = box.h + padding * 2;
 
     ctx.fillStyle = "#000";
