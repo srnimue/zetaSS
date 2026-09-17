@@ -15,7 +15,8 @@ input[type="file"], input[type="text"] { width: 100%; margin-bottom: 14px; }
 input[type="text"] { padding: 10px 12px; border: 1px solid #ccc; border-radius: 8px; font-size: 16px; }
 .checkbox { display: flex; align-items: center; gap: 8px; margin-bottom: 14px; font-weight: 400; }
 .checkbox input { width: 18px; height: 18px; }
-.button-row { display: flex; flex-wrap: wrap; gap: 8px; }
+.button-row { display: flex; flex-wrap: nowrap; justify-content: center; align-items: center; gap: 8px; }
+.button-row button { flex: 0 1 auto; white-space: nowrap; }
 button {
 border: 0; border-radius: 8px; padding: 11px 14px; font-size: 15px;
 font-weight: 600; cursor: pointer; background: #222; color: #fff;
@@ -37,10 +38,6 @@ button.secondary { margin-top: 10px; background: #666; }
 .manual-mode #canvasWrap { cursor: crosshair; }
 @media (max-width: 600px) {
 body { padding: 12px; } h1 { font-size: 21px; } .panel, .canvas-panel { padding: 12px; }
-.button-row button { flex: 1 1 100%; }
-}
-.action-buttons button {
-    flex: 1;
-    font-size: 13px;
-    padding: 10px 4px;
+.button-row { gap: 5px; }
+.button-row button { flex: 1 1 0; min-width: 0; padding: 10px 5px; font-size: 11px; white-space: nowrap; }
 }

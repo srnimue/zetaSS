@@ -306,16 +306,19 @@ function updateSelection(start, current) {
     const y = Math.min(start.y, current.y);
     const w = Math.abs(current.x - start.x);
     const h = Math.abs(current.y - start.y);
-    const rect = canvas.getBoundingClientRect();
+
+    // canvasWrap はズーム時にスクロールするため、
+    // getBoundingClientRect() の座標をそのまま使うと
+    // 選択線だけスクロール量ぶんズレます。
+    // offsetLeft / offsetTop を使って、スクロール領域内の座標に戻します。
+    const displayScaleX = canvas.offsetWidth / canvas.width;
+    const displayScaleY = canvas.offsetHeight / canvas.height;
+
     selection.hidden = false;
-    selection.style.left =
-        `${x * rect.width / canvas.width}px`;
-    selection.style.top =
-        `${y * rect.height / canvas.height}px`;
-    selection.style.width =
-        `${w * rect.width / canvas.width}px`;
-    selection.style.height =
-        `${h * rect.height / canvas.height}px`;
+    selection.style.left = `${canvas.offsetLeft + x * displayScaleX}px`;
+    selection.style.top = `${canvas.offsetTop + y * displayScaleY}px`;
+    selection.style.width = `${w * displayScaleX}px`;
+    selection.style.height = `${h * displayScaleY}px`;
 }
 
 function startManualMode() {
