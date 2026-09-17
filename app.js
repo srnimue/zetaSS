@@ -279,13 +279,10 @@ function stopManualMode() {
 
 function finishStamp(point) {
     if (!dragStart) return;
-    const x = Math.min(start.x, current.x);
-const y = Math.max(0, Math.min(start.y, current.y) - 15);
-const w = Math.abs(current.x - start.x);
-const h = Math.min(
-    canvas.height - y,
-    Math.abs(current.y - start.y) + 30
-);
+    const x = Math.min(dragStart.x, point.x);
+    const y = Math.min(dragStart.y, point.y);
+    const w = Math.abs(point.x - dragStart.x);
+    const h = Math.abs(point.y - dragStart.y);
     selection.hidden = true;
 
     if (w < 4 || h < 4) {
