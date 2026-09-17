@@ -39,3 +39,8 @@ button.secondary { margin-top: 10px; background: #666; }
 body { padding: 12px; } h1 { font-size: 21px; } .panel, .canvas-panel { padding: 12px; }
 .button-row button { flex: 1 1 100%; }
 }
+.action-buttons button {
+    flex: 1;
+    font-size: 13px;
+    padding: 10px 4px;
+}
