@@ -302,15 +302,20 @@ function getCanvasPoint(event) {
 }
 
 function updateSelection(start, current) {
-    const x = Math.min(start.x, current.x), y = Math.min(start.y, current.y);
-    const w = Math.abs(current.x - start.x), h = Math.abs(current.y - start.y);
+    const x = Math.min(start.x, current.x);
+    const y = Math.min(start.y, current.y);
+    const w = Math.abs(current.x - start.x);
+    const h = Math.abs(current.y - start.y);
     const rect = canvas.getBoundingClientRect();
-    const wrapRect = canvasWrap.getBoundingClientRect();
     selection.hidden = false;
-    selection.style.left = `${rect.left - wrapRect.left + x * rect.width / canvas.width}px`;
-    selection.style.top = `${rect.top - wrapRect.top + y * rect.height / canvas.height}px`;
-    selection.style.width = `${w * rect.width / canvas.width}px`;
-    selection.style.height = `${h * rect.height / canvas.height}px`;
+    selection.style.left =
+        `${x * rect.width / canvas.width}px`;
+    selection.style.top =
+        `${y * rect.height / canvas.height}px`;
+    selection.style.width =
+        `${w * rect.width / canvas.width}px`;
+    selection.style.height =
+        `${h * rect.height / canvas.height}px`;
 }
 
 function startManualMode() {
