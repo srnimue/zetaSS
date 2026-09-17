@@ -68,7 +68,7 @@ function paint(box, text = "") {
     const padding = Math.max(4, Math.round(Math.min(box.w, box.h) * 0.12));
     const left = Math.max(0, box.x - padding - 6);
     const top = Math.max(0, box.y - padding);
-    const width = box.w + padding -2;
+    const width = box.w + padding;
     const height = box.h + padding * 2;
 
     ctx.fillStyle = "#000";
@@ -303,12 +303,9 @@ function getCanvasPoint(event) {
 
 function updateSelection(start, current) {
     const x = Math.min(start.x, current.x);
-const y = Math.max(0, Math.min(start.y, current.y) - 15);
-const w = Math.abs(current.x - start.x);
-const h = Math.min(
-    canvas.height - y,
-    Math.abs(current.y - start.y) + 30
-);
+    const y = Math.min(start.y, current.y);
+    const w = Math.abs(current.x - start.x);
+    const h = Math.abs(current.y - start.y);
 
     // canvasWrap はズーム時にスクロールするため、
     // getBoundingClientRect() の座標をそのまま使うと
@@ -349,9 +346,9 @@ function stopManualMode() {
 function finishStamp(point) {
     if (!dragStart) return;
     const x = Math.min(dragStart.x, point.x);
-    const y = Math.min(dragStart.y, point.y)-15;
+    const y = Math.min(dragStart.y, point.y);
     const w = Math.abs(point.x - dragStart.x);
-    const h = Math.abs(point.y - dragStart.y)+30;
+    const h = Math.abs(point.y - dragStart.y);
     selection.hidden = true;
 
     if (w < 4 || h < 4) {
