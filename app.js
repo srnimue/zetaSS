@@ -245,8 +245,13 @@ function getCanvasPoint(event) {
 }
 
 function updateSelection(start, current) {
-    const x = Math.min(start.x, current.x), y = Math.min(start.y, current.y);
-    const w = Math.abs(current.x - start.x), h = Math.abs(current.y - start.y);
+    const x = Math.min(start.x, current.x);
+const y = Math.max(0, Math.min(start.y, current.y) - 15);
+const w = Math.abs(current.x - start.x);
+const h = Math.min(
+    canvas.height - y,
+    Math.abs(current.y - start.y) + 30
+);
     const rect = canvas.getBoundingClientRect();
     selection.hidden = false;
     selection.style.left = `${x * rect.width / canvas.width}px`;
@@ -280,9 +285,9 @@ function stopManualMode() {
 function finishStamp(point) {
     if (!dragStart) return;
     const x = Math.min(dragStart.x, point.x);
-    const y = Math.min(dragStart.y, point.y);
+    const y = Math.min(dragStart.y, point.y)-15;
     const w = Math.abs(point.x - dragStart.x);
-    const h = Math.abs(point.y - dragStart.y);
+    const h = Math.abs(point.y - dragStart.y)+30;
     selection.hidden = true;
 
     if (w < 4 || h < 4) {
