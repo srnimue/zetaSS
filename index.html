@@ -33,11 +33,14 @@
 </label>
 
 <div class="button-row">
-<button id="redactBtn" type="button" disabled>OCRして黒塗り</button>
+<button id="redactBtn" type="button" disabled>自動黒塗り</button>
 <button id="manualBtn" type="button" disabled>手動黒塗り</button>
-<button id="undoBtn" type="button" disabled>直前の黒塗りを取り消す</button>
+<button id="undoBtn" type="button" disabled>ひとつ戻る</button>
 </div>
-
+  </br>
+<pre id="status" class="status">画像を選択してください。</pre>
+<pre id="errorDetails" class="error" hidden></pre>
+  
 <p class="manual-help" id="manualHelp" hidden>
 手動黒塗り中：画像の上を指やマウスでドラッグして、隠したい範囲を選択してください。何個でも追加できます。
 </p>
@@ -60,8 +63,7 @@
 <button id="saveBtn" type="button" disabled>画像を保存</button>
 </section>
 
-<pre id="status" class="status">画像を選択してください。</pre>
-<pre id="errorDetails" class="error" hidden></pre>
+
 </main>
 <script src="app.js?v=12"></script>
 </body>
