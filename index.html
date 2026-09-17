@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Zetaスクショ黒塗りツール V9</title>
+<title>Zetaスクショ黒塗りツール V10</title>
 <link rel="stylesheet" href="style.css?v=9">
 <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
 </head>
@@ -28,9 +28,9 @@
 </label>
 
 <div class="button-row">
-<button id="redactBtn" type="button" disabled>自動黒塗り</button>
+<button id="redactBtn" type="button" disabled>OCRして黒塗り</button>
 <button id="manualBtn" type="button" disabled>手動黒塗り</button>
-<button id="undoBtn" type="button" disabled>ひとつ戻る</button>
+<button id="undoBtn" type="button" disabled>直前の黒塗りを取り消す</button>
 </div>
 
 <p class="manual-help" id="manualHelp" hidden>
@@ -43,6 +43,11 @@
 <div id="canvasWrap">
 <canvas id="canvas"></canvas>
 <div id="selection" hidden></div>
+</div>
+<div class="zoom-controls">
+<button id="zoomOutBtn" type="button">－</button>
+<span id="zoomLabel">100%</span>
+<button id="zoomInBtn" type="button">＋</button>
 </div>
 </section>
 

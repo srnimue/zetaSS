@@ -16,6 +16,9 @@ const canvasWrap = $("canvasWrap");
 const canvas = $("canvas");
 const ctx = canvas.getContext("2d");
 const selection = $("selection");
+const zoomOutBtn = $("zoomOutBtn");
+const zoomInBtn = $("zoomInBtn");
+const zoomLabel = $("zoomLabel");
 
 let sourceImage = null;
 let worker = null;
@@ -25,6 +28,13 @@ let isDragging = false;
 let dragStart = null;
 let ocrBaseCanvas = null;
 const manualStamps = [];
+
+let zoom = 1;
+const MIN_ZOOM = 1;
+const MAX_ZOOM = 4;
+const pointers = new Map();
+let pinchStartDistance = 0;
+let pinchStartZoom = 1;
 
 function status(message, error = null) {
     statusEl.textContent = message;
@@ -58,7 +68,7 @@ function paint(box, text = "") {
     const padding = Math.max(4, Math.round(Math.min(box.w, box.h) * 0.12));
     const left = Math.max(0, box.x - padding - 6);
     const top = Math.max(0, box.y - padding);
-    const width = box.w + padding+2;
+    const width = box.w + padding;
     const height = box.h + padding * 2;
 
     ctx.fillStyle = "#000";
@@ -71,6 +81,51 @@ function paint(box, text = "") {
         ctx.textBaseline = "middle";
         ctx.fillText(text, left + width / 2, top + height / 2);
     }
+}
+
+function getBaseDisplaySize() {
+    if (!sourceImage) return { width: canvas.width, height: canvas.height };
+    const availableWidth = Math.max(1, canvasWrap.clientWidth);
+    const scale = Math.min(1, availableWidth / canvas.width);
+    return { width: canvas.width * scale, height: canvas.height * scale };
+}
+
+function updateZoomUI() {
+    if (!sourceImage) return;
+    const oldRect = canvas.getBoundingClientRect();
+    const wrapRect = canvasWrap.getBoundingClientRect();
+    const centerX = (oldRect.left + oldRect.right) / 2 - wrapRect.left;
+    const centerY = (oldRect.top + oldRect.bottom) / 2 - wrapRect.top;
+    const base = getBaseDisplaySize();
+
+    canvasWrap.classList.toggle("zoomed", zoom > 1.001);
+    canvas.style.width = `${base.width * zoom}px`;
+    canvas.style.height = `${base.height * zoom}px`;
+    zoomLabel.textContent = `${Math.round(zoom * 100)}%`;
+
+    if (zoom > 1.001) {
+        const newRect = canvas.getBoundingClientRect();
+        const newWrapRect = canvasWrap.getBoundingClientRect();
+        const newCenterX = (newRect.left + newRect.right) / 2 - newWrapRect.left;
+        const newCenterY = (newRect.top + newRect.bottom) / 2 - newWrapRect.top;
+        canvasWrap.scrollLeft += newCenterX - centerX;
+        canvasWrap.scrollTop += newCenterY - centerY;
+    } else {
+        canvasWrap.scrollLeft = 0;
+        canvasWrap.scrollTop = 0;
+    }
+}
+
+function setZoom(nextZoom) {
+    if (!sourceImage) return;
+    zoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, nextZoom));
+    updateZoomUI();
+}
+
+function getPointerDistance() {
+    const values = [...pointers.values()];
+    if (values.length < 2) return 0;
+    return Math.hypot(values[0].x - values[1].x, values[0].y - values[1].y);
 }
 
 function updateUndoButton() {
@@ -87,7 +142,9 @@ function redrawFromBase() {
     } else {
         canvas.width = sourceImage.naturalWidth;
         canvas.height = sourceImage.naturalHeight;
+        zoom = 1;
         ctx.drawImage(sourceImage, 0, 0);
+        updateZoomUI();
     }
 
     for (const stamp of manualStamps) {
@@ -245,17 +302,13 @@ function getCanvasPoint(event) {
 }
 
 function updateSelection(start, current) {
-    const x = Math.min(start.x, current.x);
-const y = Math.max(0, Math.min(start.y, current.y) - 15);
-const w = Math.abs(current.x - start.x);
-const h = Math.min(
-    canvas.height - y,
-    Math.abs(current.y - start.y) + 30
-);
+    const x = Math.min(start.x, current.x), y = Math.min(start.y, current.y);
+    const w = Math.abs(current.x - start.x), h = Math.abs(current.y - start.y);
     const rect = canvas.getBoundingClientRect();
+    const wrapRect = canvasWrap.getBoundingClientRect();
     selection.hidden = false;
-    selection.style.left = `${x * rect.width / canvas.width}px`;
-    selection.style.top = `${y * rect.height / canvas.height}px`;
+    selection.style.left = `${rect.left - wrapRect.left + x * rect.width / canvas.width}px`;
+    selection.style.top = `${rect.top - wrapRect.top + y * rect.height / canvas.height}px`;
     selection.style.width = `${w * rect.width / canvas.width}px`;
     selection.style.height = `${h * rect.height / canvas.height}px`;
 }
@@ -285,9 +338,9 @@ function stopManualMode() {
 function finishStamp(point) {
     if (!dragStart) return;
     const x = Math.min(dragStart.x, point.x);
-    const y = Math.min(dragStart.y, point.y)-15;
+    const y = Math.min(dragStart.y, point.y);
     const w = Math.abs(point.x - dragStart.x);
-    const h = Math.abs(point.y - dragStart.y)+30;
+    const h = Math.abs(point.y - dragStart.y);
     selection.hidden = true;
 
     if (w < 4 || h < 4) {
@@ -305,32 +358,72 @@ function finishStamp(point) {
 }
 
 canvasWrap.addEventListener("pointerdown", event => {
-    if (!manualMode || !sourceImage) return;
-    event.preventDefault();
+    if (!sourceImage) return;
+    pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
     canvasWrap.setPointerCapture?.(event.pointerId);
+
+    if (pointers.size >= 2) {
+        isDragging = false;
+        dragStart = null;
+        selection.hidden = true;
+        pinchStartDistance = getPointerDistance();
+        pinchStartZoom = zoom;
+        event.preventDefault();
+        return;
+    }
+
+    if (!manualMode) return;
+    event.preventDefault();
     dragStart = getCanvasPoint(event);
     isDragging = true;
     updateSelection(dragStart, dragStart);
 });
 
 canvasWrap.addEventListener("pointermove", event => {
+    if (pointers.has(event.pointerId)) {
+        pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+    }
+
+    if (pointers.size >= 2) {
+        const distance = getPointerDistance();
+        if (pinchStartDistance > 0 && distance > 0) {
+            setZoom(pinchStartZoom * distance / pinchStartDistance);
+        }
+        event.preventDefault();
+        return;
+    }
+
     if (!manualMode || !isDragging || !dragStart) return;
     event.preventDefault();
     updateSelection(dragStart, getCanvasPoint(event));
 });
 
-canvasWrap.addEventListener("pointerup", event => {
+function endPointer(event) {
+    pointers.delete(event.pointerId);
+
+    if (pointers.size >= 1) {
+        isDragging = false;
+        dragStart = null;
+        selection.hidden = true;
+        return;
+    }
+
     if (!manualMode || !isDragging || !dragStart) return;
     event.preventDefault();
     isDragging = false;
     finishStamp(getCanvasPoint(event));
-});
+}
 
-canvasWrap.addEventListener("pointercancel", () => {
+canvasWrap.addEventListener("pointerup", endPointer);
+canvasWrap.addEventListener("pointercancel", event => {
+    pointers.delete(event.pointerId);
     isDragging = false;
     dragStart = null;
     selection.hidden = true;
 });
+
+zoomOutBtn.addEventListener("click", () => setZoom(zoom - 0.25));
+zoomInBtn.addEventListener("click", () => setZoom(zoom + 0.25));
 
 undoBtn.addEventListener("click", () => {
     if (!manualStamps.length) return;
@@ -354,7 +447,9 @@ fileInput.addEventListener("change", async () => {
         ocrBaseCanvas = null;
         canvas.width = sourceImage.naturalWidth;
         canvas.height = sourceImage.naturalHeight;
+        zoom = 1;
         ctx.drawImage(sourceImage, 0, 0);
+        updateZoomUI();
         redactBtn.disabled = false;
         manualBtn.disabled = false;
         saveBtn.disabled = false;
