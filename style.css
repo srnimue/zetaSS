@@ -36,6 +36,7 @@ button.secondary { margin-top: 10px; background: #666; }
 .status { white-space: pre-wrap; margin: 0 0 10px; padding: 12px; background: #eee; border-radius: 8px; line-height: 1.5; font-family: inherit; }
 .error { white-space: pre-wrap; overflow-x: auto; margin: 0; padding: 12px; background: #ffecec; border-radius: 8px; color: #900; font-size: 12px; }
 .manual-mode #canvasWrap { cursor: crosshair; }
+#stampMode:disabled { opacity: .45; }
 @media (max-width: 600px) {
 body { padding: 12px; } h1 { font-size: 21px; } .panel, .canvas-panel { padding: 12px; }
 .button-row { gap: 5px; }

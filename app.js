@@ -4,6 +4,7 @@ const fileInput = $("fileInput");
 const targetText = $("targetText");
 const overlayText = $("overlayText");
 const overlayName = $("overlayName");
+const stampMode = $("stampMode");
 const redactBtn = $("redactBtn");
 const manualBtn = $("manualBtn");
 const undoBtn = $("undoBtn");
@@ -24,6 +25,7 @@ let sourceImage = null;
 let worker = null;
 let fileName = "redacted.png";
 let manualMode = false;
+let stampTapStart = null;
 let isDragging = false;
 let dragStart = null;
 let ocrBaseCanvas = null;
@@ -130,6 +132,8 @@ function getPointerDistance() {
 
 function updateUndoButton() {
     undoBtn.disabled = manualStamps.length === 0;
+    stampMode.disabled = manualStamps.length === 0;
+    if (manualStamps.length === 0) stampMode.checked = false;
 }
 
 function redrawFromBase() {
@@ -336,11 +340,34 @@ function stopManualMode() {
     document.body.classList.remove("manual-mode");
     isDragging = false;
     dragStart = null;
+    stampTapStart = null;
     selection.hidden = true;
     manualHelp.hidden = true;
     manualDoneBtn.hidden = true;
     manualBtn.disabled = !sourceImage;
     if (sourceImage) status(`手動黒塗り終了：追加した黒塗り ${manualStamps.length}箇所`);
+}
+
+function placeStampAt(point) {
+    if (!manualStamps.length) return;
+
+    const last = manualStamps[manualStamps.length - 1];
+    const stamp = {
+        x: point.x - last.w / 2,
+        y: point.y - last.h / 2,
+        w: last.w,
+        h: last.h,
+        text: overlayName.checked ? overlayText.value : ""
+    };
+
+    stamp.x = Math.max(0, Math.min(canvas.width - stamp.w, stamp.x));
+    stamp.y = Math.max(0, Math.min(canvas.height - stamp.h, stamp.y));
+
+    manualStamps.push(stamp);
+    paint(stamp, stamp.text);
+    updateUndoButton();
+    saveBtn.disabled = false;
+    status(`スタンプを追加しました。\n追加済み：${manualStamps.length}箇所`);
 }
 
 function finishStamp(point) {
@@ -383,6 +410,18 @@ canvasWrap.addEventListener("pointerdown", event => {
     if (!manualMode) return;
     event.preventDefault();
     dragStart = getCanvasPoint(event);
+
+    if (stampMode.checked && manualStamps.length) {
+        stampTapStart = { x: event.clientX, y: event.clientY };
+        isDragging = false;
+        const last = manualStamps[manualStamps.length - 1];
+        updateSelection(
+            { x: dragStart.x - last.w / 2, y: dragStart.y - last.h / 2 },
+            { x: dragStart.x + last.w / 2, y: dragStart.y + last.h / 2 }
+        );
+        return;
+    }
+
     isDragging = true;
     updateSelection(dragStart, dragStart);
 });
@@ -401,8 +440,20 @@ canvasWrap.addEventListener("pointermove", event => {
         return;
     }
 
-    if (!manualMode || !isDragging || !dragStart) return;
+    if (!manualMode) return;
     event.preventDefault();
+
+    if (stampMode.checked && stampTapStart && manualStamps.length) {
+        const point = getCanvasPoint(event);
+        const last = manualStamps[manualStamps.length - 1];
+        updateSelection(
+            { x: point.x - last.w / 2, y: point.y - last.h / 2 },
+            { x: point.x + last.w / 2, y: point.y + last.h / 2 }
+        );
+        return;
+    }
+
+    if (!isDragging || !dragStart) return;
     updateSelection(dragStart, getCanvasPoint(event));
 });
 
@@ -416,8 +467,21 @@ function endPointer(event) {
         return;
     }
 
-    if (!manualMode || !isDragging || !dragStart) return;
+    if (!manualMode) return;
     event.preventDefault();
+
+    if (stampMode.checked && stampTapStart && manualStamps.length) {
+        const moved = Math.hypot(event.clientX - stampTapStart.x, event.clientY - stampTapStart.y);
+        const point = getCanvasPoint(event);
+        stampTapStart = null;
+        selection.hidden = true;
+        dragStart = null;
+        isDragging = false;
+        if (moved < 12) placeStampAt(point);
+        return;
+    }
+
+    if (!isDragging || !dragStart) return;
     isDragging = false;
     finishStamp(getCanvasPoint(event));
 }
@@ -427,7 +491,17 @@ canvasWrap.addEventListener("pointercancel", event => {
     pointers.delete(event.pointerId);
     isDragging = false;
     dragStart = null;
+    stampTapStart = null;
     selection.hidden = true;
+});
+
+stampMode.addEventListener("change", () => {
+    if (!stampMode.checked) {
+        selection.hidden = true;
+        status("スタンプモードをOFFにしました。\n通常の手動黒塗りに戻ります。");
+    } else if (manualStamps.length) {
+        status("スタンプモードONです。\n画像をタップすると、直前の手動黒塗りと同じサイズで黒塗りします。");
+    }
 });
 
 zoomOutBtn.addEventListener("click", () => setZoom(zoom - 0.25));
