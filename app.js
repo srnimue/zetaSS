@@ -479,6 +479,7 @@ async function diagnoseOCR() {
                 const b = word.bbox;
                 const symbols = (word.symbols || []).filter(s => s?.bbox && normalize(s.text));
                 let targetBox = null;
+                let targetSymbols = [];
                 if (symbols.length) {
                     const chars = [];
                     for (const symbol of symbols) {
@@ -486,10 +487,16 @@ async function diagnoseOCR() {
                             chars.push({ ch, bbox: symbol.bbox, raw: symbol.text });
                         }
                     }
-                    const idx = chars.map(c => c.ch).join("").indexOf(target);
+                    const joined = chars.map(c => c.ch).join("");
+                    const idx = joined.indexOf(target);
                     if (idx >= 0) {
                         const selected = chars.slice(idx, idx + target.length);
                         if (selected.length) {
+                            targetSymbols = selected.map(c => ({
+                                text: c.ch,
+                                raw: c.raw,
+                                bbox: c.bbox
+                            }));
                             targetBox = {
                                 x0: Math.min(...selected.map(c => c.bbox.x0)),
                                 y0: Math.min(...selected.map(c => c.bbox.y0)),
@@ -499,7 +506,7 @@ async function diagnoseOCR() {
                         }
                     }
                 }
-                targetHits.push({ mode, text: word.text, bbox: b, targetBox, method: targetBox ? "symbols" : "word-ratio" });
+                targetHits.push({ mode, text: word.text, bbox: b, targetBox, targetSymbols, method: targetBox ? "symbols" : "word-ratio" });
             }
 
             return { mode, words: rows, lines, targetHits, rawText: String(data.text || "") };
@@ -536,6 +543,14 @@ async function diagnoseOCR() {
                     const b = hit.bbox;
                     const t = hit.targetBox || b;
                     lines.push(`  HIT: 「${hit.text}」 / word bbox=(${b.x0},${b.y0})-(${b.x1},${b.y1}) / target bbox=(${t.x0},${t.y0})-(${t.x1},${t.y1}) / ${hit.method}`);
+                    if (hit.targetSymbols?.length) {
+                        for (const [i, symbol] of hit.targetSymbols.entries()) {
+                            const sb = symbol.bbox;
+                            lines.push(`    symbol[${i}] 「${symbol.text}」 raw=「${symbol.raw}」 bbox=(${sb.x0},${sb.y0})-(${sb.x1},${sb.y1})`);
+                        }
+                    } else {
+                        lines.push(`    symbol: 対象文字に対応するsymbol bboxを取得できませんでした`);
+                    }
                 }
             }
             lines.push(`認識テキスト：${result.rawText.replace(/\n/g, " / ")}`);
@@ -549,6 +564,7 @@ async function diagnoseOCR() {
         lines.push(`※ OCR画像サイズ：${ocrCanvas.width} × ${ocrCanvas.height}px / 元画像：${canvas.width} × ${canvas.height}px`);
         lines.push("※ bboxはOCR用の2.5倍画像の座標です。黒塗り時は元画像座標へ1/2.5倍して使用します。");
         lines.push("※ ★はOCRが対象文字列を含む単語として認識したものです。");
+        lines.push("※ symbol[0], symbol[1]…は対象文字を構成する1文字ごとのOCR座標です。");
         lines.push("※ この診断では画像への黒塗りは行いません。");
         ocrDiagnostics.textContent = lines.join("\n");
 
