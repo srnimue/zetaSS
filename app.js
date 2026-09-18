@@ -66,7 +66,7 @@ function normalize(text) {
         .toLowerCase();
 }
 
-const OCR_LEFT_TRIM = 30; // 自動塗りつぶしの左端だけ、ここで右方向へ削る（px）
+const OCR_LEFT_TRIM = 50; // 自動塗りつぶしの左端だけ、ここで右方向へ削る（px
 
 function paintOcr(box, text = "") {
     const padding = Math.max(4, Math.round(Math.min(box.w, box.h) * 0.12));
