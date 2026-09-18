@@ -553,22 +553,19 @@ async function diagnoseOCR() {
         ocrDiagnostics.textContent = lines.join("\n");
 
         // 対象文字を含む単語のbboxだけを画像上に表示する。通常=枠、反転=別の枠。
-        const baseRect = canvas.getBoundingClientRect();
-        const wrapRect = canvasWrap.getBoundingClientRect();
-        const displayScaleX = canvas.offsetWidth / canvas.width;
-        const displayScaleY = canvas.offsetHeight / canvas.height;
+        const transform = getCanvasDisplayTransform();
         function addDebugBoxes(result, borderStyle) {
             for (const hit of result.targetHits) {
                 const b = hit.targetBox || hit.bbox;
-                const x = (b.x0 / scale) * displayScaleX;
-                const y = (b.y0 / scale) * displayScaleY;
-                const w = ((b.x1 - b.x0) / scale) * displayScaleX;
-                const h = ((b.y1 - b.y0) / scale) * displayScaleY;
+                const x = (b.x0 / scale) * transform.scaleX;
+                const y = (b.y0 / scale) * transform.scaleY;
+                const w = ((b.x1 - b.x0) / scale) * transform.scaleX;
+                const h = ((b.y1 - b.y0) / scale) * transform.scaleY;
                 const box = document.createElement("div");
                 box.className = "ocr-debug-box";
                 box.style.borderColor = borderStyle;
-                box.style.left = `${canvas.offsetLeft + x}px`;
-                box.style.top = `${canvas.offsetTop + y}px`;
+                box.style.left = `${transform.left + x}px`;
+                box.style.top = `${transform.top + y}px`;
                 box.style.width = `${w}px`;
                 box.style.height = `${h}px`;
                 const label = document.createElement("span");
@@ -595,24 +592,33 @@ function getCanvasPoint(event) {
     };
 }
 
+// canvas が中央寄せ・ズーム・スクロールされていても、
+// canvasWrap 内の「実際に見えているcanvas」の位置と表示倍率を正しく取得する。
+// offsetLeft / offsetTop は margin:auto やスクロールの影響を受けるため使わない。
+function getCanvasDisplayTransform() {
+    const canvasRect = canvas.getBoundingClientRect();
+    const wrapRect = canvasWrap.getBoundingClientRect();
+    return {
+        left: canvasRect.left - wrapRect.left + canvasWrap.scrollLeft,
+        top: canvasRect.top - wrapRect.top + canvasWrap.scrollTop,
+        scaleX: canvasRect.width / canvas.width,
+        scaleY: canvasRect.height / canvas.height
+    };
+}
+
 function updateSelection(start, current) {
     const x = Math.min(start.x, current.x);
     const y = Math.min(start.y, current.y);
     const w = Math.abs(current.x - start.x);
     const h = Math.abs(current.y - start.y);
 
-    // canvasWrap はズーム時にスクロールするため、
-    // getBoundingClientRect() の座標をそのまま使うと
-    // 選択線だけスクロール量ぶんズレます。
-    // offsetLeft / offsetTop を使って、スクロール領域内の座標に戻します。
-    const displayScaleX = canvas.offsetWidth / canvas.width;
-    const displayScaleY = canvas.offsetHeight / canvas.height;
+    const transform = getCanvasDisplayTransform();
 
     selection.hidden = false;
-    selection.style.left = `${canvas.offsetLeft + x * displayScaleX}px`;
-    selection.style.top = `${canvas.offsetTop + y * displayScaleY}px`;
-    selection.style.width = `${w * displayScaleX}px`;
-    selection.style.height = `${h * displayScaleY}px`;
+    selection.style.left = `${transform.left + x * transform.scaleX}px`;
+    selection.style.top = `${transform.top + y * transform.scaleY}px`;
+    selection.style.width = `${w * transform.scaleX}px`;
+    selection.style.height = `${h * transform.scaleY}px`;
 }
 
 function startManualMode() {
