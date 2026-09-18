@@ -66,10 +66,10 @@ function normalize(text) {
         .toLowerCase();
 }
 
-const OCR_LEFT_TRIM = 50; // 自動塗りつぶしの左端だけ、ここで右方向へ削る（px
+const OCR_LEFT_TRIM = 0; // 対象文字そのものの範囲を使うため、基本は0。必要なら微調整（px）
 
 function paintOcr(box, text = "") {
-    const padding = Math.max(4, Math.round(Math.min(box.w, box.h) * 0.12));
+    const padding = Math.max(3, Math.round(Math.min(box.w, box.h) * 0.08));
     const left = Math.max(0, box.x - padding + OCR_LEFT_TRIM);
     const width = Math.max(1, box.w + padding - OCR_LEFT_TRIM);
     const top = Math.max(0, box.y - padding);
@@ -219,64 +219,148 @@ async function run() {
         ocrCtx.imageSmoothingQuality = "high";
         ocrCtx.drawImage(sourceImage, 0, 0, ocrCanvas.width, ocrCanvas.height);
 
-        status("画像をOCR中…\n小さい文字を読み取りやすくしています。");
+        async function recognizeTarget(inputCanvas) {
+            const result = await ocrWorker.recognize(inputCanvas, { tessedit_pageseg_mode: "11" });
+            const data = result?.data || {};
+            const words = data.words || [];
+            const lines = data.lines || [];
+            const matches = [];
+            const seen = new Set();
 
-        const result = await ocrWorker.recognize(ocrCanvas, { tessedit_pageseg_mode: "11" });
-        const data = result?.data || {};
-        const words = data.words || [];
-        const lines = data.lines || [];
-        const matches = [];
-        const seen = new Set();
-
-        function addMatch(bbox) {
-            if (!bbox) return;
-            const x0 = bbox.x0 / scale, y0 = bbox.y0 / scale;
-            const x1 = bbox.x1 / scale, y1 = bbox.y1 / scale;
-            const w = x1 - x0, h = y1 - y0;
-            if (w < 2 || h < 2 || w > canvas.width * .8) return;
-            const key = [Math.round(x0), Math.round(y0), Math.round(x1), Math.round(y1)].join(":");
-            if (!seen.has(key)) {
-                seen.add(key);
-                matches.push({ x0, y0, x1, y1 });
-            }
-        }
-
-        for (const word of words) {
-            if (normalize(word.text).includes(target)) addMatch(word.bbox);
-        }
-
-        for (const line of lines) {
-            const text = normalize(line.text);
-            if (!text.includes(target)) continue;
-
-            const lineWords = (line.words || []).filter(word => word?.bbox);
-            if (!lineWords.length) {
-                addMatch(line.bbox);
-                continue;
-            }
-
-            let found = false;
-            for (let i = 0; i < lineWords.length && !found; i++) {
-                let combined = "";
-                for (let j = i; j < lineWords.length; j++) {
-                    combined += normalize(lineWords[j].text);
-                    if (!combined) continue;
-
-                    if (combined.includes(target)) {
-                        const selected = lineWords.slice(i, j + 1);
-                        addMatch({
-                            x0: Math.min(...selected.map(w => w.bbox.x0)),
-                            y0: Math.min(...selected.map(w => w.bbox.y0)),
-                            x1: Math.max(...selected.map(w => w.bbox.x1)),
-                            y1: Math.max(...selected.map(w => w.bbox.y1))
-                        });
-                        found = true;
-                        break;
-                    }
-                    if (combined.length >= target.length + 3) break;
+            function addMatch(bbox) {
+                if (!bbox) return;
+                const x0 = bbox.x0 / scale, y0 = bbox.y0 / scale;
+                const x1 = bbox.x1 / scale, y1 = bbox.y1 / scale;
+                const w = x1 - x0, h = y1 - y0;
+                if (w < 2 || h < 2 || w > canvas.width * .8) return;
+                const key = [Math.round(x0), Math.round(y0), Math.round(x1), Math.round(y1)].join(":");
+                if (!seen.has(key)) {
+                    seen.add(key);
+                    matches.push({ x0, y0, x1, y1 });
                 }
             }
-            if (!found) addMatch(line.bbox);
+
+            function targetBoxInWord(word) {
+                const wordText = normalize(word?.text);
+                if (!word?.bbox || !wordText.includes(target)) return null;
+
+                // Tesseractが文字単位のbboxを返してくれる場合は、それを使って
+                // 「対象文字そのもの」だけを囲む。これが今回の本命処理。
+                const symbols = (word.symbols || []).filter(s => s?.bbox && normalize(s.text));
+                if (symbols.length) {
+                    const chars = [];
+                    for (const symbol of symbols) {
+                        for (const ch of normalize(symbol.text)) {
+                            chars.push({ ch, bbox: symbol.bbox });
+                        }
+                    }
+                    const joined = chars.map(c => c.ch).join("");
+                    const index = joined.indexOf(target);
+                    if (index >= 0) {
+                        const selected = chars.slice(index, index + target.length);
+                        if (selected.length) {
+                            return {
+                                x0: Math.min(...selected.map(c => c.bbox.x0)),
+                                y0: Math.min(...selected.map(c => c.bbox.y0)),
+                                x1: Math.max(...selected.map(c => c.bbox.x1)),
+                                y1: Math.max(...selected.map(c => c.bbox.y1))
+                            };
+                        }
+                    }
+                }
+
+                // 文字単位bboxがない環境では、単語bbox内の文字位置から概算する。
+                // 完璧ではないが、行全体を黒塗りするより対象文字にかなり近づけられる。
+                const idx = wordText.indexOf(target);
+                const ratioStart = idx / Math.max(1, wordText.length);
+                const ratioEnd = (idx + target.length) / Math.max(1, wordText.length);
+                const b = word.bbox;
+                return {
+                    x0: b.x0 + (b.x1 - b.x0) * ratioStart,
+                    y0: b.y0,
+                    x1: b.x0 + (b.x1 - b.x0) * ratioEnd,
+                    y1: b.y1
+                };
+            }
+
+            for (const word of words) {
+                const box = targetBoxInWord(word);
+                if (box) addMatch(box);
+            }
+
+            // 複数wordにまたがる対象にも対応。可能なら各wordの文字bboxを使い、
+            // 対象文字列に該当する連続範囲だけをまとめる。
+            for (const line of lines) {
+                const lineWords = (line.words || []).filter(word => word?.bbox);
+                if (!lineWords.length) continue;
+                for (let i = 0; i < lineWords.length; i++) {
+                    let combined = "";
+                    for (let j = i; j < lineWords.length; j++) {
+                        combined += normalize(lineWords[j].text);
+                        if (!combined) continue;
+                        const idx = combined.indexOf(target);
+                        if (idx >= 0) {
+                            const before = combined.slice(0, idx).length;
+                            let remainStart = before;
+                            let remainEnd = before + target.length;
+                            const selected = [];
+                            let offset = 0;
+                            for (const word of lineWords.slice(i, j + 1)) {
+                                const wt = normalize(word.text);
+                                const a = Math.max(remainStart, offset);
+                                const b = Math.min(remainEnd, offset + wt.length);
+                                if (b > a) {
+                                    const localA = a - offset;
+                                    const localB = b - offset;
+                                    const wb = word.bbox;
+                                    selected.push({
+                                        x0: wb.x0 + (wb.x1 - wb.x0) * localA / Math.max(1, wt.length),
+                                        y0: wb.y0,
+                                        x1: wb.x0 + (wb.x1 - wb.x0) * localB / Math.max(1, wt.length),
+                                        y1: wb.y1
+                                    });
+                                }
+                                offset += wt.length;
+                            }
+                            if (selected.length) {
+                                addMatch({
+                                    x0: Math.min(...selected.map(b => b.x0)),
+                                    y0: Math.min(...selected.map(b => b.y0)),
+                                    x1: Math.max(...selected.map(b => b.x1)),
+                                    y1: Math.max(...selected.map(b => b.y1))
+                                });
+                            }
+                            break;
+                        }
+                        if (combined.length >= target.length + 3) break;
+                    }
+                }
+            }
+
+            return matches;
+        }
+
+        status("画像をOCR中…\n小さい文字を読み取りやすくしています。");
+        let matches = await recognizeTarget(ocrCanvas);
+
+        // 通常画像で見つからない場合だけ、ネガポジ反転版でもOCRする。
+        // 元画像は一切変更せず、OCRに渡す画像だけを反転する。
+        if (!matches.length) {
+            status("通常のOCRで見つからなかったため、反転画像でも検索中…");
+            const invertedCanvas = document.createElement("canvas");
+            invertedCanvas.width = ocrCanvas.width;
+            invertedCanvas.height = ocrCanvas.height;
+            const invCtx = invertedCanvas.getContext("2d");
+            invCtx.drawImage(ocrCanvas, 0, 0);
+            const imageData = invCtx.getImageData(0, 0, invertedCanvas.width, invertedCanvas.height);
+            const data = imageData.data;
+            for (let i = 0; i < data.length; i += 4) {
+                data[i] = 255 - data[i];
+                data[i + 1] = 255 - data[i + 1];
+                data[i + 2] = 255 - data[i + 2];
+            }
+            invCtx.putImageData(imageData, 0, 0);
+            matches = await recognizeTarget(invertedCanvas);
         }
 
         const finalMatches = [];
