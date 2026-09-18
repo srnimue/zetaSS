@@ -6,6 +6,7 @@ const overlayText = $("overlayText");
 const overlayName = $("overlayName");
 const stampMode = $("stampMode");
 const redactBtn = $("redactBtn");
+const diagnoseBtn = $("diagnoseBtn");
 const manualBtn = $("manualBtn");
 const undoBtn = $("undoBtn");
 const manualDoneBtn = $("manualDoneBtn");
@@ -17,6 +18,8 @@ const canvasWrap = $("canvasWrap");
 const canvas = $("canvas");
 const ctx = canvas.getContext("2d");
 const selection = $("selection");
+const ocrDebugLayer = $("ocrDebugLayer");
+const ocrDiagnostics = $("ocrDiagnostics");
 const zoomOutBtn = $("zoomOutBtn");
 const zoomInBtn = $("zoomInBtn");
 const zoomLabel = $("zoomLabel");
@@ -198,6 +201,9 @@ async function getWorker() {
 
 async function run() {
     errorEl.hidden = true;
+    ocrDiagnostics.hidden = true;
+    ocrDebugLayer.hidden = true;
+    ocrDebugLayer.innerHTML = "";
 
     try {
         if (!sourceImage) throw new Error("先に画像を選択してください。");
@@ -400,6 +406,136 @@ async function run() {
 
     } catch (error) {
         status("OCRでエラーが発生しました。下のエラー詳細を確認してください。", error);
+    }
+}
+
+
+async function diagnoseOCR() {
+    ocrDiagnostics.hidden = false;
+    ocrDebugLayer.hidden = true;
+    ocrDebugLayer.innerHTML = "";
+
+    try {
+        if (!sourceImage) throw new Error("先に画像を選択してください。");
+        const target = normalize(targetText.value);
+        if (!target) throw new Error("黒塗りする文字を入力してください。");
+
+        const ocrWorker = await getWorker();
+        const scale = 2.5;
+        const ocrCanvas = document.createElement("canvas");
+        ocrCanvas.width = Math.round(canvas.width * scale);
+        ocrCanvas.height = Math.round(canvas.height * scale);
+        const ocrCtx = ocrCanvas.getContext("2d");
+        ocrCtx.imageSmoothingEnabled = true;
+        ocrCtx.imageSmoothingQuality = "high";
+        ocrCtx.drawImage(sourceImage, 0, 0, ocrCanvas.width, ocrCanvas.height);
+
+        async function inspect(inputCanvas, mode) {
+            const result = await ocrWorker.recognize(inputCanvas, { tessedit_pageseg_mode: "11" });
+            const data = result?.data || {};
+            const words = data.words || [];
+            const lines = data.lines || [];
+            const rows = [];
+            const matchedWords = [];
+
+            for (const word of words) {
+                const text = String(word?.text || "");
+                if (!text.trim() || !word?.bbox) continue;
+                const normalized = normalize(text);
+                const symbols = (word.symbols || []).filter(s => s?.bbox && normalize(s.text));
+                const hit = normalized.includes(target);
+                if (hit) matchedWords.push(word);
+                rows.push({ mode, text, normalized, confidence: word.confidence, bbox: word.bbox, symbolCount: symbols.length, hit });
+            }
+
+            const targetHits = [];
+            for (const word of words) {
+                const normalized = normalize(word?.text);
+                if (!word?.bbox || !normalized.includes(target)) continue;
+                const b = word.bbox;
+                targetHits.push({ mode, text: word.text, bbox: b, method: (word.symbols || []).length ? "symbols/word" : "word-ratio" });
+            }
+
+            return { mode, words: rows, lines, targetHits, rawText: String(data.text || "") };
+        }
+
+        status("OCR診断中…\n通常画像を調べています。");
+        const normal = await inspect(ocrCanvas, "通常");
+
+        status("OCR診断中…\n反転画像も調べています。");
+        const invertedCanvas = document.createElement("canvas");
+        invertedCanvas.width = ocrCanvas.width;
+        invertedCanvas.height = ocrCanvas.height;
+        const invCtx = invertedCanvas.getContext("2d");
+        invCtx.drawImage(ocrCanvas, 0, 0);
+        const imageData = invCtx.getImageData(0, 0, invertedCanvas.width, invertedCanvas.height);
+        for (let i = 0; i < imageData.data.length; i += 4) {
+            imageData.data[i] = 255 - imageData.data[i];
+            imageData.data[i + 1] = 255 - imageData.data[i + 1];
+            imageData.data[i + 2] = 255 - imageData.data[i + 2];
+        }
+        invCtx.putImageData(imageData, 0, 0);
+        const inverted = await inspect(invertedCanvas, "反転");
+
+        const lines = [];
+        lines.push(`対象文字：${targetText.value}`);
+        lines.push(`正規化後：${target}`);
+        lines.push("");
+        for (const result of [normal, inverted]) {
+            lines.push(`===== ${result.mode}画像 =====`);
+            lines.push(`認識文字数：${result.words.length}`);
+            lines.push(`対象文字を含む単語：${result.targetHits.length}`);
+            if (result.targetHits.length) {
+                for (const hit of result.targetHits) {
+                    const b = hit.bbox;
+                    lines.push(`  HIT: 「${hit.text}」 / bbox x=${b.x0}, y=${b.y0}, x1=${b.x1}, y1=${b.y1} / ${hit.method}`);
+                }
+            }
+            lines.push(`認識テキスト：${result.rawText.replace(/\n/g, " / ")}`);
+            lines.push("-- 認識単語一覧 --");
+            for (const row of result.words) {
+                const b = row.bbox;
+                lines.push(`${row.hit ? "★" : " "} 「${row.text}」 norm=「${row.normalized}」 conf=${Number(row.confidence ?? 0).toFixed(1)} bbox=(${b.x0},${b.y0})-(${b.x1},${b.y1}) symbols=${row.symbolCount}`);
+            }
+            lines.push("");
+        }
+        lines.push("※ bboxはOCR用に2.5倍拡大した画像の座標です。元画像では1/2.5になります。");
+        lines.push("※ ★はOCRが対象文字列を含む単語として認識したものです。");
+        lines.push("※ この診断では画像への黒塗りは行いません。");
+        ocrDiagnostics.textContent = lines.join("\n");
+
+        // 対象文字を含む単語のbboxだけを画像上に表示する。通常=枠、反転=別の枠。
+        const baseRect = canvas.getBoundingClientRect();
+        const wrapRect = canvasWrap.getBoundingClientRect();
+        const displayScaleX = canvas.offsetWidth / canvas.width;
+        const displayScaleY = canvas.offsetHeight / canvas.height;
+        function addDebugBoxes(result, borderStyle) {
+            for (const hit of result.targetHits) {
+                const b = hit.bbox;
+                const x = (b.x0 / scale) * displayScaleX;
+                const y = (b.y0 / scale) * displayScaleY;
+                const w = ((b.x1 - b.x0) / scale) * displayScaleX;
+                const h = ((b.y1 - b.y0) / scale) * displayScaleY;
+                const box = document.createElement("div");
+                box.className = "ocr-debug-box";
+                box.style.borderColor = borderStyle;
+                box.style.left = `${canvas.offsetLeft + x}px`;
+                box.style.top = `${canvas.offsetTop + y}px`;
+                box.style.width = `${w}px`;
+                box.style.height = `${h}px`;
+                const label = document.createElement("span");
+                label.className = "ocr-debug-label";
+                label.textContent = `${result.mode}: ${hit.text}`;
+                box.appendChild(label);
+                ocrDebugLayer.appendChild(box);
+            }
+        }
+        addDebugBoxes(normal, "#ff3333");
+        addDebugBoxes(inverted, "#3366ff");
+        ocrDebugLayer.hidden = ocrDebugLayer.childElementCount === 0;
+        status(`OCR診断完了。\n通常：${normal.targetHits.length}件 / 反転：${inverted.targetHits.length}件\n下の診断結果を確認してください。`);
+    } catch (error) {
+        status("OCR診断でエラーが発生しました。", error);
     }
 }
 
@@ -629,6 +765,9 @@ fileInput.addEventListener("change", async () => {
 
     try {
         stopManualMode();
+        ocrDiagnostics.hidden = true;
+        ocrDebugLayer.hidden = true;
+        ocrDebugLayer.innerHTML = "";
         sourceImage = await loadImage(file);
         fileName = (file.name.replace(/\.[^.]+$/, "") || "redacted") + "_redacted.png";
         manualStamps.length = 0;
@@ -639,6 +778,7 @@ fileInput.addEventListener("change", async () => {
         ctx.drawImage(sourceImage, 0, 0);
         updateZoomUI();
         redactBtn.disabled = false;
+        diagnoseBtn.disabled = false;
         manualBtn.disabled = false;
         saveBtn.disabled = false;
         updateUndoButton();
@@ -649,6 +789,7 @@ fileInput.addEventListener("change", async () => {
 });
 
 redactBtn.addEventListener("click", run);
+diagnoseBtn.addEventListener("click", diagnoseOCR);
 
 function canvasToBlob() {
     return new Promise((resolve, reject) => {
