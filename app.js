@@ -66,12 +66,32 @@ function normalize(text) {
         .toLowerCase();
 }
 
-function paint(box, text = "") {
+function paintOcr(box, text = "") {
     const padding = Math.max(4, Math.round(Math.min(box.w, box.h) * 0.12));
-    const left = Math.max(0, box.x - padding - 6);
+    const left = Math.max(0, box.x - padding - 2);
     const top = Math.max(0, box.y - padding);
     const width = box.w + padding;
     const height = box.h + padding * 2;
+
+    ctx.fillStyle = "#000";
+    ctx.fillRect(left, top, width, height);
+
+    if (text) {
+        ctx.fillStyle = "#fff";
+        ctx.font = `bold ${Math.max(12, Math.round(box.h * 0.8))}px sans-serif`;
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.fillText(text, left + width / 2, top + height / 2);
+    }
+}
+
+function paintManual(box, text = "") {
+    const padding = Math.max(4, Math.round(Math.min(box.w, box.h) * 0.12));
+    const verticalPadding = padding + 2;
+    const left = Math.max(0, box.x - padding - 6);
+    const top = Math.max(0, box.y - verticalPadding);
+    const width = box.w + padding;
+    const height = box.h + verticalPadding * 2;
 
     ctx.fillStyle = "#000";
     ctx.fillRect(left, top, width, height);
@@ -152,7 +172,7 @@ function redrawFromBase() {
     }
 
     for (const stamp of manualStamps) {
-        paint(stamp, stamp.text);
+        paintManual(stamp, stamp.text);
     }
     updateUndoButton();
 }
@@ -276,7 +296,7 @@ async function run() {
         }
 
         for (const box of finalMatches) {
-            paint({
+            paintOcr({
                 x: box.x0, y: box.y0,
                 w: box.x1 - box.x0,
                 h: box.y1 - box.y0
@@ -364,7 +384,7 @@ function placeStampAt(point) {
     stamp.y = Math.max(0, Math.min(canvas.height - stamp.h, stamp.y));
 
     manualStamps.push(stamp);
-    paint(stamp, stamp.text);
+    paintManual(stamp, stamp.text);
     updateUndoButton();
     saveBtn.disabled = false;
     status(`スタンプを追加しました。\n追加済み：${manualStamps.length}箇所`);
@@ -385,7 +405,7 @@ function finishStamp(point) {
 
     const stamp = { x, y, w, h, text: overlayName.checked ? overlayText.value : "" };
     manualStamps.push(stamp);
-    paint(stamp, stamp.text);
+    paintManual(stamp, stamp.text);
     updateUndoButton();
     saveBtn.disabled = false;
     status(`手動黒塗りを追加しました。\n追加済み：${manualStamps.length}箇所`);
