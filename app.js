@@ -66,11 +66,13 @@ function normalize(text) {
         .toLowerCase();
 }
 
+const OCR_LEFT_TRIM = 10; // 自動塗りつぶしの左端だけ、ここで右方向へ削る（px）
+
 function paintOcr(box, text = "") {
     const padding = Math.max(4, Math.round(Math.min(box.w, box.h) * 0.12));
-    const left = Math.max(0, box.x - padding );
+    const left = Math.max(0, box.x - padding + OCR_LEFT_TRIM);
+    const width = Math.max(1, box.w + padding - OCR_LEFT_TRIM);
     const top = Math.max(0, box.y - padding);
-    const width = box.w + padding;
     const height = box.h + padding * 2;
 
     ctx.fillStyle = "#000";
