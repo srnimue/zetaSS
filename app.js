@@ -1,5 +1,8 @@
 const $ = id => document.getElementById(id);
 
+// 診断モードを不要になったら false にするだけで非表示にできます。
+const ENABLE_DIAGNOSTIC = true;
+
 const fileInput = $("fileInput");
 const targetText = $("targetText");
 const overlayText = $("overlayText");
@@ -24,8 +27,15 @@ const zoomOutBtn = $("zoomOutBtn");
 const zoomInBtn = $("zoomInBtn");
 const zoomLabel = $("zoomLabel");
 
+if (!ENABLE_DIAGNOSTIC) {
+    diagnoseBtn.hidden = true;
+    ocrDiagnostics.hidden = true;
+    ocrDebugLayer.hidden = true;
+}
+
 let sourceImage = null;
 let worker = null;
+let workerLang = null;
 let fileName = "redacted.png";
 let manualMode = false;
 let stampTapStart = null;
@@ -69,12 +79,14 @@ function normalize(text) {
         .toLowerCase();
 }
 
-const OCR_LEFT_TRIM = 0; // 対象文字そのものの範囲を使うため、基本は0。必要なら微調整（px）
+const OCR_LEFT_TRIM = 0; // OCR対象範囲の左端微調整。+で左側を削る。
+const OCR_EDGE_PAD = 2; // 対象文字の字形がbboxから少しはみ出す場合の左右余白(px)
 
 function paintOcr(box, text = "") {
     const padding = Math.max(3, Math.round(Math.min(box.w, box.h) * 0.08));
-    const left = Math.max(0, box.x - padding + OCR_LEFT_TRIM);
-    const width = Math.max(1, box.w + padding - OCR_LEFT_TRIM);
+    const left = Math.max(0, box.x - OCR_EDGE_PAD - padding + OCR_LEFT_TRIM);
+    const right = Math.min(canvas.width, box.x + box.w + OCR_EDGE_PAD + padding);
+    const width = Math.max(1, right - left);
     const top = Math.max(0, box.y - padding);
     const height = box.h + padding * 2;
 
@@ -182,21 +194,33 @@ function redrawFromBase() {
     updateUndoButton();
 }
 
-async function getWorker() {
-    if (worker) return worker;
+async function getWorker(preferredLang = "jpn") {
     if (!window.Tesseract) {
         throw new Error("Tesseract.jsを読み込めませんでした。インターネット接続や外部スクリプト制限を確認してください。");
     }
 
-    status("OCRエンジンを準備中…\n初回は少し時間がかかります。");
-    worker = await Tesseract.createWorker("jpn+eng", 1, {
+    if (worker && workerLang === preferredLang) return worker;
+
+    if (worker) {
+        await worker.terminate();
+        worker = null;
+        workerLang = null;
+    }
+
+    status(`${preferredLang === "jpn" ? "日本語" : "英語"}OCRエンジンを準備中…\n初回は少し時間がかかります。`);
+    worker = await Tesseract.createWorker(preferredLang, 1, {
         logger: message => {
             if (message?.progress != null) {
-                status(`OCR準備中… ${message.status || ""} ${Math.round(message.progress * 100)}%`);
+                status(`${preferredLang === "jpn" ? "日本語" : "英語"}OCR準備中… ${message.status || ""} ${Math.round(message.progress * 100)}%`);
             }
         }
     });
+    workerLang = preferredLang;
     return worker;
+}
+
+function getOcrLanguage(target) {
+    return /[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff]/u.test(target) ? "jpn" : "eng";
 }
 
 async function run() {
@@ -215,7 +239,7 @@ async function run() {
         ocrBaseCanvas = null;
         redrawFromBase();
 
-        const ocrWorker = await getWorker();
+        const ocrWorker = await getWorker(getOcrLanguage(target));
         const scale = 2.5;
         const ocrCanvas = document.createElement("canvas");
         ocrCanvas.width = Math.round(canvas.width * scale);
@@ -420,7 +444,7 @@ async function diagnoseOCR() {
         const target = normalize(targetText.value);
         if (!target) throw new Error("黒塗りする文字を入力してください。");
 
-        const ocrWorker = await getWorker();
+        const ocrWorker = await getWorker(getOcrLanguage(target));
         const scale = 2.5;
         const ocrCanvas = document.createElement("canvas");
         ocrCanvas.width = Math.round(canvas.width * scale);
@@ -453,7 +477,29 @@ async function diagnoseOCR() {
                 const normalized = normalize(word?.text);
                 if (!word?.bbox || !normalized.includes(target)) continue;
                 const b = word.bbox;
-                targetHits.push({ mode, text: word.text, bbox: b, method: (word.symbols || []).length ? "symbols/word" : "word-ratio" });
+                const symbols = (word.symbols || []).filter(s => s?.bbox && normalize(s.text));
+                let targetBox = null;
+                if (symbols.length) {
+                    const chars = [];
+                    for (const symbol of symbols) {
+                        for (const ch of normalize(symbol.text)) {
+                            chars.push({ ch, bbox: symbol.bbox, raw: symbol.text });
+                        }
+                    }
+                    const idx = chars.map(c => c.ch).join("").indexOf(target);
+                    if (idx >= 0) {
+                        const selected = chars.slice(idx, idx + target.length);
+                        if (selected.length) {
+                            targetBox = {
+                                x0: Math.min(...selected.map(c => c.bbox.x0)),
+                                y0: Math.min(...selected.map(c => c.bbox.y0)),
+                                x1: Math.max(...selected.map(c => c.bbox.x1)),
+                                y1: Math.max(...selected.map(c => c.bbox.y1))
+                            };
+                        }
+                    }
+                }
+                targetHits.push({ mode, text: word.text, bbox: b, targetBox, method: targetBox ? "symbols" : "word-ratio" });
             }
 
             return { mode, words: rows, lines, targetHits, rawText: String(data.text || "") };
@@ -488,7 +534,8 @@ async function diagnoseOCR() {
             if (result.targetHits.length) {
                 for (const hit of result.targetHits) {
                     const b = hit.bbox;
-                    lines.push(`  HIT: 「${hit.text}」 / bbox x=${b.x0}, y=${b.y0}, x1=${b.x1}, y1=${b.y1} / ${hit.method}`);
+                    const t = hit.targetBox || b;
+                    lines.push(`  HIT: 「${hit.text}」 / word bbox=(${b.x0},${b.y0})-(${b.x1},${b.y1}) / target bbox=(${t.x0},${t.y0})-(${t.x1},${t.y1}) / ${hit.method}`);
                 }
             }
             lines.push(`認識テキスト：${result.rawText.replace(/\n/g, " / ")}`);
@@ -499,7 +546,8 @@ async function diagnoseOCR() {
             }
             lines.push("");
         }
-        lines.push("※ bboxはOCR用に2.5倍拡大した画像の座標です。元画像では1/2.5になります。");
+        lines.push(`※ OCR画像サイズ：${ocrCanvas.width} × ${ocrCanvas.height}px / 元画像：${canvas.width} × ${canvas.height}px`);
+        lines.push("※ bboxはOCR用の2.5倍画像の座標です。黒塗り時は元画像座標へ1/2.5倍して使用します。");
         lines.push("※ ★はOCRが対象文字列を含む単語として認識したものです。");
         lines.push("※ この診断では画像への黒塗りは行いません。");
         ocrDiagnostics.textContent = lines.join("\n");
@@ -511,7 +559,7 @@ async function diagnoseOCR() {
         const displayScaleY = canvas.offsetHeight / canvas.height;
         function addDebugBoxes(result, borderStyle) {
             for (const hit of result.targetHits) {
-                const b = hit.bbox;
+                const b = hit.targetBox || hit.bbox;
                 const x = (b.x0 / scale) * displayScaleX;
                 const y = (b.y0 / scale) * displayScaleY;
                 const w = ((b.x1 - b.x0) / scale) * displayScaleX;
@@ -778,7 +826,7 @@ fileInput.addEventListener("change", async () => {
         ctx.drawImage(sourceImage, 0, 0);
         updateZoomUI();
         redactBtn.disabled = false;
-        diagnoseBtn.disabled = false;
+        diagnoseBtn.disabled = !ENABLE_DIAGNOSTIC;
         manualBtn.disabled = false;
         saveBtn.disabled = false;
         updateUndoButton();
@@ -789,7 +837,7 @@ fileInput.addEventListener("change", async () => {
 });
 
 redactBtn.addEventListener("click", run);
-diagnoseBtn.addEventListener("click", diagnoseOCR);
+if (ENABLE_DIAGNOSTIC) diagnoseBtn.addEventListener("click", diagnoseOCR);
 
 function canvasToBlob() {
     return new Promise((resolve, reject) => {
