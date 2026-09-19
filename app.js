@@ -1,7 +1,7 @@
 const $ = id => document.getElementById(id);
 
 // 診断モードを不要になったら false にするだけで非表示にできます。
-const ENABLE_DIAGNOSTIC = true;
+const ENABLE_DIAGNOSTIC = false;
 
 const fileInput = $("fileInput");
 const targetText = $("targetText");
