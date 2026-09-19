@@ -81,6 +81,7 @@ function normalize(text) {
 
 const OCR_LEFT_TRIM = 0; // OCR対象範囲の左端微調整。+で左側を削る。
 const OCR_EDGE_PAD = 2; // 対象文字の字形がbboxから少しはみ出す場合の左右余白(px)
+const OCR_SYMBOL_MARGIN = 2; // symbol bboxを元画像換算で上下左右に広げる余白(px)
 
 function paintOcr(box, text = "") {
     const padding = Math.max(3, Math.round(Math.min(box.w, box.h) * 0.08));
@@ -289,11 +290,22 @@ async function run() {
                     if (index >= 0) {
                         const selected = chars.slice(index, index + target.length);
                         if (selected.length) {
+                            // symbolごとに少しだけ外側へ広げてから結合する。
+                            // Tesseractのbboxが字形の内側に寄るケースでも、
+                            // 文字の一部が見えるのを防ぐ。marginは元画像px基準なので、
+                            // OCR用2.5倍画像の座標では scale を掛ける。
+                            const margin = OCR_SYMBOL_MARGIN * scale;
+                            const expanded = selected.map(c => ({
+                                x0: c.bbox.x0 - margin,
+                                y0: c.bbox.y0 - margin,
+                                x1: c.bbox.x1 + margin,
+                                y1: c.bbox.y1 + margin
+                            }));
                             return {
-                                x0: Math.min(...selected.map(c => c.bbox.x0)),
-                                y0: Math.min(...selected.map(c => c.bbox.y0)),
-                                x1: Math.max(...selected.map(c => c.bbox.x1)),
-                                y1: Math.max(...selected.map(c => c.bbox.y1))
+                                x0: Math.min(...expanded.map(c => c.x0)),
+                                y0: Math.min(...expanded.map(c => c.y0)),
+                                x1: Math.max(...expanded.map(c => c.x1)),
+                                y1: Math.max(...expanded.map(c => c.y1))
                             };
                         }
                     }
