@@ -80,107 +80,7 @@ function normalize(text) {
 }
 
 const OCR_LEFT_TRIM = 0; // OCR対象範囲の左端微調整。+で左側を削る。
-const OCR_EDGE_PAD = 2; // 最終黒塗りの基本余白(px)
-const OCR_SYMBOL_MARGIN = 0; // symbol bboxの固定余白。V21では画像の字形から自動補正するため0を基本値にする。
-const OCR_ADAPTIVE_SCAN_RATIO = 0.28; // symbolの高さに対して外側の字形を探す範囲
-const OCR_ADAPTIVE_THRESHOLD = 42; // 背景と字形を区別する明度差
-
-function luminance(r, g, b) {
-    return 0.2126 * r + 0.7152 * g + 0.0722 * b;
-}
-
-// OCRのsymbol bboxだけでは、文字の端が少し内側になることがあります。
-// 元画像の実ピクセルを確認し、bboxの外側に実際の字形が続いている場合だけ
-// その方向へ自動で広げます。これにより、固定px補正で「合う画像」と
-// 「隠しすぎる画像」が入れ替わる問題を避けます。
-function adaptiveSymbolBox(sourceBox) {
-    const x0 = Math.max(0, Math.floor(sourceBox.x0));
-    const y0 = Math.max(0, Math.floor(sourceBox.y0));
-    const x1 = Math.min(canvas.width, Math.ceil(sourceBox.x1));
-    const y1 = Math.min(canvas.height, Math.ceil(sourceBox.y1));
-    const w = Math.max(1, x1 - x0);
-    const h = Math.max(1, y1 - y0);
-    const scan = Math.max(4, Math.round(h * OCR_ADAPTIVE_SCAN_RATIO));
-
-    const sx0 = Math.max(0, x0 - scan);
-    const sy0 = Math.max(0, y0 - Math.max(2, Math.round(h * 0.08)));
-    const sx1 = Math.min(canvas.width, x1 + scan);
-    const sy1 = Math.min(canvas.height, y1 + Math.max(2, Math.round(h * 0.08)));
-    const image = ctx.getImageData(sx0, sy0, sx1 - sx0, sy1 - sy0);
-    const data = image.data;
-
-    // bboxの外周付近から背景色を推定。文字そのものの影響を減らすため、
-    // 外側の数ピクセルをサンプルします。
-    const bgSamples = [];
-    const addSample = (px, py) => {
-        if (px < 0 || py < 0 || px >= image.width || py >= image.height) return;
-        const i = (py * image.width + px) * 4;
-        bgSamples.push(luminance(data[i], data[i + 1], data[i + 2]));
-    };
-    const outer = Math.min(4, Math.max(1, Math.floor(scan / 3)));
-    for (let px = 0; px < image.width; px += Math.max(1, Math.floor(image.width / 24))) {
-        addSample(px, outer);
-        addSample(px, image.height - 1 - outer);
-    }
-    for (let py = 0; py < image.height; py += Math.max(1, Math.floor(image.height / 24))) {
-        addSample(outer, py);
-        addSample(image.width - 1 - outer, py);
-    }
-    if (!bgSamples.length) return sourceBox;
-    bgSamples.sort((a, b) => a - b);
-    const bg = bgSamples[Math.floor(bgSamples.length / 2)];
-
-    const isInk = (px, py) => {
-        if (px < sx0 || py < sy0 || px >= sx1 || py >= sy1) return false;
-        const i = ((py - sy0) * image.width + (px - sx0)) * 4;
-        const l = luminance(data[i], data[i + 1], data[i + 2]);
-        return Math.abs(l - bg) >= OCR_ADAPTIVE_THRESHOLD;
-    };
-
-    let left = x0;
-    let right = x1;
-    let top = y0;
-    let bottom = y1;
-
-    // 左右は文字の高さを基準に必要な分だけ探索。
-    for (let x = x0 - 1; x >= Math.max(0, x0 - scan); x--) {
-        let hit = false;
-        for (let y = y0; y < y1; y += Math.max(1, Math.floor(h / 18))) {
-            if (isInk(x, y)) { hit = true; break; }
-        }
-        if (hit) left = x;
-        else if (x < x0 - 2 && left !== x0) break;
-    }
-    for (let x = x1; x < Math.min(canvas.width, x1 + scan); x++) {
-        let hit = false;
-        for (let y = y0; y < y1; y += Math.max(1, Math.floor(h / 18))) {
-            if (isInk(x, y)) { hit = true; break; }
-        }
-        if (hit) right = x + 1;
-        else if (x > x1 + 1 && right !== x1) break;
-    }
-
-    // 上下も同じ考え方。ただし縦方向は誤検出しやすいので控えめに。
-    const vScan = Math.max(2, Math.round(h * 0.14));
-    for (let y = y0 - 1; y >= Math.max(0, y0 - vScan); y--) {
-        let hit = false;
-        for (let x = x0; x < x1; x += Math.max(1, Math.floor(w / 18))) {
-            if (isInk(x, y)) { hit = true; break; }
-        }
-        if (hit) top = y;
-        else if (y < y0 - 1 && top !== y0) break;
-    }
-    for (let y = y1; y < Math.min(canvas.height, y1 + vScan); y++) {
-        let hit = false;
-        for (let x = x0; x < x1; x += Math.max(1, Math.floor(w / 18))) {
-            if (isInk(x, y)) { hit = true; break; }
-        }
-        if (hit) bottom = y + 1;
-        else if (y > y1 + 1 && bottom !== y1) break;
-    }
-
-    return { x0: left, y0: top, x1: right, y1: bottom };
-}
+const OCR_EDGE_PAD = 2; // 対象文字の字形がbboxから少しはみ出す場合の左右余白(px)
 
 function paintOcr(box, text = "") {
     const padding = Math.max(3, Math.round(Math.min(box.w, box.h) * 0.08));
@@ -389,30 +289,11 @@ async function run() {
                     if (index >= 0) {
                         const selected = chars.slice(index, index + target.length);
                         if (selected.length) {
-                            // symbolごとに少しだけ外側へ広げてから結合する。
-                            // Tesseractのbboxが字形の内側に寄るケースでも、
-                            // 文字の一部が見えるのを防ぐ。marginは元画像px基準なので、
-                            // OCR用2.5倍画像の座標では scale を掛ける。
-                            const margin = OCR_SYMBOL_MARGIN * scale;
-                            const expanded = selected.map(c => {
-                                const adaptive = adaptiveSymbolBox({
-                                    x0: c.bbox.x0 / scale,
-                                    y0: c.bbox.y0 / scale,
-                                    x1: c.bbox.x1 / scale,
-                                    y1: c.bbox.y1 / scale
-                                });
-                                return {
-                                    x0: adaptive.x0 * scale - margin,
-                                    y0: adaptive.y0 * scale - margin,
-                                    x1: adaptive.x1 * scale + margin,
-                                    y1: adaptive.y1 * scale + margin
-                                };
-                            });
                             return {
-                                x0: Math.min(...expanded.map(c => c.x0)),
-                                y0: Math.min(...expanded.map(c => c.y0)),
-                                x1: Math.max(...expanded.map(c => c.x1)),
-                                y1: Math.max(...expanded.map(c => c.y1))
+                                x0: Math.min(...selected.map(c => c.bbox.x0)),
+                                y0: Math.min(...selected.map(c => c.bbox.y0)),
+                                x1: Math.max(...selected.map(c => c.bbox.x1)),
+                                y1: Math.max(...selected.map(c => c.bbox.y1))
                             };
                         }
                     }
