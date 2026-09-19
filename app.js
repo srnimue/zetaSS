@@ -79,7 +79,7 @@ function normalize(text) {
         .toLowerCase();
 }
 
-const OCR_LEFT_TRIM = 0; // OCR対象範囲の左端微調整。+で左側を削る。
+const OCR_LEFT_TRIM = -10; // OCR対象範囲の左端微調整。+で左側を削る。
 const OCR_EDGE_PAD = 2; // 対象文字の字形がbboxから少しはみ出す場合の左右余白(px)
 const OCR_SYMBOL_MARGIN = 2; // symbol bboxを元画像換算で上下左右に広げる余白(px)
 
