@@ -879,7 +879,7 @@ async function saveImage() {
         const file = new File([blob], fileName, { type: "image/png" });
 
         if (navigator.share && navigator.canShare && navigator.canShare({ files: [file] })) {
-            await navigator.share({ files: [file], title: "Zetaスクショ" });
+            await navigator.share({ files: [file], title: "スクショ" });
             status("画像を共有シートに渡しました。\n必要な場所へ保存してください。");
             return;
         }
