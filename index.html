@@ -3,14 +3,14 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>スクショ黒塗りツール V19</title>
-<link rel="stylesheet" href="style.css?v=19">
+<title>Zetaスクショ黒塗りツール V22 OCR実験版</title>
+<link rel="stylesheet" href="style.css?v=22">
 <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
 </head>
 <body>
 <main class="container">
-<h1>スクショ黒塗りツール</h1>
-<p class="description">名前を自動で黒塗りにします。取りこぼしは手動で追加の黒塗りできます。</p>
+<h1>Zetaスクショ黒塗りツール</h1>
+<p class="description">OCRで名前を自動で黒塗りしたあと、手動で追加の黒塗りができます。</p>
 
 <section class="panel">
 <label for="fileInput">スクリーンショット</label>
@@ -33,10 +33,11 @@
 </label>
 
 <div class="button-row">
-<button id="redactBtn" type="button" disabled>自動黒塗り</button>
+<button id="redactBtn" type="button" disabled>OCRして黒塗り</button>
 <button id="diagnoseBtn" type="button" disabled>OCR診断</button>
+<button id="ocrExperimentBtn" type="button" disabled>OCR実験</button>
 <button id="manualBtn" type="button" disabled>手動黒塗り</button>
-<button id="undoBtn" type="button" disabled>ひとつ戻る</button>
+<button id="undoBtn" type="button" disabled>直前の黒塗りを取り消す</button>
 </div>
 
 <p class="manual-help" id="manualHelp" hidden>
@@ -65,7 +66,8 @@
 <pre id="status" class="status">画像を選択してください。</pre>
 <pre id="errorDetails" class="error" hidden></pre>
 <pre id="ocrDiagnostics" class="diagnostics" hidden></pre>
+<pre id="ocrExperimentResults" class="diagnostics" hidden></pre>
 </main>
-<script src="app.js?v=19"></script>
+<script src="app.js?v=22"></script>
 </body>
 </html>

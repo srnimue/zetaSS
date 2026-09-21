@@ -1,7 +1,7 @@
 const $ = id => document.getElementById(id);
 
 // 診断モードを不要になったら false にするだけで非表示にできます。
-const ENABLE_DIAGNOSTIC = false;
+const ENABLE_DIAGNOSTIC = true;
 
 const fileInput = $("fileInput");
 const targetText = $("targetText");
@@ -10,6 +10,8 @@ const overlayName = $("overlayName");
 const stampMode = $("stampMode");
 const redactBtn = $("redactBtn");
 const diagnoseBtn = $("diagnoseBtn");
+const ocrExperimentBtn = $("ocrExperimentBtn");
+const ocrExperimentResults = $("ocrExperimentResults");
 const manualBtn = $("manualBtn");
 const undoBtn = $("undoBtn");
 const manualDoneBtn = $("manualDoneBtn");
@@ -228,6 +230,8 @@ async function run() {
     ocrDiagnostics.hidden = true;
     ocrDebugLayer.hidden = true;
     ocrDebugLayer.innerHTML = "";
+    ocrExperimentResults.hidden = true;
+    ocrExperimentResults.textContent = "";
 
     try {
         if (!sourceImage) throw new Error("先に画像を選択してください。");
@@ -600,6 +604,124 @@ async function diagnoseOCR() {
     }
 }
 
+
+async function runOCRExperiment() {
+    ocrExperimentResults.hidden = false;
+    ocrDiagnostics.hidden = true;
+    ocrDebugLayer.hidden = true;
+    ocrDebugLayer.innerHTML = "";
+
+    try {
+        if (!sourceImage) throw new Error("先に画像を選択してください。");
+        const target = normalize(targetText.value);
+        if (!target) throw new Error("認識したい文字を入力してください。");
+
+        const ocrWorker = await getWorker(getOcrLanguage(target));
+        const scale = 2.5;
+        const base = document.createElement("canvas");
+        base.width = Math.round(sourceImage.naturalWidth * scale);
+        base.height = Math.round(sourceImage.naturalHeight * scale);
+        const baseCtx = base.getContext("2d", { willReadFrequently: true });
+        baseCtx.imageSmoothingEnabled = true;
+        baseCtx.imageSmoothingQuality = "high";
+        baseCtx.drawImage(sourceImage, 0, 0, base.width, base.height);
+
+        function makeProcessed(type) {
+            if (type === "normal") return base;
+            const c = document.createElement("canvas");
+            c.width = base.width;
+            c.height = base.height;
+            const cx = c.getContext("2d", { willReadFrequently: true });
+            cx.drawImage(base, 0, 0);
+            const img = cx.getImageData(0, 0, c.width, c.height);
+            const d = img.data;
+            for (let i = 0; i < d.length; i += 4) {
+                const lum = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
+                let v;
+                if (type === "gray") {
+                    // 軽いコントラスト強調。極端な二値化はまだしない。
+                    v = Math.max(0, Math.min(255, (lum - 128) * 1.35 + 128));
+                } else if (type === "binary180") {
+                    v = lum < 180 ? 0 : 255;
+                } else if (type === "binary220") {
+                    v = lum < 220 ? 0 : 255;
+                } else if (type === "inverted") {
+                    v = 255 - lum;
+                } else {
+                    v = lum;
+                }
+                d[i] = d[i + 1] = d[i + 2] = v;
+            }
+            cx.putImageData(img, 0, 0);
+            return c;
+        }
+
+        const modes = [
+            ["通常", "normal"],
+            ["グレースケール＋コントラスト", "gray"],
+            ["二値化 180", "binary180"],
+            ["二値化 220", "binary220"],
+            ["反転", "inverted"]
+        ];
+
+        const results = [];
+        for (const [label, type] of modes) {
+            status(`OCR実験中…\n${label} を解析しています。`);
+            const input = makeProcessed(type);
+            const result = await ocrWorker.recognize(input, { tessedit_pageseg_mode: "11" });
+            const data = result?.data || {};
+            const words = data.words || [];
+            const normalizedText = normalize(data.text || "");
+            const hits = words.filter(w => normalize(w?.text).includes(target));
+            const rawHit = normalizedText.includes(target);
+            const confidences = hits.map(w => Number(w.confidence)).filter(Number.isFinite);
+            const avgConfidence = confidences.length ? confidences.reduce((a,b) => a+b, 0) / confidences.length : null;
+            results.push({ label, type, rawText: String(data.text || ""), wordHits: hits, rawHit, avgConfidence });
+        }
+
+        const lines = [];
+        lines.push(`OCR実験：対象文字「${targetText.value}」`);
+        lines.push(`正規化後：「${target}」`);
+        lines.push(`5種類の前処理をそれぞれ独立してOCRしました。`);
+        lines.push("");
+        for (const r of results) {
+            const hitText = r.wordHits.length ? "HIT" : (r.rawHit ? "テキスト内HIT" : "なし");
+            const conf = r.avgConfidence == null ? "-" : r.avgConfidence.toFixed(1);
+            lines.push(`===== ${r.label} =====`);
+            lines.push(`判定：${hitText}`);
+            lines.push(`対象文字を含む単語：${r.wordHits.length}件`);
+            lines.push(`平均confidence：${conf}`);
+            if (r.wordHits.length) {
+                for (const w of r.wordHits.slice(0, 10)) {
+                    lines.push(`  「${w.text}」 confidence=${Number(w.confidence ?? 0).toFixed(1)}`);
+                }
+            }
+            const compact = r.rawText.replace(/\s+/g, " ").trim();
+            lines.push(`認識テキスト：${compact || "（なし）"}`);
+            lines.push("");
+        }
+
+        const hitModes = results.filter(r => r.wordHits.length || r.rawHit);
+        lines.push("===== 比較結果 =====");
+        lines.push(`対象文字を認識できた前処理：${hitModes.length} / ${results.length}`);
+        if (hitModes.length) {
+            lines.push(`認識できたもの：${hitModes.map(r => r.label).join(" / ")}`);
+            const exactWordHits = results.filter(r => r.wordHits.length);
+            lines.push(`単語としてHITしたもの：${exactWordHits.length} / ${results.length}`);
+        } else {
+            lines.push("今回はどの前処理でも対象文字を認識できませんでした。");
+        }
+        lines.push("");
+        lines.push("※この実験では画像への黒塗りは一切行いません。");
+        lines.push("※「テキスト内HIT」はOCR全文には対象文字が含まれるものの、単語bboxとして取得できなかった状態です。");
+        lines.push("※confidenceはTesseract自身の認識信頼度で、正解率そのものではありません。");
+        ocrExperimentResults.textContent = lines.join("\n");
+        status(`OCR実験完了。\n対象文字を認識できた前処理：${hitModes.length} / ${results.length}`);
+    } catch (error) {
+        status("OCR実験でエラーが発生しました。", error);
+    }
+}
+
 function getCanvasPoint(event) {
     const rect = canvas.getBoundingClientRect();
     return {
@@ -837,6 +959,7 @@ fileInput.addEventListener("change", async () => {
         stopManualMode();
         ocrDiagnostics.hidden = true;
         ocrDebugLayer.hidden = true;
+        ocrExperimentResults.hidden = true;
         ocrDebugLayer.innerHTML = "";
         sourceImage = await loadImage(file);
         fileName = (file.name.replace(/\.[^.]+$/, "") || "redacted") + "_redacted.png";
@@ -849,6 +972,7 @@ fileInput.addEventListener("change", async () => {
         updateZoomUI();
         redactBtn.disabled = false;
         diagnoseBtn.disabled = !ENABLE_DIAGNOSTIC;
+        ocrExperimentBtn.disabled = !ENABLE_DIAGNOSTIC;
         manualBtn.disabled = false;
         saveBtn.disabled = false;
         updateUndoButton();
@@ -860,6 +984,7 @@ fileInput.addEventListener("change", async () => {
 
 redactBtn.addEventListener("click", run);
 if (ENABLE_DIAGNOSTIC) diagnoseBtn.addEventListener("click", diagnoseOCR);
+if (ENABLE_DIAGNOSTIC) ocrExperimentBtn.addEventListener("click", runOCRExperiment);
 
 function canvasToBlob() {
     return new Promise((resolve, reject) => {
@@ -879,7 +1004,7 @@ async function saveImage() {
         const file = new File([blob], fileName, { type: "image/png" });
 
         if (navigator.share && navigator.canShare && navigator.canShare({ files: [file] })) {
-            await navigator.share({ files: [file], title: "スクショ" });
+            await navigator.share({ files: [file], title: "Zetaスクショ" });
             status("画像を共有シートに渡しました。\n必要な場所へ保存してください。");
             return;
         }
