@@ -378,13 +378,15 @@ async function refineNearCandidates(worker,results,ocrCanvas,target,scale){
     if(!crop)continue;
     const variants=[];
     const enlarged=document.createElement('canvas');
-    enlarged.width=crop.canvas.width*2;
-    enlarged.height=crop.canvas.height*2;
+    // 候補文字をさらに大きくして再OCR。小さい日本語文字の形状を拾いやすくする。
+    const REFINE_SCALE = 4;
+    enlarged.width=crop.canvas.width*REFINE_SCALE;
+    enlarged.height=crop.canvas.height*REFINE_SCALE;
     const eg=enlarged.getContext('2d');
     eg.imageSmoothingEnabled=true;
     eg.imageSmoothingQuality='high';
     eg.drawImage(crop.canvas,0,0,enlarged.width,enlarged.height);
-    variants.push({name:'候補再OCR・拡大',canvas:enlarged});
+    variants.push({name:`候補再OCR・${REFINE_SCALE}倍`,canvas:enlarged});
     variants.push({name:'候補再OCR・グレー',canvas:makeGrayContrast(enlarged)});
     variants.push({name:'候補再OCR・反転',canvas:makeInverted(enlarged)});
     let found=false;
