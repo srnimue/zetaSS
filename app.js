@@ -378,6 +378,38 @@ async function run() {
             return boxes;
         }
 
+
+        function findTargetDetailsInCharStream(stream, targetValue) {
+            if (!stream.length || !targetValue) return [];
+            const joined = stream.map(c => c.ch).join("");
+            const results = [];
+            let from = 0;
+            while (from <= joined.length - targetValue.length) {
+                const index = joined.indexOf(targetValue, from);
+                if (index < 0) break;
+                const selected = stream.slice(index, index + targetValue.length);
+                if (selected.length === targetValue.length) {
+                    results.push({
+                        selected,
+                        bbox: {
+                            x0: Math.min(...selected.map(c => c.bbox.x0)),
+                            y0: Math.min(...selected.map(c => c.bbox.y0)),
+                            x1: Math.max(...selected.map(c => c.bbox.x1)),
+                            y1: Math.max(...selected.map(c => c.bbox.y1))
+                        }
+                    });
+                }
+                from = index + Math.max(1, targetValue.length);
+            }
+            return results;
+        }
+
+        function lineTargetDetails(line) {
+            const lineText = normalize(line?.text);
+            if (!lineText.includes(target)) return [];
+            return findTargetDetailsInCharStream(buildLineCharStream(line), target);
+        }
+
         function lineTargetBoxes(line) {
             const lineText = normalize(line?.text);
             if (!lineText.includes(target)) return [];
@@ -550,121 +582,183 @@ async function diagnoseOCR() {
         ocrCtx.imageSmoothingQuality = "high";
         ocrCtx.drawImage(sourceImage, 0, 0, ocrCanvas.width, ocrCanvas.height);
 
+        const diagnosticModes = [
+            { name: "通常", make: src => src },
+            {
+                name: "グレースケール＋コントラスト",
+                make: src => {
+                    const out = document.createElement("canvas");
+                    out.width = src.width;
+                    out.height = src.height;
+                    const c = out.getContext("2d");
+                    c.drawImage(src, 0, 0);
+                    const imageData = c.getImageData(0, 0, out.width, out.height);
+                    const d = imageData.data;
+                    const contrast = 1.35;
+                    for (let i = 0; i < d.length; i += 4) {
+                        const gray = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
+                        const v = Math.max(0, Math.min(255, (gray - 128) * contrast + 128));
+                        d[i] = d[i + 1] = d[i + 2] = v;
+                    }
+                    c.putImageData(imageData, 0, 0);
+                    return out;
+                }
+            },
+            { name: "二値化180", make: src => makeThresholdCanvas(src, 180) },
+            { name: "二値化220", make: src => makeThresholdCanvas(src, 220) },
+            { name: "反転", make: src => makeInvertCanvas(src) }
+        ];
+
         async function inspect(inputCanvas, mode) {
             const result = await ocrWorker.recognize(inputCanvas, { tessedit_pageseg_mode: "11" });
             const data = result?.data || {};
             const words = data.words || [];
             const lines = data.lines || [];
             const rows = [];
-            const matchedWords = [];
+            const targetHits = [];
+            const seen = new Set();
 
             for (const word of words) {
                 const text = String(word?.text || "");
                 if (!text.trim() || !word?.bbox) continue;
                 const normalized = normalize(text);
                 const symbols = (word.symbols || []).filter(s => s?.bbox && normalize(s.text));
-                const hit = normalized.includes(target);
-                if (hit) matchedWords.push(word);
-                rows.push({ mode, text, normalized, confidence: word.confidence, bbox: word.bbox, symbolCount: symbols.length, hit });
+                rows.push({
+                    text,
+                    normalized,
+                    confidence: word.confidence,
+                    bbox: word.bbox,
+                    symbolCount: symbols.length,
+                    hit: normalized.includes(target)
+                });
             }
 
-            const targetHits = [];
-            for (const word of words) {
-                const normalized = normalize(word?.text);
-                if (!word?.bbox || !normalized.includes(target)) continue;
-                const b = word.bbox;
-                const symbols = (word.symbols || []).filter(s => s?.bbox && normalize(s.text));
-                let targetBox = null;
-                let targetSymbols = [];
-                if (symbols.length) {
-                    const chars = [];
-                    for (const symbol of symbols) {
-                        for (const ch of normalize(symbol.text)) {
-                            chars.push({ ch, bbox: symbol.bbox, raw: symbol.text });
-                        }
-                    }
-                    const joined = chars.map(c => c.ch).join("");
-                    const idx = joined.indexOf(target);
-                    if (idx >= 0) {
-                        const selected = chars.slice(idx, idx + target.length);
-                        if (selected.length) {
-                            targetSymbols = selected.map(c => ({
-                                text: c.ch,
-                                raw: c.raw,
-                                bbox: c.bbox
-                            }));
-                            targetBox = {
-                                x0: Math.min(...selected.map(c => c.bbox.x0)),
-                                y0: Math.min(...selected.map(c => c.bbox.y0)),
-                                x1: Math.max(...selected.map(c => c.bbox.x1)),
-                                y1: Math.max(...selected.map(c => c.bbox.y1))
-                            };
-                        }
+            // 実際のV24検索と同じく、word単位だけでなくline全体を連結して検索する。
+            for (const line of lines) {
+                const details = lineTargetDetails(line);
+                for (const detail of details) {
+                    const key = [
+                        Math.round(detail.bbox.x0),
+                        Math.round(detail.bbox.y0),
+                        Math.round(detail.bbox.x1),
+                        Math.round(detail.bbox.y1)
+                    ].join(":");
+                    if (seen.has(key)) continue;
+                    seen.add(key);
+
+                    targetHits.push({
+                        mode,
+                        text: line.text,
+                        bbox: line.bbox,
+                        targetBox: detail.bbox,
+                        targetSymbols: detail.selected.map(c => ({
+                            text: c.ch,
+                            raw: c.raw || c.ch,
+                            bbox: c.bbox
+                        })),
+                        method: "line-symbols"
+                    });
+                }
+            }
+
+            // line情報が取得できない場合だけword単位を保険として確認。
+            if (!targetHits.length) {
+                for (const word of words) {
+                    const boxes = wordTargetBoxes(word);
+                    for (const b of boxes) {
+                        targetHits.push({
+                            mode,
+                            text: word.text,
+                            bbox: word.bbox,
+                            targetBox: b,
+                            targetSymbols: [],
+                            method: "word"
+                        });
                     }
                 }
-                targetHits.push({ mode, text: word.text, bbox: b, targetBox, targetSymbols, method: targetBox ? "symbols" : "word-ratio" });
             }
 
-            return { mode, words: rows, lines, targetHits, rawText: String(data.text || "") };
+            return {
+                mode,
+                words: rows,
+                rawText: String(data.text || ""),
+                targetHits,
+                confidence: words.length
+                    ? words.reduce((sum, word) => sum + Number(word.confidence || 0), 0) / words.length
+                    : null
+            };
         }
 
-        status("OCR診断中…\n通常画像を調べています。");
-        const normal = await inspect(ocrCanvas, "通常");
-
-        status("OCR診断中…\n反転画像も調べています。");
-        const invertedCanvas = document.createElement("canvas");
-        invertedCanvas.width = ocrCanvas.width;
-        invertedCanvas.height = ocrCanvas.height;
-        const invCtx = invertedCanvas.getContext("2d");
-        invCtx.drawImage(ocrCanvas, 0, 0);
-        const imageData = invCtx.getImageData(0, 0, invertedCanvas.width, invertedCanvas.height);
-        for (let i = 0; i < imageData.data.length; i += 4) {
-            imageData.data[i] = 255 - imageData.data[i];
-            imageData.data[i + 1] = 255 - imageData.data[i + 1];
-            imageData.data[i + 2] = 255 - imageData.data[i + 2];
+        const results = [];
+        for (const mode of diagnosticModes) {
+            status(`OCR診断中…\n${mode.name}を調べています。`);
+            results.push(await inspect(mode.make(ocrCanvas), mode.name));
         }
-        invCtx.putImageData(imageData, 0, 0);
-        const inverted = await inspect(invertedCanvas, "反転");
+
+        const allHits = results.flatMap(r => r.targetHits);
+        const uniqueHits = [];
+        for (const hit of allHits) {
+            const b = hit.targetBox || hit.bbox;
+            const duplicate = uniqueHits.some(other => {
+                const o = other.targetBox || other.bbox;
+                const ix0 = Math.max(b.x0, o.x0);
+                const iy0 = Math.max(b.y0, o.y0);
+                const ix1 = Math.min(b.x1, o.x1);
+                const iy1 = Math.min(b.y1, o.y1);
+                if (ix1 <= ix0 || iy1 <= iy0) return false;
+                const intersection = (ix1 - ix0) * (iy1 - iy0);
+                const area = Math.min(
+                    (b.x1 - b.x0) * (b.y1 - b.y0),
+                    (o.x1 - o.x0) * (o.y1 - o.y0)
+                );
+                return area > 0 && intersection / area > .45;
+            });
+            if (!duplicate) uniqueHits.push(hit);
+        }
 
         const lines = [];
         lines.push(`対象文字：${targetText.value}`);
         lines.push(`正規化後：${target}`);
+        lines.push(`検索方式：word + line連結 + symbol座標`);
+        lines.push(`全前処理での検出候補：${uniqueHits.length}件`);
         lines.push("");
-        for (const result of [normal, inverted]) {
-            lines.push(`===== ${result.mode}画像 =====`);
+
+        for (const result of results) {
+            lines.push(`===== ${result.mode} =====`);
             lines.push(`認識文字数：${result.words.length}`);
-            lines.push(`対象文字を含む単語：${result.targetHits.length}`);
+            lines.push(`対象文字を実際の検索方式で検出：${result.targetHits.length}件`);
+            lines.push(`平均confidence：${result.confidence == null ? "-" : result.confidence.toFixed(1)}`);
+
             if (result.targetHits.length) {
                 for (const hit of result.targetHits) {
-                    const b = hit.bbox;
-                    const t = hit.targetBox || b;
-                    lines.push(`  HIT: 「${hit.text}」 / word bbox=(${b.x0},${b.y0})-(${b.x1},${b.y1}) / target bbox=(${t.x0},${t.y0})-(${t.x1},${t.y1}) / ${hit.method}`);
+                    const b = hit.targetBox || hit.bbox;
+                    lines.push(`  ★ HIT：行「${String(hit.text).trim()}」`);
+                    lines.push(`    target bbox=(${b.x0},${b.y0})-(${b.x1},${b.y1}) / method=${hit.method}`);
                     if (hit.targetSymbols?.length) {
+                        lines.push(`    symbol：${hit.targetSymbols.map(s => `「${s.text}」`).join(" + ")}`);
                         for (const [i, symbol] of hit.targetSymbols.entries()) {
                             const sb = symbol.bbox;
-                            lines.push(`    symbol[${i}] 「${symbol.text}」 raw=「${symbol.raw}」 bbox=(${sb.x0},${sb.y0})-(${sb.x1},${sb.y1})`);
+                            lines.push(`      symbol[${i}] 「${symbol.text}」 bbox=(${sb.x0},${sb.y0})-(${sb.x1},${sb.y1})`);
                         }
-                    } else {
-                        lines.push(`    symbol: 対象文字に対応するsymbol bboxを取得できませんでした`);
                     }
                 }
             }
+
             lines.push(`認識テキスト：${result.rawText.replace(/\n/g, " / ")}`);
-            lines.push("-- 認識単語一覧 --");
-            for (const row of result.words) {
-                const b = row.bbox;
-                lines.push(`${row.hit ? "★" : " "} 「${row.text}」 norm=「${row.normalized}」 conf=${Number(row.confidence ?? 0).toFixed(1)} bbox=(${b.x0},${b.y0})-(${b.x1},${b.y1}) symbols=${row.symbolCount}`);
-            }
             lines.push("");
         }
-        lines.push(`※ OCR画像サイズ：${ocrCanvas.width} × ${ocrCanvas.height}px / 元画像：${canvas.width} × ${canvas.height}px`);
-        lines.push("※ bboxはOCR用の2.5倍画像の座標です。黒塗り時は元画像座標へ1/2.5倍して使用します。");
-        lines.push("※ ★はOCRが対象文字列を含む単語として認識したものです。");
-        lines.push("※ symbol[0], symbol[1]…は対象文字を構成する1文字ごとのOCR座標です。");
+
+        lines.push("===== 総合 =====");
+        lines.push(`検出した前処理：${results.filter(r => r.targetHits.length).map(r => r.mode).join(" / ") || "なし"}`);
+        lines.push(`重複統合後の候補：${uniqueHits.length}件`);
+        lines.push("");
+        lines.push("※ ★ HITは「単語そのもの」ではなく、OCRのline内のsymbolを連結して対象文字を探した結果です。");
+        lines.push("※ 「ゆー」「ざー」のように単語が分割されていても、line内で連続していれば検出します。");
+        lines.push("※ symbol[0]以降は対象文字を構成する1文字ごとのOCR座標です。");
         lines.push("※ この診断では画像への黒塗りは行いません。");
+
         ocrDiagnostics.textContent = lines.join("\n");
 
-        // 対象文字を含む単語のbboxだけを画像上に表示する。通常=枠、反転=別の枠。
         const transform = getCanvasDisplayTransform();
         function addDebugBoxes(result, borderStyle) {
             for (const hit of result.targetHits) {
@@ -682,15 +776,17 @@ async function diagnoseOCR() {
                 box.style.height = `${h}px`;
                 const label = document.createElement("span");
                 label.className = "ocr-debug-label";
-                label.textContent = `${result.mode}: ${hit.text}`;
+                label.textContent = `${result.mode}: ${target}`;
                 box.appendChild(label);
                 ocrDebugLayer.appendChild(box);
             }
         }
-        addDebugBoxes(normal, "#ff3333");
-        addDebugBoxes(inverted, "#3366ff");
+
+        const debugColors = ["#ff3333", "#00aa55", "#aa55ff", "#ff8800", "#3366ff"];
+        results.forEach((result, i) => addDebugBoxes(result, debugColors[i]));
         ocrDebugLayer.hidden = ocrDebugLayer.childElementCount === 0;
-        status(`OCR診断完了。\n通常：${normal.targetHits.length}件 / 反転：${inverted.targetHits.length}件\n下の診断結果を確認してください。`);
+
+        status(`OCR診断完了。\n${uniqueHits.length}件の候補を検出しました。\n実際の検索ロジックと同じ方式で診断しています。`);
     } catch (error) {
         status("OCR診断でエラーが発生しました。", error);
     }
