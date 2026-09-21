@@ -223,6 +223,20 @@ function getOcrLanguage(target) {
     return /[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff]/u.test(target) ? "jpn" : "eng";
 }
 
+function makeGrayContrast(src){
+  const c=document.createElement('canvas'); c.width=src.width; c.height=src.height;
+  const ctx=c.getContext('2d'); ctx.drawImage(src,0,0);
+  const img=ctx.getImageData(0,0,c.width,c.height),d=img.data;
+  for(let i=0;i<d.length;i+=4){const g=Math.max(0,Math.min(255,((0.299*d[i]+0.587*d[i+1]+0.114*d[i+2])-128)*1.35+128));d[i]=d[i+1]=d[i+2]=g;}
+  ctx.putImageData(img,0,0); return c;
+}
+function makeInverted(src){
+  const c=document.createElement('canvas'); c.width=src.width; c.height=src.height;
+  const ctx=c.getContext('2d'); ctx.drawImage(src,0,0);
+  const img=ctx.getImageData(0,0,c.width,c.height),d=img.data;
+  for(let i=0;i<d.length;i+=4){d[i]=255-d[i];d[i+1]=255-d[i+1];d[i+2]=255-d[i+2];}
+  ctx.putImageData(img,0,0); return c;
+}
 function makeOcrVariants(baseCanvas) {
     const variants = [{name:"通常",canvas:baseCanvas}];
     const gray=document.createElement("canvas"); gray.width=baseCanvas.width; gray.height=baseCanvas.height;
@@ -240,19 +254,133 @@ function extractLineUnits(line){const units=[];for(const word of (line?.words||[
 function findTargetInUnits(units,target){const text=units.map(u=>u.ch).join(""),hits=[];let from=0;while(from<=text.length-target.length){const i=text.indexOf(target,from);if(i<0)break;const selected=units.slice(i,i+target.length);if(selected.length===target.length)hits.push({targetBox:{x0:Math.min(...selected.map(u=>u.bbox.x0)),y0:Math.min(...selected.map(u=>u.bbox.y0)),x1:Math.max(...selected.map(u=>u.bbox.x1)),y1:Math.max(...selected.map(u=>u.bbox.y1))},symbols:selected});from=i+Math.max(1,target.length);}return hits;}
 
 function editDistance(a,b){const A=[...a],B=[...b],d=Array.from({length:A.length+1},()=>Array(B.length+1).fill(0));for(let i=0;i<=A.length;i++)d[i][0]=i;for(let j=0;j<=B.length;j++)d[0][j]=j;for(let i=1;i<=A.length;i++)for(let j=1;j<=B.length;j++)d[i][j]=Math.min(d[i-1][j]+1,d[i][j-1]+1,d[i-1][j-1]+(A[i-1]===B[j-1]?0:1));return d[A.length][B.length];}
-function findNearCandidates(lines,target,limit=5){const out=[];for(const line of lines){const u=extractLineUnits(line),t=u.map(x=>x.ch).join("");for(let i=0;i<t.length;i++)for(let len=Math.max(1,[...target].length-1);len<=[...target].length+1&&i+len<=t.length;len++){const c=t.slice(i,i+len),sim=1-editDistance(target,c)/Math.max([...target].length,[...c].length);if(sim>=.75)out.push({candidate:c,similarity:sim,lineText:t});}}out.sort((a,b)=>b.similarity-a.similarity);const seen=new Set(),r=[];for(const x of out){const k=x.candidate+"\t"+x.lineText;if(!seen.has(k)){seen.add(k);r.push(x);}if(r.length>=limit)break;}return r;}
+function findNearCandidates(lines,target,limit=5){
+  const out=[];
+  const tlen=[...target].length;
+  for(const line of lines){
+    const u=extractLineUnits(line), t=u.map(x=>x.ch).join("");
+    for(let i=0;i<t.length;i++){
+      for(let len=Math.max(1,tlen-1);len<=tlen+1&&i+len<=t.length;len++){
+        const c=t.slice(i,i+len);
+        const sim=1-editDistance(target,c)/Math.max(tlen,[...c].length);
+        if(sim>=.75){
+          const selected=u.slice(i,i+len);
+          if(selected.length) out.push({candidate:c,similarity:sim,lineText:t,units:selected});
+        }
+      }
+    }
+  }
+  out.sort((a,b)=>b.similarity-a.similarity);
+  const seen=new Set(),r=[];
+  for(const x of out){
+    const b=x.units[0].bbox,e=x.units[x.units.length-1].bbox;
+    const k=x.candidate+'\t'+x.lineText+'\t'+Math.round(b.x0)+'\t'+Math.round(e.x1);
+    if(!seen.has(k)){seen.add(k);r.push(x);}
+    if(r.length>=limit)break;
+  }
+  return r;
+}
+
+function makeCandidateCrop(ocrCanvas, candidate, scale){
+  const xs=candidate.units.flatMap(u=>[u.bbox.x0,u.bbox.x1]);
+  const ys=candidate.units.flatMap(u=>[u.bbox.y0,u.bbox.y1]);
+  if(!xs.length||!ys.length)return null;
+  const padX=Math.max(18,Math.round((Math.max(...xs)-Math.min(...xs))*0.35));
+  const padY=Math.max(18,Math.round((Math.max(...ys)-Math.min(...ys))*0.35));
+  const x0=Math.max(0,Math.floor(Math.min(...xs)-padX));
+  const y0=Math.max(0,Math.floor(Math.min(...ys)-padY));
+  const x1=Math.min(ocrCanvas.width,Math.ceil(Math.max(...xs)+padX));
+  const y1=Math.min(ocrCanvas.height,Math.ceil(Math.max(...ys)+padY));
+  if(x1<=x0||y1<=y0)return null;
+  const c=document.createElement('canvas');
+  c.width=Math.max(1,x1-x0); c.height=Math.max(1,y1-y0);
+  c.getContext('2d').drawImage(ocrCanvas,x0,y0,c.width,c.height,x0,y0,c.width,c.height);
+  return {canvas:c,x0,y0};
+}
 
 async function recognizeVariant(worker,inputCanvas,target,mode,scale){const result=await worker.recognize(inputCanvas,{tessedit_pageseg_mode:"11"});const data=result?.data||{},lines=data.lines||[],matches=[];for(const line of lines){const units=extractLineUnits(line),hits=findTargetInUnits(units,target),lineText=units.map(u=>u.ch).join("");for(const hit of hits)matches.push({x0:hit.targetBox.x0/scale,y0:hit.targetBox.y0/scale,x1:hit.targetBox.x1/scale,y1:hit.targetBox.y1/scale,mode,lineText,symbols:hit.symbols});}return {mode,lines,words:data.words||[],rawText:String(data.text||""),matches,near:findNearCandidates(lines,target)};}
 
 function buildOcrCanvas(){const scale=2.5,oc=document.createElement("canvas");oc.width=Math.round(canvas.width*scale);oc.height=Math.round(canvas.height*scale);const c=oc.getContext("2d");c.imageSmoothingEnabled=true;c.imageSmoothingQuality="high";c.drawImage(sourceImage,0,0,oc.width,oc.height);return {canvas:oc,scale};}
 
-async function collectOcrResults(worker,target){const {canvas:oc,scale}=buildOcrCanvas(),variants=makeOcrVariants(oc),results=[];for(const v of variants)results.push(await recognizeVariant(worker,v.canvas,target,v.name,scale));return {results,scale,ocrCanvas:oc};}
+async function collectOcrResults(worker,target){
+  const {canvas:oc,scale}=buildOcrCanvas(),variants=makeOcrVariants(oc),results=[];
+  for(const v of variants) results.push(await recognizeVariant(worker,v.canvas,target,v.name,scale));
+  return {results,scale,ocrCanvas:oc};
+}
+
+async function refineNearCandidates(worker,results,ocrCanvas,target,scale){
+  const refined=[];
+  const candidates=results.flatMap(r=>r.near.map(c=>({...c,mode:r.mode}))).filter(c=>c.similarity<0.999);
+  const seen=new Set();
+  for(const cand of candidates){
+    const b=cand.units?.[0]?.bbox, e=cand.units?.[cand.units.length-1]?.bbox;
+    if(!b||!e)continue;
+    const key=cand.lineText+'|'+Math.round(b.x0)+'|'+Math.round(e.x1);
+    if(seen.has(key))continue; seen.add(key);
+    const crop=makeCandidateCrop(ocrCanvas,cand,scale);
+    if(!crop)continue;
+    const variants=[
+      {name:'候補再OCR・グレー',canvas:makeGrayContrast(crop.canvas)},
+      {name:'候補再OCR・反転',canvas:makeInverted(crop.canvas)}
+    ];
+    for(const v of variants){
+      for(const psm of ['7','8']){
+        const rr=await worker.recognize(v.canvas,{tessedit_pageseg_mode:psm});
+        const text=normalize(String(rr?.data?.text||''));
+        if(text.includes(target)){
+          refined.push({candidate:cand.candidate,similarity:cand.similarity,lineText:cand.lineText,mode:cand.mode,refinedText:text,box:{x0:crop.x0/scale,y0:crop.y0/scale,x1:(crop.x0+crop.canvas.width)/scale,y1:(crop.y0+crop.canvas.height)/scale}});
+          break;
+        }
+      }
+    }
+  }
+  return refined;
+}
 
 function mergeMatches(results){const all=results.flatMap(r=>r.matches),final=[];for(const box of all){const dup=final.some(o=>{const ix0=Math.max(box.x0,o.x0),iy0=Math.max(box.y0,o.y0),ix1=Math.min(box.x1,o.x1),iy1=Math.min(box.y1,o.y1);if(ix1<=ix0||iy1<=iy0)return false;const inter=(ix1-ix0)*(iy1-iy0),area=Math.min((box.x1-box.x0)*(box.y1-box.y0),(o.x1-o.x0)*(o.y1-o.y0));return area>0&&inter/area>.45;});if(!dup)final.push(box);}return final;}
 
 async function run(){errorEl.hidden=true;ocrDiagnostics.hidden=true;ocrDebugLayer.hidden=true;ocrDebugLayer.innerHTML="";try{if(!sourceImage)throw new Error("先に画像を選択してください。");const target=normalize(targetText.value);if(!target)throw new Error("黒塗りする文字を入力してください。");manualStamps.length=0;ocrBaseCanvas=null;redrawFromBase();const worker=await getWorker(getOcrLanguage(target));status("OCR中…\n複数の前処理で検索しています。");const {results}=await collectOcrResults(worker,target);const matches=mergeMatches(results);for(const b of matches)paintOcr({x:b.x0,y:b.y0,w:b.x1-b.x0,h:b.y1-b.y0},overlayName.checked?overlayText.value:"");ocrBaseCanvas=document.createElement("canvas");ocrBaseCanvas.width=canvas.width;ocrBaseCanvas.height=canvas.height;ocrBaseCanvas.getContext("2d").drawImage(canvas,0,0);status(`黒塗り完了：${matches.length}箇所\n5種類の前処理でOCRしました。`);saveBtn.disabled=false;manualBtn.disabled=false;}catch(error){status("OCRでエラーが発生しました。下のエラー詳細を確認してください。",error);}}
 
-async function diagnoseOCR(){ocrDiagnostics.hidden=false;ocrDebugLayer.hidden=true;ocrDebugLayer.innerHTML="";try{if(!sourceImage)throw new Error("先に画像を選択してください。");const target=normalize(targetText.value);if(!target)throw new Error("黒塗りする文字を入力してください。");const worker=await getWorker(getOcrLanguage(target));status("OCR診断中…\n複数の前処理を比較しています。");const {results,scale,ocrCanvas}=await collectOcrResults(worker,target),lines=[`対象文字：${targetText.value}`,`正規化後：${target}`,""];for(const r of results){lines.push(`===== ${r.mode} / PSM 11 =====`,`HIT：${r.matches.length}件`);for(const m of r.matches){const b={x0:m.x0*scale,y0:m.y0*scale,x1:m.x1*scale,y1:m.y1*scale};lines.push(`  HIT行：「${m.lineText}」`, `    target bbox=(${b.x0},${b.y0})-(${b.x1},${b.y1})`);m.symbols.forEach((s,i)=>{const q=s.bbox;lines.push(`      symbol[${i}] 「${s.ch}」 raw=「${s.raw}」 bbox=(${q.x0},${q.y0})-(${q.x1},${q.y1})`);});}if(r.near.length)lines.push(`近似候補：${r.near.map(x=>`「${x.candidate}」${Math.round(x.similarity*100)}%`).join(" / ")}`);lines.push(`認識テキスト：${r.rawText.replace(/\n/g," / ")}`,"");}lines.push(`※ OCR画像：${ocrCanvas.width}×${ocrCanvas.height}px / 元画像：${canvas.width}×${canvas.height}px`,`※ HITは単語ではなく、行内symbolを連結して対象文字列を探しています。`,`※ 近似候補は診断専用で、自動黒塗りには使用しません。`,`※ この診断では画像への黒塗りは行いません。`);ocrDiagnostics.textContent=lines.join("\n");const tr=getCanvasDisplayTransform();const seen=[];for(const r of results)for(const m of r.matches){if(seen.some(o=>Math.abs(o.x0-m.x0)<3&&Math.abs(o.y0-m.y0)<3&&Math.abs(o.x1-m.x1)<3&&Math.abs(o.y1-m.y1)<3))continue;seen.push(m);const box=document.createElement("div");box.className="ocr-debug-box";box.style.borderColor="#22aa55";box.style.left=`${tr.left+m.x0*tr.scaleX}px`;box.style.top=`${tr.top+m.y0*tr.scaleY}px`;box.style.width=`${(m.x1-m.x0)*tr.scaleX}px`;box.style.height=`${(m.y1-m.y0)*tr.scaleY}px`;const label=document.createElement("span");label.className="ocr-debug-label";label.textContent=`${r.mode}: ${target}`;box.appendChild(label);ocrDebugLayer.appendChild(box);}ocrDebugLayer.hidden=ocrDebugLayer.childElementCount===0;const total=results.reduce((n,r)=>n+r.matches.length,0);status(`OCR診断完了。\n検出：${total}件（重複を含む）\n下の診断結果を確認してください。`);}catch(error){status("OCR診断でエラーが発生しました。",error);}}
+async function diagnoseOCR(){
+  ocrDiagnostics.hidden=false;
+  ocrDebugLayer.hidden=true;
+  ocrDebugLayer.innerHTML="";
+  canvas.hidden=false;
+  canvas.style.display='block';
+  try{
+    if(!sourceImage)throw new Error("先に画像を選択してください。");
+    const target=normalize(targetText.value);
+    if(!target)throw new Error("黒塗りする文字を入力してください。");
+    const worker=await getWorker(getOcrLanguage(target));
+    status("OCR診断中…\n認識条件を比較しています。");
+    const {results,scale,ocrCanvas}=await collectOcrResults(worker,target);
+    const refined=await refineNearCandidates(worker,results,ocrCanvas,target,scale);
+    const lines=[`対象文字：${targetText.value}`,`正規化後：${target}`,""];
+    for(const r of results){
+      lines.push(`===== ${r.mode} / PSM 11 =====`,`HIT：${r.matches.length}件`);
+      for(const m of r.matches){
+        const b={x0:m.x0*scale,y0:m.y0*scale,x1:m.x1*scale,y1:m.y1*scale};
+        lines.push(`  HIT行：「${m.lineText}」`,`    target bbox=(${b.x0},${b.y0})-(${b.x1},${b.y1})`);
+        m.symbols.forEach((s,i)=>{const q=s.bbox;lines.push(`      symbol[${i}] 「${s.ch}」 raw=「${s.raw}」 bbox=(${q.x0},${q.y0})-(${q.x1},${q.y1})`);});
+      }
+      if(r.near.length)lines.push(`近似候補：${r.near.map(x=>`「${x.candidate}」${Math.round(x.similarity*100)}%`).join(" / ")}`);
+      lines.push(`認識テキスト：${r.rawText.replace(/\n/g," / ")}`,"");
+    }
+    lines.push(`===== 候補の再OCR =====`);
+    if(refined.length){for(const x of refined)lines.push(`再OCR HIT：「${x.refinedText}」 / 元候補「${x.candidate}」 / ${x.mode} / 行：「${x.lineText}」`);}else lines.push('再OCRで対象文字を確認できた候補はありません。');
+    lines.push("",`※ OCR画像：${ocrCanvas.width}×${ocrCanvas.height}px / 元画像：${canvas.width}×${canvas.height}px`,`※ HITは行内symbolを連結して対象文字列を探しています。`,`※ 近似候補の再OCRは診断専用です。自動黒塗りにはまだ使用しません。`);
+    ocrDiagnostics.textContent=lines.join("\n");
+    canvas.hidden=false; canvas.style.display='block';
+    const tr=getCanvasDisplayTransform(),seen=[];
+    for(const r of results)for(const m of r.matches){
+      if(seen.some(o=>Math.abs(o.x0-m.x0)<3&&Math.abs(o.y0-m.y0)<3&&Math.abs(o.x1-m.x1)<3&&Math.abs(o.y1-m.y1)<3))continue;
+      seen.push(m); const box=document.createElement('div'); box.className='ocr-debug-box'; box.style.borderColor='#22aa55'; box.style.left=`${tr.left+m.x0*tr.scaleX}px`; box.style.top=`${tr.top+m.y0*tr.scaleY}px`; box.style.width=`${(m.x1-m.x0)*tr.scaleX}px`; box.style.height=`${(m.y1-m.y0)*tr.scaleY}px`; const label=document.createElement('span'); label.className='ocr-debug-label'; label.textContent=`${r.mode}: ${target}`; box.appendChild(label); ocrDebugLayer.appendChild(box);
+    }
+    ocrDebugLayer.hidden=ocrDebugLayer.childElementCount===0;
+    const total=results.reduce((n,r)=>n+r.matches.length,0);
+    status(`OCR診断完了。\n検出：${total}件（重複を含む） / 再OCR確認：${refined.length}件\n下の診断結果を確認してください。`);
+  }catch(error){canvas.hidden=false;canvas.style.display='block';status("OCR診断でエラーが発生しました。",error);}
+}
 
 function getCanvasPoint(event) {
     const rect = canvas.getBoundingClientRect();
