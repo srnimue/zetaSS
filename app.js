@@ -635,7 +635,9 @@ async function diagnoseOCR() {
 
             // 実際のV24検索と同じく、word単位だけでなくline全体を連結して検索する。
             for (const line of lines) {
-                const details = lineTargetDetails(line);
+                const details = normalize(line?.text).includes(target)
+                    ? findTargetDetailsInCharStream(buildLineCharStream(line), target)
+                    : [];
                 for (const detail of details) {
                     const key = [
                         Math.round(detail.bbox.x0),
