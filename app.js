@@ -237,16 +237,45 @@ function makeInverted(src){
   for(let i=0;i<d.length;i+=4){d[i]=255-d[i];d[i+1]=255-d[i+1];d[i+2]=255-d[i+2];}
   ctx.putImageData(img,0,0); return c;
 }
-function makeOcrVariants(baseCanvas) {
-    const variants = [{name:"通常",canvas:baseCanvas}];
-    const gray=document.createElement("canvas"); gray.width=baseCanvas.width; gray.height=baseCanvas.height;
-    const g=gray.getContext("2d"); g.drawImage(baseCanvas,0,0); const gd=g.getImageData(0,0,gray.width,gray.height);
-    for(let i=0;i<gd.data.length;i+=4){const y=Math.round(gd.data[i]*.299+gd.data[i+1]*.587+gd.data[i+2]*.114);gd.data[i]=gd.data[i+1]=gd.data[i+2]=y;} g.putImageData(gd,0,0); variants.push({name:"グレースケール",canvas:gray});
-    const contrast=document.createElement("canvas"); contrast.width=gray.width; contrast.height=gray.height; const c=contrast.getContext("2d"); c.drawImage(gray,0,0); const cd=c.getImageData(0,0,contrast.width,contrast.height);
-    for(let i=0;i<cd.data.length;i+=4){for(let k=0;k<3;k++) cd.data[i+k]=Math.max(0,Math.min(255,Math.round((cd.data[i+k]-128)*1.65+128)));} c.putImageData(cd,0,0); variants.push({name:"グレー＋コントラスト",canvas:contrast});
-    for(const threshold of [180,220]){const bin=document.createElement("canvas");bin.width=gray.width;bin.height=gray.height;const b=bin.getContext("2d");b.drawImage(gray,0,0);const bd=b.getImageData(0,0,bin.width,bin.height);for(let i=0;i<bd.data.length;i+=4){const v=bd.data[i]>=threshold?255:0;bd.data[i]=bd.data[i+1]=bd.data[i+2]=v;}b.putImageData(bd,0,0);variants.push({name:`二値化${threshold}`,canvas:bin});}
-    const inv=document.createElement("canvas");inv.width=contrast.width;inv.height=contrast.height;const ic=inv.getContext("2d");ic.drawImage(contrast,0,0);const id=ic.getImageData(0,0,inv.width,inv.height);for(let i=0;i<id.data.length;i+=4){id.data[i]=255-id.data[i];id.data[i+1]=255-id.data[i+1];id.data[i+2]=255-id.data[i+2];}ic.putImageData(id,0,0);variants.push({name:"反転",canvas:inv});
-    return variants;
+function makeOcrVariant(baseCanvas, name) {
+    if (name === "通常") return baseCanvas;
+
+    const c = document.createElement("canvas");
+    c.width = baseCanvas.width;
+    c.height = baseCanvas.height;
+    const g = c.getContext("2d");
+    g.drawImage(baseCanvas, 0, 0);
+    const img = g.getImageData(0, 0, c.width, c.height);
+    const d = img.data;
+
+    if (name === "グレースケール") {
+        for (let i = 0; i < d.length; i += 4) {
+            const y = Math.round(d[i] * .299 + d[i + 1] * .587 + d[i + 2] * .114);
+            d[i] = d[i + 1] = d[i + 2] = y;
+        }
+    } else if (name === "グレー＋コントラスト") {
+        for (let i = 0; i < d.length; i += 4) {
+            const y = d[i] * .299 + d[i + 1] * .587 + d[i + 2] * .114;
+            const v = Math.max(0, Math.min(255, Math.round((y - 128) * 1.65 + 128)));
+            d[i] = d[i + 1] = d[i + 2] = v;
+        }
+    } else if (name === "二値化180" || name === "二値化220") {
+        const threshold = name === "二値化180" ? 180 : 220;
+        for (let i = 0; i < d.length; i += 4) {
+            const y = d[i] * .299 + d[i + 1] * .587 + d[i + 2] * .114;
+            const v = y >= threshold ? 255 : 0;
+            d[i] = d[i + 1] = d[i + 2] = v;
+        }
+    } else if (name === "反転") {
+        for (let i = 0; i < d.length; i += 4) {
+            d[i] = 255 - d[i];
+            d[i + 1] = 255 - d[i + 1];
+            d[i + 2] = 255 - d[i + 2];
+        }
+    }
+
+    g.putImageData(img, 0, 0);
+    return c;
 }
 
 function extractLineUnits(line){const units=[];for(const word of (line?.words||[])){const syms=(word?.symbols||[]).filter(s=>s?.bbox&&normalize(s.text));if(syms.length){for(const s of syms){for(const ch of [...normalize(s.text)]) units.push({ch,bbox:s.bbox,raw:s.text});}}else if(word?.bbox&&normalize(word.text)){const chars=[...normalize(word.text)],b=word.bbox;chars.forEach((ch,i)=>units.push({ch,raw:word.text,bbox:{x0:b.x0+(b.x1-b.x0)*i/chars.length,y0:b.y0,x1:b.x0+(b.x1-b.x0)*(i+1)/chars.length,y1:b.y1}}));}}return units;}
@@ -281,12 +310,14 @@ function findNearCandidates(lines,target,limit=5){
   return r;
 }
 
-function makeCandidateCrop(ocrCanvas, candidate, scale){
+function makeCandidateCrop(ocrCanvas, candidate){
   const xs=candidate.units.flatMap(u=>[u.bbox.x0,u.bbox.x1]);
   const ys=candidate.units.flatMap(u=>[u.bbox.y0,u.bbox.y1]);
   if(!xs.length||!ys.length)return null;
-  const padX=Math.max(18,Math.round((Math.max(...xs)-Math.min(...xs))*0.35));
-  const padY=Math.max(18,Math.round((Math.max(...ys)-Math.min(...ys))*0.35));
+  const rawW=Math.max(...xs)-Math.min(...xs);
+  const rawH=Math.max(...ys)-Math.min(...ys);
+  const padX=Math.max(30,Math.round(rawW*0.55));
+  const padY=Math.max(30,Math.round(rawH*0.45));
   const x0=Math.max(0,Math.floor(Math.min(...xs)-padX));
   const y0=Math.max(0,Math.floor(Math.min(...ys)-padY));
   const x1=Math.min(ocrCanvas.width,Math.ceil(Math.max(...xs)+padX));
@@ -294,17 +325,43 @@ function makeCandidateCrop(ocrCanvas, candidate, scale){
   if(x1<=x0||y1<=y0)return null;
   const c=document.createElement('canvas');
   c.width=Math.max(1,x1-x0); c.height=Math.max(1,y1-y0);
-  c.getContext('2d').drawImage(ocrCanvas,x0,y0,c.width,c.height,x0,y0,c.width,c.height);
+  const cc=c.getContext('2d');
+  cc.imageSmoothingEnabled=true;
+  cc.imageSmoothingQuality='high';
+  // 切り出し先は必ず 0,0。旧版は x0,y0 を出力先にも使っており、再OCR画像が欠ける原因になっていた。
+  cc.drawImage(ocrCanvas,x0,y0,x1-x0,y1-y0,0,0,c.width,c.height);
   return {canvas:c,x0,y0};
 }
 
 async function recognizeVariant(worker,inputCanvas,target,mode,scale){const result=await worker.recognize(inputCanvas,{tessedit_pageseg_mode:"11"});const data=result?.data||{},lines=data.lines||[],matches=[];for(const line of lines){const units=extractLineUnits(line),hits=findTargetInUnits(units,target),lineText=units.map(u=>u.ch).join("");for(const hit of hits)matches.push({x0:hit.targetBox.x0/scale,y0:hit.targetBox.y0/scale,x1:hit.targetBox.x1/scale,y1:hit.targetBox.y1/scale,mode,lineText,symbols:hit.symbols});}return {mode,lines,words:data.words||[],rawText:String(data.text||""),matches,near:findNearCandidates(lines,target)};}
 
-function buildOcrCanvas(){const scale=2.5,oc=document.createElement("canvas");oc.width=Math.round(canvas.width*scale);oc.height=Math.round(canvas.height*scale);const c=oc.getContext("2d");c.imageSmoothingEnabled=true;c.imageSmoothingQuality="high";c.drawImage(sourceImage,0,0,oc.width,oc.height);return {canvas:oc,scale};}
+function buildOcrCanvas(){
+  // OCR用キャンバスだけを作る。表示用canvasはここでは絶対に変更しない。
+  const scale=2.5;
+  const oc=document.createElement("canvas");
+  oc.width=Math.round(canvas.width*scale);
+  oc.height=Math.round(canvas.height*scale);
+  const c=oc.getContext("2d");
+  c.imageSmoothingEnabled=true;
+  c.imageSmoothingQuality="high";
+  c.drawImage(sourceImage,0,0,oc.width,oc.height);
+  return {canvas:oc,scale};
+}
 
 async function collectOcrResults(worker,target){
-  const {canvas:oc,scale}=buildOcrCanvas(),variants=makeOcrVariants(oc),results=[];
-  for(const v of variants) results.push(await recognizeVariant(worker,v.canvas,target,v.name,scale));
+  const {canvas:oc,scale}=buildOcrCanvas();
+  const names=["通常","グレースケール","グレー＋コントラスト","二値化180","二値化220","反転"];
+  const results=[];
+  // 全前処理画像を同時に保持しない。iPhone/iPadでcanvasが消える原因になりやすい。
+  for(const name of names){
+    status(`OCR中…\n前処理：${name}`);
+    const variant=makeOcrVariant(oc,name);
+    try {
+      results.push(await recognizeVariant(worker,variant,target,name,scale));
+    } finally {
+      if(variant!==oc) { variant.width=1; variant.height=1; }
+    }
+  }
   return {results,scale,ocrCanvas:oc};
 }
 
@@ -317,18 +374,28 @@ async function refineNearCandidates(worker,results,ocrCanvas,target,scale){
     if(!b||!e)continue;
     const key=cand.lineText+'|'+Math.round(b.x0)+'|'+Math.round(e.x1);
     if(seen.has(key))continue; seen.add(key);
-    const crop=makeCandidateCrop(ocrCanvas,cand,scale);
+    const crop=makeCandidateCrop(ocrCanvas,cand);
     if(!crop)continue;
-    const variants=[
-      {name:'候補再OCR・グレー',canvas:makeGrayContrast(crop.canvas)},
-      {name:'候補再OCR・反転',canvas:makeInverted(crop.canvas)}
-    ];
+    const variants=[];
+    const enlarged=document.createElement('canvas');
+    enlarged.width=crop.canvas.width*2;
+    enlarged.height=crop.canvas.height*2;
+    const eg=enlarged.getContext('2d');
+    eg.imageSmoothingEnabled=true;
+    eg.imageSmoothingQuality='high';
+    eg.drawImage(crop.canvas,0,0,enlarged.width,enlarged.height);
+    variants.push({name:'候補再OCR・拡大',canvas:enlarged});
+    variants.push({name:'候補再OCR・グレー',canvas:makeGrayContrast(enlarged)});
+    variants.push({name:'候補再OCR・反転',canvas:makeInverted(enlarged)});
+    let found=false;
     for(const v of variants){
+      if(found) break;
       for(const psm of ['7','8']){
         const rr=await worker.recognize(v.canvas,{tessedit_pageseg_mode:psm});
         const text=normalize(String(rr?.data?.text||''));
         if(text.includes(target)){
           refined.push({candidate:cand.candidate,similarity:cand.similarity,lineText:cand.lineText,mode:cand.mode,refinedText:text,box:{x0:crop.x0/scale,y0:crop.y0/scale,x1:(crop.x0+crop.canvas.width)/scale,y1:(crop.y0+crop.canvas.height)/scale}});
+          found=true;
           break;
         }
       }
@@ -352,7 +419,8 @@ async function diagnoseOCR(){
     const target=normalize(targetText.value);
     if(!target)throw new Error("黒塗りする文字を入力してください。");
     const worker=await getWorker(getOcrLanguage(target));
-    status("OCR診断中…\n認識条件を比較しています。");
+    canvas.hidden=false; canvas.style.display="block";
+    status("OCR診断中…\n認識条件を比較しています。画像表示は維持します。");
     const {results,scale,ocrCanvas}=await collectOcrResults(worker,target);
     const refined=await refineNearCandidates(worker,results,ocrCanvas,target,scale);
     const lines=[`対象文字：${targetText.value}`,`正規化後：${target}`,""];
