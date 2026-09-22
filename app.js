@@ -283,54 +283,119 @@ function extractLineUnits(line){const units=[];for(const word of (line?.words||[
 function findTargetInUnits(units,target){const text=units.map(u=>u.ch).join(""),hits=[];let from=0;while(from<=text.length-target.length){const i=text.indexOf(target,from);if(i<0)break;const selected=units.slice(i,i+target.length);if(selected.length===target.length)hits.push({targetBox:{x0:Math.min(...selected.map(u=>u.bbox.x0)),y0:Math.min(...selected.map(u=>u.bbox.y0)),x1:Math.max(...selected.map(u=>u.bbox.x1)),y1:Math.max(...selected.map(u=>u.bbox.y1))},symbols:selected});from=i+Math.max(1,target.length);}return hits;}
 
 function editDistance(a,b){const A=[...a],B=[...b],d=Array.from({length:A.length+1},()=>Array(B.length+1).fill(0));for(let i=0;i<=A.length;i++)d[i][0]=i;for(let j=0;j<=B.length;j++)d[0][j]=j;for(let i=1;i<=A.length;i++)for(let j=1;j<=B.length;j++)d[i][j]=Math.min(d[i-1][j]+1,d[i][j-1]+1,d[i-1][j-1]+(A[i-1]===B[j-1]?0:1));return d[A.length][B.length];}
-function findNearCandidates(lines,target,limit=5){
-  const out=[];
-  const tlen=[...target].length;
-  for(const line of lines){
-    const u=extractLineUnits(line), t=u.map(x=>x.ch).join("");
-    for(let i=0;i<t.length;i++){
-      for(let len=Math.max(1,tlen-1);len<=tlen+1&&i+len<=t.length;len++){
-        const c=t.slice(i,i+len);
-        const sim=1-editDistance(target,c)/Math.max(tlen,[...c].length);
-        if(sim>=.75){
-          const selected=u.slice(i,i+len);
-          if(selected.length) out.push({candidate:c,similarity:sim,lineText:t,units:selected});
+function sequenceSimilarity(a, b) {
+  const A = [...a], B = [...b];
+  if (!A.length || !B.length) return 0;
+  const dp = Array.from({ length: A.length + 1 }, () => Array(B.length + 1).fill(0));
+  for (let i = 1; i <= A.length; i++) {
+    for (let j = 1; j <= B.length; j++) {
+      dp[i][j] = A[i - 1] === B[j - 1]
+        ? dp[i - 1][j - 1] + 1
+        : Math.max(dp[i - 1][j], dp[i][j - 1]);
+    }
+  }
+  return dp[A.length][B.length] / Math.max(A.length, B.length);
+}
+
+function findNearCandidates(lines, target, limit = 20) {
+  const out = [];
+  const tlen = [...target].length;
+  if (!tlen) return out;
+
+  for (const line of lines) {
+    const u = extractLineUnits(line);
+    const t = u.map(x => x.ch).join("");
+    if (!t) continue;
+
+    // Whole-string edit distanceだけでなく、文字の並びそのものも見る。
+    // 「ポーざー」「めーざー」のように1文字だけ誤認された候補を拾うため。
+    const minLen = Math.max(1, tlen - 2);
+    const maxLen = Math.min(t.length, tlen + 2);
+
+    for (let i = 0; i < t.length; i++) {
+      for (let len = minLen; len <= maxLen && i + len <= t.length; len++) {
+        const c = t.slice(i, i + len);
+        const editSim = 1 - editDistance(target, c) / Math.max(tlen, [...c].length);
+        const seqSim = sequenceSimilarity(target, c);
+        const exactChars = [...target].filter(ch => [...c].includes(ch)).length;
+        const score = Math.max(editSim, seqSim);
+
+        // 候補を増やしすぎないため、短い文字列でも最低2文字は一致を要求。
+        const minShared = tlen <= 2 ? tlen : Math.max(2, tlen - 1);
+        if (score >= 0.70 && exactChars >= minShared) {
+          const selected = u.slice(i, i + len);
+          if (selected.length) {
+            out.push({
+              candidate: c,
+              similarity: score,
+              editSimilarity: editSim,
+              sequenceSimilarity: seqSim,
+              lineText: t,
+              units: selected,
+              allUnits: u,
+              startIndex: i
+            });
+          }
         }
       }
     }
   }
-  out.sort((a,b)=>b.similarity-a.similarity);
-  const seen=new Set(),r=[];
-  for(const x of out){
-    const b=x.units[0].bbox,e=x.units[x.units.length-1].bbox;
-    const k=x.candidate+'\t'+x.lineText+'\t'+Math.round(b.x0)+'\t'+Math.round(e.x1);
-    if(!seen.has(k)){seen.add(k);r.push(x);}
-    if(r.length>=limit)break;
+
+  out.sort((a, b) => {
+    if (b.similarity !== a.similarity) return b.similarity - a.similarity;
+    return Math.abs([...a.candidate].length - tlen) - Math.abs([...b.candidate].length - tlen);
+  });
+
+  const seen = new Set();
+  const result = [];
+  for (const x of out) {
+    const b = x.units[0].bbox;
+    const e = x.units[x.units.length - 1].bbox;
+    const key = `${x.lineText}\t${Math.round(b.x0)}\t${Math.round(e.x1)}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    result.push(x);
+    if (result.length >= limit) break;
   }
-  return r;
+  return result;
 }
 
-function makeCandidateCrop(ocrCanvas, candidate){
-  const xs=candidate.units.flatMap(u=>[u.bbox.x0,u.bbox.x1]);
-  const ys=candidate.units.flatMap(u=>[u.bbox.y0,u.bbox.y1]);
-  if(!xs.length||!ys.length)return null;
-  const rawW=Math.max(...xs)-Math.min(...xs);
-  const rawH=Math.max(...ys)-Math.min(...ys);
-  const padX=Math.max(30,Math.round(rawW*0.55));
-  const padY=Math.max(30,Math.round(rawH*0.45));
-  const x0=Math.max(0,Math.floor(Math.min(...xs)-padX));
-  const y0=Math.max(0,Math.floor(Math.min(...ys)-padY));
-  const x1=Math.min(ocrCanvas.width,Math.ceil(Math.max(...xs)+padX));
-  const y1=Math.min(ocrCanvas.height,Math.ceil(Math.max(...ys)+padY));
-  if(x1<=x0||y1<=y0)return null;
-  const c=document.createElement('canvas');
-  c.width=Math.max(1,x1-x0); c.height=Math.max(1,y1-y0);
-  const cc=c.getContext('2d');
-  cc.imageSmoothingEnabled=true;
-  cc.imageSmoothingQuality='high';
-  // 切り出し先は必ず 0,0。旧版は x0,y0 を出力先にも使っており、再OCR画像が欠ける原因になっていた。
-  cc.drawImage(ocrCanvas,x0,y0,x1-x0,y1-y0,0,0,c.width,c.height);
-  return {canvas:c,x0,y0};
+function makeCandidateCrop(ocrCanvas, candidate) {
+  const all = candidate.allUnits || candidate.units || [];
+  const selected = candidate.units || [];
+  if (!selected.length) return null;
+
+  // 候補の前後も少し含める。最初の1文字が「ーざー」のように欠落した場合でも、
+  // 再OCR側で本来の「ゆ」を拾えるようにするため。
+  const first = Math.max(0, candidate.startIndex - 2);
+  const last = Math.min(all.length, candidate.startIndex + selected.length + 2);
+  const contextUnits = all.length ? all.slice(first, last) : selected;
+
+  const xs = contextUnits.flatMap(u => [u.bbox.x0, u.bbox.x1]);
+  const ys = contextUnits.flatMap(u => [u.bbox.y0, u.bbox.y1]);
+  if (!xs.length || !ys.length) return null;
+
+  const candidateXs = selected.flatMap(u => [u.bbox.x0, u.bbox.x1]);
+  const candidateYs = selected.flatMap(u => [u.bbox.y0, u.bbox.y1]);
+  const rawW = Math.max(...candidateXs) - Math.min(...candidateXs);
+  const rawH = Math.max(...candidateYs) - Math.min(...candidateYs);
+  const padX = Math.max(30, Math.round(rawW * 0.65));
+  const padY = Math.max(30, Math.round(rawH * 0.55));
+
+  const x0 = Math.max(0, Math.floor(Math.min(...xs) - padX));
+  const y0 = Math.max(0, Math.floor(Math.min(...ys) - padY));
+  const x1 = Math.min(ocrCanvas.width, Math.ceil(Math.max(...xs) + padX));
+  const y1 = Math.min(ocrCanvas.height, Math.ceil(Math.max(...ys) + padY));
+  if (x1 <= x0 || y1 <= y0) return null;
+
+  const c = document.createElement('canvas');
+  c.width = Math.max(1, x1 - x0);
+  c.height = Math.max(1, y1 - y0);
+  const cc = c.getContext('2d');
+  cc.imageSmoothingEnabled = true;
+  cc.imageSmoothingQuality = 'high';
+  cc.drawImage(ocrCanvas, x0, y0, x1 - x0, y1 - y0, 0, 0, c.width, c.height);
+  return { canvas: c, x0, y0 };
 }
 
 async function recognizeVariant(worker,inputCanvas,target,mode,scale){const result=await worker.recognize(inputCanvas,{tessedit_pageseg_mode:"11"});const data=result?.data||{},lines=data.lines||[],matches=[];for(const line of lines){const units=extractLineUnits(line),hits=findTargetInUnits(units,target),lineText=units.map(u=>u.ch).join("");for(const hit of hits)matches.push({x0:hit.targetBox.x0/scale,y0:hit.targetBox.y0/scale,x1:hit.targetBox.x1/scale,y1:hit.targetBox.y1/scale,mode,lineText,symbols:hit.symbols});}return {mode,lines,words:data.words||[],rawText:String(data.text||""),matches,near:findNearCandidates(lines,target)};}
@@ -367,7 +432,7 @@ async function collectOcrResults(worker,target){
 
 async function refineNearCandidates(worker,results,ocrCanvas,target,scale){
   const refined=[];
-  const candidates=results.flatMap(r=>r.near.map(c=>({...c,mode:r.mode}))).filter(c=>c.similarity<0.999);
+  const candidates=results.flatMap(r=>r.near.map(c=>({...c,mode:r.mode}))).filter(c=>c.similarity<0.999).sort((a,b)=>b.similarity-a.similarity);
   const seen=new Set();
   for(const cand of candidates){
     const b=cand.units?.[0]?.bbox, e=cand.units?.[cand.units.length-1]?.bbox;
@@ -379,7 +444,7 @@ async function refineNearCandidates(worker,results,ocrCanvas,target,scale){
     const variants=[];
     const enlarged=document.createElement('canvas');
     // 候補文字をさらに大きくして再OCR。小さい日本語文字の形状を拾いやすくする。
-    const REFINE_SCALE = 4;
+    const REFINE_SCALE = 2;
     enlarged.width=crop.canvas.width*REFINE_SCALE;
     enlarged.height=crop.canvas.height*REFINE_SCALE;
     const eg=enlarged.getContext('2d');
@@ -392,7 +457,7 @@ async function refineNearCandidates(worker,results,ocrCanvas,target,scale){
     let found=false;
     for(const v of variants){
       if(found) break;
-      for(const psm of ['7','8']){
+      for(const psm of ['7','8','6']){
         const rr=await worker.recognize(v.canvas,{tessedit_pageseg_mode:psm});
         const text=normalize(String(rr?.data?.text||''));
         if(text.includes(target)){
@@ -438,7 +503,7 @@ async function diagnoseOCR(){
     }
     lines.push(`===== 候補の再OCR =====`);
     if(refined.length){for(const x of refined)lines.push(`再OCR HIT：「${x.refinedText}」 / 元候補「${x.candidate}」 / ${x.mode} / 行：「${x.lineText}」`);}else lines.push('再OCRで対象文字を確認できた候補はありません。');
-    lines.push("",`※ OCR画像：${ocrCanvas.width}×${ocrCanvas.height}px / 元画像：${canvas.width}×${canvas.height}px`,`※ HITは行内symbolを連結して対象文字列を探しています。`,`※ 近似候補の再OCRは診断専用です。自動黒塗りにはまだ使用しません。`);
+    lines.push("",`※ 候補再OCR：前後の文字を含む局所範囲を2倍に拡大し、PSM 7/8/6で再確認`, `※ OCR画像：${ocrCanvas.width}×${ocrCanvas.height}px / 元画像：${canvas.width}×${canvas.height}px`,`※ HITは行内symbolを連結して対象文字列を探しています。`,`※ 近似候補の再OCRは診断専用です。自動黒塗りにはまだ使用しません。`);
     ocrDiagnostics.textContent=lines.join("\n");
     canvas.hidden=false; canvas.style.display='block';
     const tr=getCanvasDisplayTransform(),seen=[];
