@@ -493,13 +493,42 @@ function makeGroupCandidate(group) {
   return {...best, box: group.box, candidateCount: group.candidates.length, modeCount: group.modes.size};
 }
 
+function groupTouchesExactHit(group, results) {
+  const hits = results.flatMap(r => r.matches || []);
+  if (!hits.length) return false;
+  const a = group.box;
+  const acx = (a.x0 + a.x1) / 2, acy = (a.y0 + a.y1) / 2;
+  return hits.some(h => {
+    const b = {x0:h.x0,y0:h.y0,x1:h.x1,y1:h.y1};
+    const bcx = (b.x0 + b.x1) / 2, bcy = (b.y0 + b.y1) / 2;
+    const aw = Math.max(1, a.x1-a.x0), ah = Math.max(1, a.y1-a.y0);
+    const bw = Math.max(1, b.x1-b.x0), bh = Math.max(1, b.y1-b.y0);
+    return Math.abs(acx-bcx) <= Math.max(24, Math.max(aw,bw)*0.55) &&
+           Math.abs(acy-bcy) <= Math.max(24, Math.max(ah,bh)*0.70);
+  });
+}
+
 async function refineNearCandidates(worker, results, ocrCanvas, target, scale) {
   const refined = [];
   const groups = groupNearCandidates(results, scale);
-  for (const group of groups) {
+  const started = performance.now();
+  let attempted = 0;
+  let skippedExact = 0;
+  let extraPasses = 0;
+
+  for (let gi = 0; gi < groups.length; gi++) {
+    const group = groups[gi];
+    // すでに通常の前処理OCRで同地点を確定できているなら、再OCRしない。
+    if (groupTouchesExactHit(group, results)) {
+      skippedExact++;
+      continue;
+    }
+
     const cand = makeGroupCandidate(group);
     const crop = makeCandidateCrop(ocrCanvas, cand);
     if (!crop) continue;
+    attempted++;
+    status(`OCR診断中…\n候補地点 ${gi+1}/${groups.length} を再確認しています。`);
 
     const REFINE_SCALE = 2;
     const enlarged = document.createElement('canvas');
@@ -510,22 +539,24 @@ async function refineNearCandidates(worker, results, ocrCanvas, target, scale) {
     eg.imageSmoothingQuality = 'high';
     eg.drawImage(crop.canvas, 0, 0, enlarged.width, enlarged.height);
 
-    const variants = [
-      {name:`候補再OCR・${REFINE_SCALE}倍`, canvas:enlarged},
-      {name:'候補再OCR・グレー', canvas:makeGrayContrast(enlarged)},
-      {name:'候補再OCR・反転', canvas:makeInverted(enlarged)}
-    ];
-
+    // まず低コストな1回だけ。ここで拾えたら追加OCRはしない。
+    const first = await worker.recognize(enlarged, {tessedit_pageseg_mode:'7'});
+    const firstText = normalize(String(first?.data?.text || ''));
     const hits = [];
-    const seenText = new Set();
-    for (const v of variants) {
-      for (const psm of ['7','8','6']) {
-        const rr = await worker.recognize(v.canvas, {tessedit_pageseg_mode:psm});
-        const text = normalize(String(rr?.data?.text || ''));
-        if (text.includes(target) && !seenText.has(text)) {
-          seenText.add(text);
-          hits.push({text, mode:v.name, psm});
+    if (firstText.includes(target)) {
+      hits.push({text:firstText, mode:`候補再OCR・${REFINE_SCALE}倍`, psm:'7'});
+    } else {
+      // それでも拾えなかった地点だけ、グレー＋コントラストを追加で1回。
+      extraPasses++;
+      const gray = makeGrayContrast(enlarged);
+      try {
+        const second = await worker.recognize(gray, {tessedit_pageseg_mode:'7'});
+        const secondText = normalize(String(second?.data?.text || ''));
+        if (secondText.includes(target)) {
+          hits.push({text:secondText, mode:'候補再OCR・グレー', psm:'7'});
         }
+      } finally {
+        gray.width = 1; gray.height = 1;
       }
     }
 
@@ -540,11 +571,23 @@ async function refineNearCandidates(worker, results, ocrCanvas, target, scale) {
         candidateCount:cand.candidateCount,
         modeCount:cand.modeCount,
         box:group.box,
-        cropBox:{x0:crop.x0/scale,y0:crop.y0/scale,x1:(crop.x0+crop.canvas.width)/scale,y1:(crop.y0+crop.canvas.height)/scale}
+        cropBox:{x0:crop.x0/scale,y0:crop.y0/scale,x1:(crop.x0+crop.canvas.width)/scale,y1:(crop.y0+crop.canvas.height)/scale},
+        passCount:hits.length
       });
     }
+
+    enlarged.width = 1; enlarged.height = 1;
+    crop.canvas.width = 1; crop.canvas.height = 1;
   }
-  return {groups, refined};
+
+  return {
+    groups,
+    refined,
+    attempted,
+    skippedExact,
+    extraPasses,
+    elapsedMs: performance.now() - started
+  };
 }
 function mergeMatches(results){const all=results.flatMap(r=>r.matches),final=[];for(const box of all){const dup=final.some(o=>{const ix0=Math.max(box.x0,o.x0),iy0=Math.max(box.y0,o.y0),ix1=Math.min(box.x1,o.x1),iy1=Math.min(box.y1,o.y1);if(ix1<=ix0||iy1<=iy0)return false;const inter=(ix1-ix0)*(iy1-iy0),area=Math.min((box.x1-box.x0)*(box.y1-box.y0),(o.x1-o.x0)*(o.y1-o.y0));return area>0&&inter/area>.45;});if(!dup)final.push(box);}return final;}
 
@@ -560,11 +603,20 @@ async function diagnoseOCR(){
     if(!sourceImage)throw new Error("先に画像を選択してください。");
     const target=normalize(targetText.value);
     if(!target)throw new Error("黒塗りする文字を入力してください。");
+    const totalStarted=performance.now();
     const worker=await getWorker(getOcrLanguage(target));
     canvas.hidden=false; canvas.style.display="block";
     status("OCR診断中…\n認識条件を比較しています。画像表示は維持します。");
+    const ocrStarted=performance.now();
     const {results,scale,ocrCanvas}=await collectOcrResults(worker,target);
-    const {groups:candidateGroups,refined}=await refineNearCandidates(worker,results,ocrCanvas,target,scale);
+    const ocrElapsed=performance.now()-ocrStarted;
+    const refineStarted=performance.now();
+    const refine=await refineNearCandidates(worker,results,ocrCanvas,target,scale);
+    const refineElapsed=performance.now()-refineStarted;
+    const {groups:candidateGroups,refined}=refine;
+    const totalElapsed=performance.now()-totalStarted;
+    const exactCount=results.reduce((n,r)=>n+r.matches.length,0);
+    const candidateCount=results.reduce((n,r)=>n+r.near.length,0);
     const lines=[`対象文字：${targetText.value}`,`正規化後：${target}`,""];
     for(const r of results){
       lines.push(`===== ${r.mode} / PSM 11 =====`,`HIT：${r.matches.length}件`);
@@ -576,15 +628,32 @@ async function diagnoseOCR(){
       if(r.near.length)lines.push(`近似候補：${r.near.map(x=>`「${x.candidate}」${Math.round(x.similarity*100)}%`).join(" / ")}`);
       lines.push(`認識テキスト：${r.rawText.replace(/\n/g," / ")}`,"");
     }
-    lines.push(`===== 候補地点の統合 =====`, `候補地点：${candidateGroups.length}箇所 / 個別候補：${results.reduce((n,r)=>n+r.near.length,0)}件`);
+    lines.push(`===== 候補地点の統合 =====`, `候補地点：${candidateGroups.length}箇所 / 個別候補：${candidateCount}件`);
     candidateGroups.forEach((g,i)=>{
       const best=Math.max(...g.candidates.map(c=>c.similarity));
       const names=[...new Set(g.candidates.map(c=>c.candidate))].slice(0,8);
-      lines.push(`  地点${i+1}: 候補${g.candidates.length}件 / 前処理${g.modes.size}種 / 最高${Math.round(best*100)}% / ${names.map(x=>`「${x}」`).join('・')}`);
+      const alreadyHit=groupTouchesExactHit(g,results);
+      lines.push(`  地点${i+1}: 候補${g.candidates.length}件 / 前処理${g.modes.size}種 / 最高${Math.round(best*100)}% / ${alreadyHit?'既存HITあり・再OCR省略':'再OCR対象'} / ${names.map(x=>`「${x}」`).join('・')}`);
     });
     lines.push("",`===== 候補地点の再OCR =====`);
-    if(refined.length){for(const x of refined){const detail=x.hits.map(h=>`${h.text} [PSM${h.psm}]`).join(' / ');lines.push(`再OCR HIT：「${x.refinedText}」 / 元候補「${x.candidate}」 / 同地点候補${x.candidateCount}件 / ${detail}`);}}else lines.push('再OCRで対象文字を確認できた候補地点はありません。');
-    lines.push("",`※ 候補は同じ位置付近のものを1地点にまとめ、各地点を2倍＋PSM 7/8/6で再確認しています。`,`※ OCR画像：${ocrCanvas.width}×${ocrCanvas.height}px / 元画像：${canvas.width}×${canvas.height}px`,`※ HITは行内symbolを連結して対象文字列を探しています。`,`※ 候補地点の再OCRは診断専用です。自動黒塗りにはまだ使用しません。`,`※ 現在の自動黒塗りは、この診断で救出した候補をまだ使用していません。`);
+    if(refined.length){
+      for(const x of refined){
+        const detail=x.hits.map(h=>`${h.text} [${h.mode}/PSM${h.psm}]`).join(' / ');
+        lines.push(`再OCR HIT：「${x.refinedText}」 / 元候補「${x.candidate}」 / 同地点候補${x.candidateCount}件 / ${detail}`);
+      }
+    }else lines.push('再OCRで対象文字を確認できた候補地点はありません。');
+    lines.push("",
+      `===== 処理時間 =====`,
+      `OCR全体：${(ocrElapsed/1000).toFixed(2)}秒`,
+      `候補再OCR：${(refineElapsed/1000).toFixed(2)}秒`,
+      `診断全体：${(totalElapsed/1000).toFixed(2)}秒`,
+      `候補地点：${candidateGroups.length} / 再OCR実行：${refine.attempted} / 再OCR追加パス：${refine.extraPasses} / 既存HITで省略：${refine.skippedExact}`,
+      "",
+      `※ 候補地点は同じ位置付近の候補をまとめています。`,
+      `※ 再OCRはまず2倍・PSM 7を1回だけ実行し、失敗した地点だけグレー＋コントラスト・PSM 7を追加します。`,
+      `※ 候補地点の再OCRは診断専用です。自動黒塗りにはまだ使用しません。`,
+      `※ 現在の自動黒塗りは、この診断で救出した候補をまだ使用していません。`
+    );
     ocrDiagnostics.textContent=lines.join("\n");
     canvas.hidden=false; canvas.style.display='block';
     const tr=getCanvasDisplayTransform(),seen=[];
@@ -593,11 +662,9 @@ async function diagnoseOCR(){
       seen.push(m); const box=document.createElement('div'); box.className='ocr-debug-box'; box.style.borderColor='#22aa55'; box.style.left=`${tr.left+m.x0*tr.scaleX}px`; box.style.top=`${tr.top+m.y0*tr.scaleY}px`; box.style.width=`${(m.x1-m.x0)*tr.scaleX}px`; box.style.height=`${(m.y1-m.y0)*tr.scaleY}px`; const label=document.createElement('span'); label.className='ocr-debug-label'; label.textContent=`${r.mode}: ${target}`; box.appendChild(label); ocrDebugLayer.appendChild(box);
     }
     ocrDebugLayer.hidden=ocrDebugLayer.childElementCount===0;
-    const total=results.reduce((n,r)=>n+r.matches.length,0);
-    status(`OCR診断完了。\n検出：${total}件（重複を含む） / 候補地点：${candidateGroups.length}箇所 / 再OCR確認：${refined.length}箇所\n下の診断結果を確認してください。`);
+    status(`OCR診断完了。\n検出：${exactCount}件（重複を含む） / 候補地点：${candidateGroups.length}箇所 / 再OCR確認：${refined.length}箇所\n処理時間：${(totalElapsed/1000).toFixed(2)}秒\n下の診断結果を確認してください。`);
   }catch(error){canvas.hidden=false;canvas.style.display='block';status("OCR診断でエラーが発生しました。",error);}
 }
-
 function getCanvasPoint(event) {
     const rect = canvas.getBoundingClientRect();
     return {
