@@ -297,7 +297,7 @@ function sequenceSimilarity(a, b) {
   return dp[A.length][B.length] / Math.max(A.length, B.length);
 }
 
-function findNearCandidates(lines, target, limit = 20) {
+function findNearCandidates(lines, target, limit = 60) {
   const out = [];
   const tlen = [...target].length;
   if (!tlen) return out;
@@ -307,8 +307,8 @@ function findNearCandidates(lines, target, limit = 20) {
     const t = u.map(x => x.ch).join("");
     if (!t) continue;
 
-    // Whole-string edit distanceだけでなく、文字の並びそのものも見る。
-    // 「ポーざー」「めーざー」のように1文字だけ誤認された候補を拾うため。
+    // 完全一致だけでなく「一部の文字だけ別の字として読まれた」ケースも候補にする。
+    // 例：ゆーざー → ポーざー / めーざー / ゆーゴー。
     const minLen = Math.max(1, tlen - 2);
     const maxLen = Math.min(t.length, tlen + 2);
 
@@ -318,11 +318,12 @@ function findNearCandidates(lines, target, limit = 20) {
         const editSim = 1 - editDistance(target, c) / Math.max(tlen, [...c].length);
         const seqSim = sequenceSimilarity(target, c);
         const exactChars = [...target].filter(ch => [...c].includes(ch)).length;
-        const score = Math.max(editSim, seqSim);
 
-        // 候補を増やしすぎないため、短い文字列でも最低2文字は一致を要求。
-        const minShared = tlen <= 2 ? tlen : Math.max(2, tlen - 1);
-        if (score >= 0.70 && exactChars >= minShared) {
+        // まず「並びが近い」ことを重視。4文字の対象なら2文字一致でも救出候補にする。
+        // 本当に対象かどうかは、この後の局所再OCRで確認する。
+        const score = Math.max(editSim, seqSim);
+        const minShared = tlen <= 2 ? tlen : Math.max(2, Math.ceil(tlen * 0.5));
+        if (score >= 0.50 && exactChars >= minShared) {
           const selected = u.slice(i, i + len);
           if (selected.length) {
             out.push({
@@ -330,6 +331,7 @@ function findNearCandidates(lines, target, limit = 20) {
               similarity: score,
               editSimilarity: editSim,
               sequenceSimilarity: seqSim,
+              exactChars,
               lineText: t,
               units: selected,
               allUnits: u,
@@ -343,6 +345,7 @@ function findNearCandidates(lines, target, limit = 20) {
 
   out.sort((a, b) => {
     if (b.similarity !== a.similarity) return b.similarity - a.similarity;
+    if ((b.exactChars || 0) !== (a.exactChars || 0)) return (b.exactChars || 0) - (a.exactChars || 0);
     return Math.abs([...a.candidate].length - tlen) - Math.abs([...b.candidate].length - tlen);
   });
 
@@ -396,6 +399,41 @@ function makeCandidateCrop(ocrCanvas, candidate) {
   cc.imageSmoothingQuality = 'high';
   cc.drawImage(ocrCanvas, x0, y0, x1 - x0, y1 - y0, 0, 0, c.width, c.height);
   return { canvas: c, x0, y0 };
+}
+
+function makeSourceCandidateCrop(candidate, scale) {
+  const all = candidate.allUnits || candidate.units || [];
+  const selected = candidate.units || [];
+  if (!selected.length) return null;
+
+  const first = Math.max(0, candidate.startIndex - 2);
+  const last = Math.min(all.length, candidate.startIndex + selected.length + 2);
+  const contextUnits = all.length ? all.slice(first, last) : selected;
+  const xs = contextUnits.flatMap(u => [u.bbox.x0, u.bbox.x1]);
+  const ys = contextUnits.flatMap(u => [u.bbox.y0, u.bbox.y1]);
+  if (!xs.length || !ys.length) return null;
+
+  const candidateXs = selected.flatMap(u => [u.bbox.x0, u.bbox.x1]);
+  const candidateYs = selected.flatMap(u => [u.bbox.y0, u.bbox.y1]);
+  const rawW = Math.max(...candidateXs) - Math.min(...candidateXs);
+  const rawH = Math.max(...candidateYs) - Math.min(...candidateYs);
+  const padX = Math.max(30, Math.round(rawW * 0.65));
+  const padY = Math.max(30, Math.round(rawH * 0.55));
+
+  const sx0 = Math.max(0, Math.floor((Math.min(...xs) - padX) / scale));
+  const sy0 = Math.max(0, Math.floor((Math.min(...ys) - padY) / scale));
+  const sx1 = Math.min(canvas.width, Math.ceil((Math.max(...xs) + padX) / scale));
+  const sy1 = Math.min(canvas.height, Math.ceil((Math.max(...ys) + padY) / scale));
+  if (sx1 <= sx0 || sy1 <= sy0) return null;
+
+  const c = document.createElement('canvas');
+  c.width = Math.max(1, sx1 - sx0);
+  c.height = Math.max(1, sy1 - sy0);
+  const cc = c.getContext('2d');
+  cc.imageSmoothingEnabled = true;
+  cc.imageSmoothingQuality = 'high';
+  cc.drawImage(sourceImage, sx0, sy0, c.width, c.height, 0, 0, c.width, c.height);
+  return { canvas: c, x0: sx0, y0: sy0 };
 }
 
 async function recognizeVariant(worker,inputCanvas,target,mode,scale){const result=await worker.recognize(inputCanvas,{tessedit_pageseg_mode:"11"});const data=result?.data||{},lines=data.lines||[],matches=[];for(const line of lines){const units=extractLineUnits(line),hits=findTargetInUnits(units,target),lineText=units.map(u=>u.ch).join("");for(const hit of hits)matches.push({x0:hit.targetBox.x0/scale,y0:hit.targetBox.y0/scale,x1:hit.targetBox.x1/scale,y1:hit.targetBox.y1/scale,mode,lineText,symbols:hit.symbols});}return {mode,lines,words:data.words||[],rawText:String(data.text||""),matches,near:findNearCandidates(lines,target)};}
@@ -538,55 +576,67 @@ async function refineNearCandidates(worker, results, ocrCanvas, target, scale) {
   let attempted = 0;
   let skippedExact = 0;
   let extraPasses = 0;
+  const MAX_REFINE_GROUPS = 8;
 
-  for (let gi = 0; gi < groups.length; gi++) {
+  for (let gi = 0; gi < groups.length && gi < MAX_REFINE_GROUPS; gi++) {
     const group = groups[gi];
-    // すでに通常の前処理OCRで同地点を確定できているなら、再OCRしない。
     if (groupTouchesExactHit(group, results)) {
       skippedExact++;
       continue;
     }
 
     const cand = makeGroupCandidate(group);
-    const crop = makeCandidateCrop(ocrCanvas, cand);
-    if (!crop) continue;
+    const grayCrop = makeCandidateCrop(ocrCanvas, cand);
+    const sourceCrop = makeSourceCandidateCrop(cand, scale);
+    if (!grayCrop && !sourceCrop) continue;
     attempted++;
-    status(`OCR診断中…\n候補地点 ${gi+1}/${groups.length} を再確認しています。`);
+    status(`OCR診断中…\n候補地点 ${gi+1}/${Math.min(groups.length, MAX_REFINE_GROUPS)} を再確認しています。`);
 
-    const REFINE_SCALE = 2;
-    const enlarged = document.createElement('canvas');
-    enlarged.width = Math.max(1, crop.canvas.width * REFINE_SCALE);
-    enlarged.height = Math.max(1, crop.canvas.height * REFINE_SCALE);
-    const eg = enlarged.getContext('2d');
-    eg.imageSmoothingEnabled = true;
-    eg.imageSmoothingQuality = 'high';
-    eg.drawImage(crop.canvas, 0, 0, enlarged.width, enlarged.height);
-
-    // まず低コストな1回だけ。ここで拾えたら追加OCRはしない。
-    const first = await worker.recognize(enlarged, {tessedit_pageseg_mode:'7'});
-    const firstText = normalize(String(first?.data?.text || ''));
     const hits = [];
-    if (firstText.includes(target)) {
-      hits.push({text:firstText, mode:`候補再OCR・${REFINE_SCALE}倍`, psm:'7'});
-    } else {
-      // それでも拾えなかった地点だけ、グレー＋コントラストを追加で1回。
-      extraPasses++;
-      const gray = makeGrayContrast(enlarged);
-      try {
-        const second = await worker.recognize(gray, {tessedit_pageseg_mode:'7'});
-        const secondText = normalize(String(second?.data?.text || ''));
-        if (secondText.includes(target)) {
-          hits.push({text:secondText, mode:'候補再OCR・グレー', psm:'7'});
-        }
-      } finally {
-        gray.width = 1; gray.height = 1;
-      }
+    const checked = new Set();
+
+    async function runLocalCrop(crop, label, psm) {
+      if (!crop) return false;
+      const REFINE_SCALE = 3;
+      const enlarged = document.createElement('canvas');
+      enlarged.width = Math.max(1, Math.round(crop.canvas.width * REFINE_SCALE));
+      enlarged.height = Math.max(1, Math.round(crop.canvas.height * REFINE_SCALE));
+      const eg = enlarged.getContext('2d');
+      eg.imageSmoothingEnabled = true;
+      eg.imageSmoothingQuality = 'high';
+      eg.drawImage(crop.canvas, 0, 0, enlarged.width, enlarged.height);
+
+      const key = `${label}|${psm}`;
+      if (checked.has(key)) { enlarged.width = 1; enlarged.height = 1; return false; }
+      checked.add(key);
+      const result = await worker.recognize(enlarged, {tessedit_pageseg_mode:String(psm)});
+      const text = normalize(String(result?.data?.text || ''));
+      const ok = text.includes(target);
+      if (ok) hits.push({text, mode:`候補再OCR・${label}・${REFINE_SCALE}倍`, psm:String(psm)});
+      enlarged.width = 1; enlarged.height = 1;
+      return ok;
     }
 
-    if (hits.length) {
+    // まず元画像。色文字（右側のユーザー名など）を落とさないためのルート。
+    let ok = await runLocalCrop(sourceCrop, '元画像', 7);
+
+    // 元画像で拾えなければ、全体OCRで実績のあるグレー＋コントラスト。
+    if (!ok) {
+      extraPasses++;
+      ok = await runLocalCrop(grayCrop, 'グレー', 7);
+    }
+
+    // それでもダメな「ゆーゴー」「めーざぴー」のような候補だけ、PSM8を1回追加。
+    if (!ok && (cand.similarity < 0.70 || (cand.exactChars || 0) <= 2)) {
+      extraPasses++;
+      ok = await runLocalCrop(sourceCrop || grayCrop, '元画像', 8);
+    }
+
+    if (ok) {
       refined.push({
         candidate:cand.candidate,
         similarity:cand.similarity,
+        exactChars:cand.exactChars || 0,
         lineText:cand.lineText,
         mode:cand.mode,
         refinedText:hits[0].text,
@@ -595,13 +645,13 @@ async function refineNearCandidates(worker, results, ocrCanvas, target, scale) {
         modeCount:cand.modeCount,
         box:group.box,
         refinedBox:getCandidateBox(cand,scale) || group.box,
-        cropBox:{x0:crop.x0/scale,y0:crop.y0/scale,x1:(crop.x0+crop.canvas.width)/scale,y1:(crop.y0+crop.canvas.height)/scale},
+        cropBox:grayCrop ? {x0:grayCrop.x0/scale,y0:grayCrop.y0/scale,x1:(grayCrop.x0+grayCrop.canvas.width)/scale,y1:(grayCrop.y0+grayCrop.canvas.height)/scale} : null,
         passCount:hits.length
       });
     }
 
-    enlarged.width = 1; enlarged.height = 1;
-    crop.canvas.width = 1; crop.canvas.height = 1;
+    if (grayCrop) { grayCrop.canvas.width = 1; grayCrop.canvas.height = 1; }
+    if (sourceCrop) { sourceCrop.canvas.width = 1; sourceCrop.canvas.height = 1; }
   }
 
   return {
@@ -613,6 +663,7 @@ async function refineNearCandidates(worker, results, ocrCanvas, target, scale) {
     elapsedMs: performance.now() - started
   };
 }
+
 function mergeMatches(results){const all=results.flatMap(r=>r.matches),final=[];for(const box of all){const dup=final.some(o=>{const ix0=Math.max(box.x0,o.x0),iy0=Math.max(box.y0,o.y0),ix1=Math.min(box.x1,o.x1),iy1=Math.min(box.y1,o.y1);if(ix1<=ix0||iy1<=iy0)return false;const inter=(ix1-ix0)*(iy1-iy0),area=Math.min((box.x1-box.x0)*(box.y1-box.y0),(o.x1-o.x0)*(o.y1-o.y0));return area>0&&inter/area>.45;});if(!dup)final.push(box);}return final;}
 
 async function run(){
@@ -726,9 +777,9 @@ async function diagnoseOCR(){
       `※ 第1段階で1件以上HITした場合、二値化180・220・反転の全体OCRは省略します。`,
       `※ 第1段階でHITが0件の場合だけ、二値化180・220・反転を追加します。`,
       `※ 候補地点は同じ位置付近の候補をまとめています。`,
-      `※ 再OCRはまず2倍・PSM 7を1回だけ実行し、失敗した地点だけグレー＋コントラスト・PSM 7を追加します。`,
-      `※ 候補地点の再OCRは診断専用です。自動黒塗りにはまだ使用しません。`,
-      `※ 現在の自動黒塗りは、この診断で救出した候補をまだ使用していません。`
+      `※ 近似候補は、対象文字の半分以上の文字が残っている場合も救出候補にします。`,
+      `※ 再OCRは元画像→グレーの順で確認し、必要な候補だけPSM 8を追加します。`,
+      `※ 診断で救出した候補は、自動黒塗りにも使用されます。`
     );
     ocrDiagnostics.textContent=lines.join("\n");
     canvas.hidden=false; canvas.style.display='block';
