@@ -415,19 +415,42 @@ function buildOcrCanvas(){
 
 async function collectOcrResults(worker,target){
   const {canvas:oc,scale}=buildOcrCanvas();
-  const names=["通常","グレースケール","グレー＋コントラスト","二値化180","二値化220","反転"];
   const results=[];
-  // 全前処理画像を同時に保持しない。iPhone/iPadでcanvasが消える原因になりやすい。
-  for(const name of names){
-    status(`OCR中…\n前処理：${name}`);
-    const variant=makeOcrVariant(oc,name);
-    try {
-      results.push(await recognizeVariant(worker,variant,target,name,scale));
-    } finally {
-      if(variant!==oc) { variant.width=1; variant.height=1; }
-    }
+  const stats={primaryMs:0,fallbackMs:0,primaryHitCount:0,fallbackUsed:false,primaryName:"グレー＋コントラスト",fallbackNames:["二値化180","二値化220","反転"]};
+
+  // まず今回の実験で最も安定していた「グレー＋コントラスト」だけを実行。
+  // ここで1件でも正確に見つかれば、追加の全体OCRは省略する。
+  // ※診断用の速度実験版。見落としの有無を確認するため、V32は別に保存しておく。
+  const primaryStarted=performance.now();
+  status(`OCR中…\n前処理：${stats.primaryName}`);
+  const primaryVariant=makeOcrVariant(oc,stats.primaryName);
+  try {
+    const primary=await recognizeVariant(worker,primaryVariant,target,stats.primaryName,scale);
+    results.push(primary);
+    stats.primaryHitCount=primary.matches.length;
+  } finally {
+    if(primaryVariant!==oc){primaryVariant.width=1;primaryVariant.height=1;}
+    stats.primaryMs=performance.now()-primaryStarted;
   }
-  return {results,scale,ocrCanvas:oc};
+
+  // グレー＋コントラストで1件も見つからなかった場合だけ、
+  // 補助的な全体OCRを追加する。通常・グレースケールは今回の実験では外す。
+  if(stats.primaryHitCount===0){
+    stats.fallbackUsed=true;
+    const fallbackStarted=performance.now();
+    for(const name of stats.fallbackNames){
+      status(`OCR中…\n追加前処理：${name}`);
+      const variant=makeOcrVariant(oc,name);
+      try {
+        results.push(await recognizeVariant(worker,variant,target,name,scale));
+      } finally {
+        if(variant!==oc){variant.width=1;variant.height=1;}
+      }
+    }
+    stats.fallbackMs=performance.now()-fallbackStarted;
+  }
+
+  return {results,scale,ocrCanvas:oc,stats};
 }
 
 function getCandidateBox(candidate, scale) {
@@ -608,7 +631,7 @@ async function diagnoseOCR(){
     canvas.hidden=false; canvas.style.display="block";
     status("OCR診断中…\n認識条件を比較しています。画像表示は維持します。");
     const ocrStarted=performance.now();
-    const {results,scale,ocrCanvas}=await collectOcrResults(worker,target);
+    const {results,scale,ocrCanvas,stats}=await collectOcrResults(worker,target);
     const ocrElapsed=performance.now()-ocrStarted;
     const refineStarted=performance.now();
     const refine=await refineNearCandidates(worker,results,ocrCanvas,target,scale);
@@ -645,10 +668,15 @@ async function diagnoseOCR(){
     lines.push("",
       `===== 処理時間 =====`,
       `OCR全体：${(ocrElapsed/1000).toFixed(2)}秒`,
+      `  第1段階（グレー＋コントラスト）：${(stats.primaryMs/1000).toFixed(2)}秒 / HIT ${stats.primaryHitCount}件`,
+      `  追加全体OCR：${stats.fallbackUsed ? (stats.fallbackMs/1000).toFixed(2)+"秒 / 実行" : "0.00秒 / 省略"}`,
       `候補再OCR：${(refineElapsed/1000).toFixed(2)}秒`,
       `診断全体：${(totalElapsed/1000).toFixed(2)}秒`,
       `候補地点：${candidateGroups.length} / 再OCR実行：${refine.attempted} / 再OCR追加パス：${refine.extraPasses} / 既存HITで省略：${refine.skippedExact}`,
       "",
+      `※ 今回は速度実験として、まずグレー＋コントラストだけを全体OCRします。`,
+      `※ 第1段階で1件以上HITした場合、二値化180・220・反転の全体OCRは省略します。`,
+      `※ 第1段階でHITが0件の場合だけ、二値化180・220・反転を追加します。`,
       `※ 候補地点は同じ位置付近の候補をまとめています。`,
       `※ 再OCRはまず2倍・PSM 7を1回だけ実行し、失敗した地点だけグレー＋コントラスト・PSM 7を追加します。`,
       `※ 候補地点の再OCRは診断専用です。自動黒塗りにはまだ使用しません。`,
