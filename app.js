@@ -430,47 +430,122 @@ async function collectOcrResults(worker,target){
   return {results,scale,ocrCanvas:oc};
 }
 
-async function refineNearCandidates(worker,results,ocrCanvas,target,scale){
-  const refined=[];
-  const candidates=results.flatMap(r=>r.near.map(c=>({...c,mode:r.mode}))).filter(c=>c.similarity<0.999).sort((a,b)=>b.similarity-a.similarity);
-  const seen=new Set();
-  for(const cand of candidates){
-    const b=cand.units?.[0]?.bbox, e=cand.units?.[cand.units.length-1]?.bbox;
-    if(!b||!e)continue;
-    const key=cand.lineText+'|'+Math.round(b.x0)+'|'+Math.round(e.x1);
-    if(seen.has(key))continue; seen.add(key);
-    const crop=makeCandidateCrop(ocrCanvas,cand);
-    if(!crop)continue;
-    const variants=[];
-    const enlarged=document.createElement('canvas');
-    // 候補文字をさらに大きくして再OCR。小さい日本語文字の形状を拾いやすくする。
+function getCandidateBox(candidate, scale) {
+  const units = candidate.units || [];
+  if (!units.length) return null;
+  const xs = units.flatMap(u => [u.bbox.x0, u.bbox.x1]);
+  const ys = units.flatMap(u => [u.bbox.y0, u.bbox.y1]);
+  return {
+    x0: Math.min(...xs) / scale,
+    y0: Math.min(...ys) / scale,
+    x1: Math.max(...xs) / scale,
+    y1: Math.max(...ys) / scale
+  };
+}
+
+function candidateLocationKey(candidate, scale) {
+  const b = getCandidateBox(candidate, scale);
+  if (!b) return null;
+  // 同じ文字列の候補が数pxずれて複数の前処理から出ても、同一地点としてまとめる。
+  return `${Math.round(b.x0 / 18)}:${Math.round(b.y0 / 18)}:${Math.round(b.x1 / 18)}:${Math.round(b.y1 / 18)}`;
+}
+
+function groupNearCandidates(results, scale) {
+  const groups = [];
+  for (const result of results) {
+    for (const candidate of result.near || []) {
+      if (candidate.similarity >= 0.999) continue;
+      const box = getCandidateBox(candidate, scale);
+      if (!box) continue;
+      let group = groups.find(g => {
+        const a = g.box, b = box;
+        const cxA = (a.x0 + a.x1) / 2, cyA = (a.y0 + a.y1) / 2;
+        const cxB = (b.x0 + b.x1) / 2, cyB = (b.y0 + b.y1) / 2;
+        const w = Math.max(a.x1 - a.x0, b.x1 - b.x0, 1);
+        const h = Math.max(a.y1 - a.y0, b.y1 - b.y0, 1);
+        return Math.abs(cxA - cxB) <= Math.max(28, w * 0.45) &&
+               Math.abs(cyA - cyB) <= Math.max(28, h * 0.65);
+      });
+      if (!group) {
+        group = { box, candidates: [], modes: new Set() };
+        groups.push(group);
+      }
+      group.candidates.push({...candidate, mode: result.mode});
+      group.modes.add(result.mode);
+      group.box = {
+        x0: Math.min(group.box.x0, box.x0),
+        y0: Math.min(group.box.y0, box.y0),
+        x1: Math.max(group.box.x1, box.x1),
+        y1: Math.max(group.box.y1, box.y1)
+      };
+    }
+  }
+  groups.sort((a, b) => {
+    const sa = Math.max(...a.candidates.map(c => c.similarity));
+    const sb = Math.max(...b.candidates.map(c => c.similarity));
+    return sb - sa;
+  });
+  return groups;
+}
+
+function makeGroupCandidate(group) {
+  const best = [...group.candidates].sort((a,b) => b.similarity - a.similarity)[0];
+  return {...best, box: group.box, candidateCount: group.candidates.length, modeCount: group.modes.size};
+}
+
+async function refineNearCandidates(worker, results, ocrCanvas, target, scale) {
+  const refined = [];
+  const groups = groupNearCandidates(results, scale);
+  for (const group of groups) {
+    const cand = makeGroupCandidate(group);
+    const crop = makeCandidateCrop(ocrCanvas, cand);
+    if (!crop) continue;
+
     const REFINE_SCALE = 2;
-    enlarged.width=crop.canvas.width*REFINE_SCALE;
-    enlarged.height=crop.canvas.height*REFINE_SCALE;
-    const eg=enlarged.getContext('2d');
-    eg.imageSmoothingEnabled=true;
-    eg.imageSmoothingQuality='high';
-    eg.drawImage(crop.canvas,0,0,enlarged.width,enlarged.height);
-    variants.push({name:`候補再OCR・${REFINE_SCALE}倍`,canvas:enlarged});
-    variants.push({name:'候補再OCR・グレー',canvas:makeGrayContrast(enlarged)});
-    variants.push({name:'候補再OCR・反転',canvas:makeInverted(enlarged)});
-    let found=false;
-    for(const v of variants){
-      if(found) break;
-      for(const psm of ['7','8','6']){
-        const rr=await worker.recognize(v.canvas,{tessedit_pageseg_mode:psm});
-        const text=normalize(String(rr?.data?.text||''));
-        if(text.includes(target)){
-          refined.push({candidate:cand.candidate,similarity:cand.similarity,lineText:cand.lineText,mode:cand.mode,refinedText:text,box:{x0:crop.x0/scale,y0:crop.y0/scale,x1:(crop.x0+crop.canvas.width)/scale,y1:(crop.y0+crop.canvas.height)/scale}});
-          found=true;
-          break;
+    const enlarged = document.createElement('canvas');
+    enlarged.width = Math.max(1, crop.canvas.width * REFINE_SCALE);
+    enlarged.height = Math.max(1, crop.canvas.height * REFINE_SCALE);
+    const eg = enlarged.getContext('2d');
+    eg.imageSmoothingEnabled = true;
+    eg.imageSmoothingQuality = 'high';
+    eg.drawImage(crop.canvas, 0, 0, enlarged.width, enlarged.height);
+
+    const variants = [
+      {name:`候補再OCR・${REFINE_SCALE}倍`, canvas:enlarged},
+      {name:'候補再OCR・グレー', canvas:makeGrayContrast(enlarged)},
+      {name:'候補再OCR・反転', canvas:makeInverted(enlarged)}
+    ];
+
+    const hits = [];
+    const seenText = new Set();
+    for (const v of variants) {
+      for (const psm of ['7','8','6']) {
+        const rr = await worker.recognize(v.canvas, {tessedit_pageseg_mode:psm});
+        const text = normalize(String(rr?.data?.text || ''));
+        if (text.includes(target) && !seenText.has(text)) {
+          seenText.add(text);
+          hits.push({text, mode:v.name, psm});
         }
       }
     }
-  }
-  return refined;
-}
 
+    if (hits.length) {
+      refined.push({
+        candidate:cand.candidate,
+        similarity:cand.similarity,
+        lineText:cand.lineText,
+        mode:cand.mode,
+        refinedText:hits[0].text,
+        hits,
+        candidateCount:cand.candidateCount,
+        modeCount:cand.modeCount,
+        box:group.box,
+        cropBox:{x0:crop.x0/scale,y0:crop.y0/scale,x1:(crop.x0+crop.canvas.width)/scale,y1:(crop.y0+crop.canvas.height)/scale}
+      });
+    }
+  }
+  return {groups, refined};
+}
 function mergeMatches(results){const all=results.flatMap(r=>r.matches),final=[];for(const box of all){const dup=final.some(o=>{const ix0=Math.max(box.x0,o.x0),iy0=Math.max(box.y0,o.y0),ix1=Math.min(box.x1,o.x1),iy1=Math.min(box.y1,o.y1);if(ix1<=ix0||iy1<=iy0)return false;const inter=(ix1-ix0)*(iy1-iy0),area=Math.min((box.x1-box.x0)*(box.y1-box.y0),(o.x1-o.x0)*(o.y1-o.y0));return area>0&&inter/area>.45;});if(!dup)final.push(box);}return final;}
 
 async function run(){errorEl.hidden=true;ocrDiagnostics.hidden=true;ocrDebugLayer.hidden=true;ocrDebugLayer.innerHTML="";try{if(!sourceImage)throw new Error("先に画像を選択してください。");const target=normalize(targetText.value);if(!target)throw new Error("黒塗りする文字を入力してください。");manualStamps.length=0;ocrBaseCanvas=null;redrawFromBase();const worker=await getWorker(getOcrLanguage(target));status("OCR中…\n複数の前処理で検索しています。");const {results}=await collectOcrResults(worker,target);const matches=mergeMatches(results);for(const b of matches)paintOcr({x:b.x0,y:b.y0,w:b.x1-b.x0,h:b.y1-b.y0},overlayName.checked?overlayText.value:"");ocrBaseCanvas=document.createElement("canvas");ocrBaseCanvas.width=canvas.width;ocrBaseCanvas.height=canvas.height;ocrBaseCanvas.getContext("2d").drawImage(canvas,0,0);status(`黒塗り完了：${matches.length}箇所\n5種類の前処理でOCRしました。`);saveBtn.disabled=false;manualBtn.disabled=false;}catch(error){status("OCRでエラーが発生しました。下のエラー詳細を確認してください。",error);}}
@@ -489,7 +564,7 @@ async function diagnoseOCR(){
     canvas.hidden=false; canvas.style.display="block";
     status("OCR診断中…\n認識条件を比較しています。画像表示は維持します。");
     const {results,scale,ocrCanvas}=await collectOcrResults(worker,target);
-    const refined=await refineNearCandidates(worker,results,ocrCanvas,target,scale);
+    const {groups:candidateGroups,refined}=await refineNearCandidates(worker,results,ocrCanvas,target,scale);
     const lines=[`対象文字：${targetText.value}`,`正規化後：${target}`,""];
     for(const r of results){
       lines.push(`===== ${r.mode} / PSM 11 =====`,`HIT：${r.matches.length}件`);
@@ -501,9 +576,15 @@ async function diagnoseOCR(){
       if(r.near.length)lines.push(`近似候補：${r.near.map(x=>`「${x.candidate}」${Math.round(x.similarity*100)}%`).join(" / ")}`);
       lines.push(`認識テキスト：${r.rawText.replace(/\n/g," / ")}`,"");
     }
-    lines.push(`===== 候補の再OCR =====`);
-    if(refined.length){for(const x of refined)lines.push(`再OCR HIT：「${x.refinedText}」 / 元候補「${x.candidate}」 / ${x.mode} / 行：「${x.lineText}」`);}else lines.push('再OCRで対象文字を確認できた候補はありません。');
-    lines.push("",`※ 候補再OCR：前後の文字を含む局所範囲を2倍に拡大し、PSM 7/8/6で再確認`, `※ OCR画像：${ocrCanvas.width}×${ocrCanvas.height}px / 元画像：${canvas.width}×${canvas.height}px`,`※ HITは行内symbolを連結して対象文字列を探しています。`,`※ 近似候補の再OCRは診断専用です。自動黒塗りにはまだ使用しません。`);
+    lines.push(`===== 候補地点の統合 =====`, `候補地点：${candidateGroups.length}箇所 / 個別候補：${results.reduce((n,r)=>n+r.near.length,0)}件`);
+    candidateGroups.forEach((g,i)=>{
+      const best=Math.max(...g.candidates.map(c=>c.similarity));
+      const names=[...new Set(g.candidates.map(c=>c.candidate))].slice(0,8);
+      lines.push(`  地点${i+1}: 候補${g.candidates.length}件 / 前処理${g.modes.size}種 / 最高${Math.round(best*100)}% / ${names.map(x=>`「${x}」`).join('・')}`);
+    });
+    lines.push("",`===== 候補地点の再OCR =====`);
+    if(refined.length){for(const x of refined){const detail=x.hits.map(h=>`${h.text} [PSM${h.psm}]`).join(' / ');lines.push(`再OCR HIT：「${x.refinedText}」 / 元候補「${x.candidate}」 / 同地点候補${x.candidateCount}件 / ${detail}`);}}else lines.push('再OCRで対象文字を確認できた候補地点はありません。');
+    lines.push("",`※ 候補は同じ位置付近のものを1地点にまとめ、各地点を2倍＋PSM 7/8/6で再確認しています。`,`※ OCR画像：${ocrCanvas.width}×${ocrCanvas.height}px / 元画像：${canvas.width}×${canvas.height}px`,`※ HITは行内symbolを連結して対象文字列を探しています。`,`※ 候補地点の再OCRは診断専用です。自動黒塗りにはまだ使用しません。`,`※ 現在の自動黒塗りは、この診断で救出した候補をまだ使用していません。`);
     ocrDiagnostics.textContent=lines.join("\n");
     canvas.hidden=false; canvas.style.display='block';
     const tr=getCanvasDisplayTransform(),seen=[];
@@ -513,7 +594,7 @@ async function diagnoseOCR(){
     }
     ocrDebugLayer.hidden=ocrDebugLayer.childElementCount===0;
     const total=results.reduce((n,r)=>n+r.matches.length,0);
-    status(`OCR診断完了。\n検出：${total}件（重複を含む） / 再OCR確認：${refined.length}件\n下の診断結果を確認してください。`);
+    status(`OCR診断完了。\n検出：${total}件（重複を含む） / 候補地点：${candidateGroups.length}箇所 / 再OCR確認：${refined.length}箇所\n下の診断結果を確認してください。`);
   }catch(error){canvas.hidden=false;canvas.style.display='block';status("OCR診断でエラーが発生しました。",error);}
 }
 
