@@ -594,6 +594,7 @@ async function refineNearCandidates(worker, results, ocrCanvas, target, scale) {
         candidateCount:cand.candidateCount,
         modeCount:cand.modeCount,
         box:group.box,
+        refinedBox:getCandidateBox(cand,scale) || group.box,
         cropBox:{x0:crop.x0/scale,y0:crop.y0/scale,x1:(crop.x0+crop.canvas.width)/scale,y1:(crop.y0+crop.canvas.height)/scale},
         passCount:hits.length
       });
@@ -614,7 +615,54 @@ async function refineNearCandidates(worker, results, ocrCanvas, target, scale) {
 }
 function mergeMatches(results){const all=results.flatMap(r=>r.matches),final=[];for(const box of all){const dup=final.some(o=>{const ix0=Math.max(box.x0,o.x0),iy0=Math.max(box.y0,o.y0),ix1=Math.min(box.x1,o.x1),iy1=Math.min(box.y1,o.y1);if(ix1<=ix0||iy1<=iy0)return false;const inter=(ix1-ix0)*(iy1-iy0),area=Math.min((box.x1-box.x0)*(box.y1-box.y0),(o.x1-o.x0)*(o.y1-o.y0));return area>0&&inter/area>.45;});if(!dup)final.push(box);}return final;}
 
-async function run(){errorEl.hidden=true;ocrDiagnostics.hidden=true;ocrDebugLayer.hidden=true;ocrDebugLayer.innerHTML="";try{if(!sourceImage)throw new Error("先に画像を選択してください。");const target=normalize(targetText.value);if(!target)throw new Error("黒塗りする文字を入力してください。");manualStamps.length=0;ocrBaseCanvas=null;redrawFromBase();const worker=await getWorker(getOcrLanguage(target));status("OCR中…\n複数の前処理で検索しています。");const {results}=await collectOcrResults(worker,target);const matches=mergeMatches(results);for(const b of matches)paintOcr({x:b.x0,y:b.y0,w:b.x1-b.x0,h:b.y1-b.y0},overlayName.checked?overlayText.value:"");ocrBaseCanvas=document.createElement("canvas");ocrBaseCanvas.width=canvas.width;ocrBaseCanvas.height=canvas.height;ocrBaseCanvas.getContext("2d").drawImage(canvas,0,0);status(`黒塗り完了：${matches.length}箇所\n5種類の前処理でOCRしました。`);saveBtn.disabled=false;manualBtn.disabled=false;}catch(error){status("OCRでエラーが発生しました。下のエラー詳細を確認してください。",error);}}
+async function run(){
+  errorEl.hidden=true; ocrDiagnostics.hidden=true; ocrDebugLayer.hidden=true; ocrDebugLayer.innerHTML="";
+  try{
+    if(!sourceImage) throw new Error("先に画像を選択してください。");
+    const target=normalize(targetText.value);
+    if(!target) throw new Error("黒塗りする文字を入力してください。");
+
+    manualStamps.length=0; ocrBaseCanvas=null; redrawFromBase();
+    const worker=await getWorker(getOcrLanguage(target));
+    status("OCR中…\n対象文字を探しています。");
+
+    // V33の高速OCRをそのまま使用。通常HITはV19の黒塗り処理へ接続する。
+    const {results,scale,ocrCanvas}=await collectOcrResults(worker,target);
+    const matches=mergeMatches(results);
+
+    // 通常OCRで見つかった対象文字を黒塗り。
+    const paintBoxes=matches.map(b=>({
+      x:b.x0, y:b.y0, w:b.x1-b.x0, h:b.y1-b.y0, source:"OCR"
+    }));
+
+    // 通常OCRで拾えなかった候補だけ、V33の局所再OCRを実行。
+    // 再OCRで対象文字を確認できた地点は、その候補文字のbboxを黒塗り範囲として追加する。
+    const refine=await refineNearCandidates(worker,results,ocrCanvas,target,scale);
+    for(const r of refine.refined){
+      const b=r.refinedBox || r.box;
+      if(!b) continue;
+      const duplicate=paintBoxes.some(o=>{
+        const ix0=Math.max(o.x,b.x0), iy0=Math.max(o.y,b.y0);
+        const ix1=Math.min(o.x+o.w,b.x1), iy1=Math.min(o.y+o.h,b.y1);
+        if(ix1<=ix0 || iy1<=iy0) return false;
+        const inter=(ix1-ix0)*(iy1-iy0);
+        const area=Math.min(o.w*o.h,(b.x1-b.x0)*(b.y1-b.y0));
+        return area>0 && inter/area>.45;
+      });
+      if(!duplicate) paintBoxes.push({x:b.x0,y:b.y0,w:b.x1-b.x0,h:b.y1-b.y0,source:"再OCR"});
+    }
+
+    for(const b of paintBoxes){
+      paintOcr({x:b.x,y:b.y,w:b.w,h:b.h},overlayName.checked?overlayText.value:"");
+    }
+
+    ocrBaseCanvas=document.createElement("canvas");
+    ocrBaseCanvas.width=canvas.width; ocrBaseCanvas.height=canvas.height;
+    ocrBaseCanvas.getContext("2d").drawImage(canvas,0,0);
+    saveBtn.disabled=false; manualBtn.disabled=false;
+    status(`黒塗り完了：${paintBoxes.length}箇所\n通常OCR：${matches.length}箇所 / 再OCR：${paintBoxes.length-matches.length}箇所`);
+  }catch(error){status("OCRでエラーが発生しました。下のエラー詳細を確認してください。",error);}
+}
 
 async function diagnoseOCR(){
   ocrDiagnostics.hidden=false;
