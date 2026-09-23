@@ -81,8 +81,28 @@ function normalize(text) {
 
 const OCR_LEFT_TRIM = 0; // OCR対象範囲の左端微調整。+で左側を削る。
 const OCR_EDGE_PAD = 2; // 対象文字の字形がbboxから少しはみ出す場合の左右余白(px)
+const OCR_FIRST_SYMBOL_MIN_HEIGHT_RATIO = 0.25; // 1文字目bboxが極端に薄い時だけ補正
+const OCR_FIRST_SYMBOL_LEFT_EXTRA = 8; // 異常な1文字目だけ左へ追加する余白(px)
 
-function paintOcr(box, text = "") {
+function getOcrPaintBox(box, symbols = []) {
+    const out = { ...box };
+    if (symbols.length && box.h > 0) {
+        const first = symbols[0]?.bbox;
+        if (first) {
+            const firstHeight = Math.max(0, first.y1 - first.y0);
+            const ratio = firstHeight / box.h;
+            // 正常な「ゆ」は触らず、今回のような極端に薄いbboxだけを補正する。
+            if (ratio < OCR_FIRST_SYMBOL_MIN_HEIGHT_RATIO) {
+                out.x = Math.max(0, out.x - OCR_FIRST_SYMBOL_LEFT_EXTRA);
+                out.w += OCR_FIRST_SYMBOL_LEFT_EXTRA;
+            }
+        }
+    }
+    return out;
+}
+
+function paintOcr(box, text = "", symbols = []) {
+    box = getOcrPaintBox(box, symbols);
     const padding = Math.max(3, Math.round(Math.min(box.w, box.h) * 0.08));
     const left = Math.max(0, box.x - OCR_EDGE_PAD - padding + OCR_LEFT_TRIM);
     const right = Math.min(canvas.width, box.x + box.w + OCR_EDGE_PAD + padding);
@@ -762,7 +782,7 @@ async function run(){
 
     // 通常OCRで見つかった対象文字を黒塗り。
     const paintBoxes=matches.map(b=>({
-      x:b.x0, y:b.y0, w:b.x1-b.x0, h:b.y1-b.y0, source:"OCR"
+      x:b.x0, y:b.y0, w:b.x1-b.x0, h:b.y1-b.y0, symbols:b.symbols||[], source:"OCR"
     }));
 
     // 通常OCRで拾えなかった候補だけ、V33の局所再OCRを実行。
@@ -779,11 +799,11 @@ async function run(){
         const area=Math.min(o.w*o.h,(b.x1-b.x0)*(b.y1-b.y0));
         return area>0 && inter/area>.45;
       });
-      if(!duplicate) paintBoxes.push({x:b.x0,y:b.y0,w:b.x1-b.x0,h:b.y1-b.y0,source:r.recovery||"再OCR"});
+      if(!duplicate) paintBoxes.push({x:b.x0,y:b.y0,w:b.x1-b.x0,h:b.y1-b.y0,symbols:r.symbols||[],source:r.recovery||"再OCR"});
     }
 
     for(const b of paintBoxes){
-      paintOcr({x:b.x,y:b.y,w:b.w,h:b.h},overlayName.checked?overlayText.value:"");
+      paintOcr({x:b.x,y:b.y,w:b.w,h:b.h},overlayName.checked?overlayText.value:"",b.symbols||[]);
     }
 
     ocrBaseCanvas=document.createElement("canvas");
