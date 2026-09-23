@@ -83,6 +83,7 @@ const OCR_LEFT_TRIM = 0; // OCR対象範囲の左端微調整。+で左側を削
 const OCR_EDGE_PAD = 2; // 対象文字の字形がbboxから少しはみ出す場合の左右余白(px)
 const OCR_FIRST_SYMBOL_MIN_HEIGHT_RATIO = 0.25; // 1文字目bboxが極端に薄い時だけ補正
 const OCR_FIRST_SYMBOL_LEFT_EXTRA = 28; // 異常な1文字目だけ左へ追加する余白(px)
+const OCR_RESCUE_LEFT_EXTRA = 18; // 近似候補救出だけ左端を追加する余白(px)
 
 function getOcrPaintBox(box, symbols = []) {
     const out = { ...box };
@@ -101,8 +102,14 @@ function getOcrPaintBox(box, symbols = []) {
     return out;
 }
 
-function paintOcr(box, text = "", symbols = []) {
+function paintOcr(box, text = "", symbols = [], rescue = false) {
     box = getOcrPaintBox(box, symbols);
+    // 近似候補救出（例：「めーざー」→「ゆーざー」）だけ、
+    // 1文字目の誤認で左端が右へ寄るケースを補正する。通常HITには適用しない。
+    if (rescue) {
+        box.x = Math.max(0, box.x - OCR_RESCUE_LEFT_EXTRA);
+        box.w += OCR_RESCUE_LEFT_EXTRA;
+    }
     const padding = Math.max(3, Math.round(Math.min(box.w, box.h) * 0.08));
     const left = Math.max(0, box.x - OCR_EDGE_PAD - padding + OCR_LEFT_TRIM);
     const right = Math.min(canvas.width, box.x + box.w + OCR_EDGE_PAD + padding);
@@ -799,11 +806,11 @@ async function run(){
         const area=Math.min(o.w*o.h,(b.x1-b.x0)*(b.y1-b.y0));
         return area>0 && inter/area>.45;
       });
-      if(!duplicate) paintBoxes.push({x:b.x0,y:b.y0,w:b.x1-b.x0,h:b.y1-b.y0,symbols:r.symbols||[],source:r.recovery||"再OCR"});
+      if(!duplicate) paintBoxes.push({x:b.x0,y:b.y0,w:b.x1-b.x0,h:b.y1-b.y0,symbols:r.symbols||[],source:r.recovery||"再OCR",rescue:r.recovery==="近似候補救出"});
     }
 
     for(const b of paintBoxes){
-      paintOcr({x:b.x,y:b.y,w:b.w,h:b.h},overlayName.checked?overlayText.value:"",b.symbols||[]);
+      paintOcr({x:b.x,y:b.y,w:b.w,h:b.h},overlayName.checked?overlayText.value:"",b.symbols||[],b.rescue===true);
     }
 
     ocrBaseCanvas=document.createElement("canvas");
