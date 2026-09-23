@@ -591,11 +591,15 @@ async function refineNearCandidates(worker, results, ocrCanvas, target, scale) {
     const sameLength = group.candidates.filter(c => [...c.candidate].length === tlen);
     if (!sameLength.length) return null;
 
+    // V37: 「めーざー」のような1文字誤認を明示的に救出する。
+    // exactChars は同じ文字が重複する「ー」をうまく評価できないため、
+    // ここでは文字列そのものの編集距離を基準にする。
     const strong = sameLength
-      .filter(c => (c.exactChars || 0) >= Math.max(2, tlen - 1))
+      .map(c => ({...c, recoveryDistance: editDistance(target, c.candidate)}))
+      .filter(c => c.recoveryDistance <= 1)
       .filter(c => c.similarity >= 0.72)
       .sort((a,b) => {
-        if ((b.exactChars || 0) !== (a.exactChars || 0)) return (b.exactChars || 0) - (a.exactChars || 0);
+        if (a.recoveryDistance !== b.recoveryDistance) return a.recoveryDistance - b.recoveryDistance;
         return b.similarity - a.similarity;
       });
 
@@ -604,12 +608,13 @@ async function refineNearCandidates(worker, results, ocrCanvas, target, scale) {
     const best = strong[0];
     const distinctCandidates = new Set(strong.map(c => c.candidate));
     const enoughSupport = strong.length >= 1;
-    const conservativeLengthRule = tlen >= 3 ? true : false;
+    const conservativeLengthRule = tlen >= 3;
     if (!enoughSupport || !conservativeLengthRule) return null;
 
     return {
       candidate: best.candidate,
       similarity: best.similarity,
+      recoveryDistance: best.recoveryDistance,
       exactChars: best.exactChars || 0,
       lineText: best.lineText,
       mode: best.mode,
@@ -812,7 +817,9 @@ async function diagnoseOCR(){
       const best=Math.max(...g.candidates.map(c=>c.similarity));
       const names=[...new Set(g.candidates.map(c=>c.candidate))].slice(0,8);
       const alreadyHit=groupTouchesExactHit(g,results);
-      lines.push(`  地点${i+1}: 候補${g.candidates.length}件 / 前処理${g.modes.size}種 / 最高${Math.round(best*100)}% / ${alreadyHit?'既存HITあり・再OCR省略':'再OCR対象'} / ${names.map(x=>`「${x}」`).join('・')}`);
+      const recoveryPreview=[...g.candidates].filter(c=>[...c.candidate].length===[...target].length).map(c=>({c,d:editDistance(target,c.candidate)})).filter(x=>x.d<=1).sort((a,b)=>a.d-b.d||b.c.similarity-a.c.similarity)[0];
+      const preview=recoveryPreview?` / 1文字誤認候補「${recoveryPreview.c.candidate}」距離${recoveryPreview.d}`:'';
+      lines.push(`  地点${i+1}: 候補${g.candidates.length}件 / 前処理${g.modes.size}種 / 最高${Math.round(best*100)}% / ${alreadyHit?'既存HITあり・再OCR省略':'再OCR対象'} / ${names.map(x=>`「${x}」`).join('・')}${preview}`);
     });
     lines.push("",`===== 候補地点の再OCR =====`);
     if(refined.length){
@@ -823,7 +830,7 @@ async function diagnoseOCR(){
     }
     if(acceptedNear.length){
       for(const x of acceptedNear){
-        lines.push(`近似候補救出：「${target}」として採用 / OCR候補「${x.candidate}」 / 類似度${Math.round(x.similarity*100)}% / 同地点候補${x.candidateCount}件 / 強候補${x.strongCandidateCount}件`);
+        lines.push(`近似候補救出：「${target}」として採用 / OCR候補「${x.candidate}」 / 編集距離${x.recoveryDistance} / 類似度${Math.round(x.similarity*100)}% / 同地点候補${x.candidateCount}件 / 強候補${x.strongCandidateCount}件`);
       }
     }
     if(!refined.length && !acceptedNear.length) lines.push('再OCR・近似候補救出で対象文字を確認できた候補地点はありません。');
