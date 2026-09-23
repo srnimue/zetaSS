@@ -618,7 +618,7 @@ async function refineNearCandidates(worker, results, ocrCanvas, target, scale) {
     const xs = units.flatMap(u => [u.bbox.x0, u.bbox.x1]);
     const ys = units.flatMap(u => [u.bbox.y0, u.bbox.y1]);
     if (!xs.length || !ys.length) return null;
-    // OCRキャンバスは元画像のscale倍なので、黒塗りに渡す前に元画像座標へ戻す。
+    // OCRキャンバスは元画像のscale倍なので、黒塗りへ渡す前に元画像座標へ戻す。
     const candidateBox = {
       x0: Math.min(...xs) / scale,
       y0: Math.min(...ys) / scale,
