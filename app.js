@@ -82,7 +82,7 @@ function normalize(text) {
 const OCR_LEFT_TRIM = 0; // OCR対象範囲の左端微調整。+で左側を削る。
 const OCR_EDGE_PAD = 2; // 対象文字の字形がbboxから少しはみ出す場合の左右余白(px)
 const OCR_FIRST_SYMBOL_MIN_HEIGHT_RATIO = 0.25; // 1文字目bboxが極端に薄い時だけ補正
-const OCR_FIRST_SYMBOL_LEFT_EXTRA = 8; // 異常な1文字目だけ左へ追加する余白(px)
+const OCR_FIRST_SYMBOL_LEFT_EXTRA = 28; // 異常な1文字目だけ左へ追加する余白(px)
 
 function getOcrPaintBox(box, symbols = []) {
     const out = { ...box };
