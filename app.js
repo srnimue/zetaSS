@@ -611,6 +611,20 @@ async function refineNearCandidates(worker, results, ocrCanvas, target, scale) {
     const conservativeLengthRule = tlen >= 3;
     if (!enoughSupport || !conservativeLengthRule) return null;
 
+    // V38: 黒塗りには「候補地点全体」ではなく、採用した近似候補自身のbboxを使う。
+    // group.box は同じ地点に集まった複数候補の外接矩形なので、これをそのまま
+    // 黒塗りすると周囲の文章まで巻き込んでしまう。
+    const units = best.units || [];
+    const xs = units.flatMap(u => [u.bbox.x0, u.bbox.x1]);
+    const ys = units.flatMap(u => [u.bbox.y0, u.bbox.y1]);
+    if (!xs.length || !ys.length) return null;
+    const candidateBox = {
+      x0: Math.min(...xs),
+      y0: Math.min(...ys),
+      x1: Math.max(...xs),
+      y1: Math.max(...ys)
+    };
+
     return {
       candidate: best.candidate,
       similarity: best.similarity,
@@ -618,7 +632,9 @@ async function refineNearCandidates(worker, results, ocrCanvas, target, scale) {
       exactChars: best.exactChars || 0,
       lineText: best.lineText,
       mode: best.mode,
-      box: group.box,
+      box: candidateBox,
+      candidateBox,
+      groupBox: group.box,
       candidateCount: group.candidates.length,
       strongCandidateCount: strong.length,
       distinctStrongCandidates: distinctCandidates.size
@@ -847,7 +863,8 @@ async function diagnoseOCR(){
       `※ 第1段階で1件以上HITした場合、二値化180・220・反転の全体OCRは省略します。`,
       `※ 第1段階でHITが0件の場合だけ、二値化180・220・反転を追加します。`,
       `※ 候補地点は同じ位置付近の候補をまとめています。`,
-      `※ 近似候補は、対象文字と同じ文字数で、3文字以上の対象なら「対象の1文字違い」程度を先に救出します。`,
+      `※ 近似候補は、対象文字と同じ文字数で、3文字以上の対象なら「対象の1文字違い」程度を先に救出します。
+※ 近似候補の黒塗り範囲は、候補地点全体ではなく採用候補自身のbboxを使います。`,
       `※ 近似候補救出は再OCRより先に判定し、時間を増やしにくい構成です。`,
       `※ 再OCRは近似候補救出で確定できなかった地点だけ実行します。`,
       `※ 診断で救出した候補は、自動黒塗りにも使用されます。`
