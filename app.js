@@ -869,7 +869,9 @@ async function run(){
       });
       if(!duplicate) paintBoxes.push({x:b.x0,y:b.y0,w:b.x1-b.x0,h:b.y1-b.y0,symbols:r.symbols||[],source:r.recovery||"再OCR",rescue:r.recovery==="近似候補救出"});
     }
-
+      
+console.log("PAINT BOX", paintBoxes);
+      
     for(const b of paintBoxes){
       paintOcr({x:b.x,y:b.y,w:b.w,h:b.h},overlayName.checked?overlayText.value:"",b.symbols||[],b.rescue===true);
     }
