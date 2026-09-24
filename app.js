@@ -112,6 +112,7 @@ function getOcrPaintBox(box, symbols = []) {
                     firstWidth / secondWidth < OCR_FIRST_SYMBOL_MAX_WIDTH_RATIO
                 ) {
                     out._firstSymbolWidthLeftExtra = OCR_FIRST_SYMBOL_WIDTH_LEFT_EXTRA;
+                    out._firstSymbolWidthAnomaly = true;
                 }
             }
         }
@@ -133,7 +134,10 @@ function paintOcr(box, text = "", symbols = [], rescue = false) {
         0,
         box.x - OCR_EDGE_PAD - padding - firstSymbolWidthLeftExtra + OCR_LEFT_TRIM
     );
-    const right = Math.min(canvas.width, box.x + box.w + OCR_EDGE_PAD + padding);
+    // 1文字目の幅異常を検出した場合だけ、右側のpaddingを増やさない。
+    // 左側は微補正しつつ、対象の直後にある文字を巻き込むのを防ぐ。
+    const rightPadding = box._firstSymbolWidthAnomaly ? 0 : padding;
+    const right = Math.min(canvas.width, box.x + box.w + OCR_EDGE_PAD + rightPadding);
     const width = Math.max(1, right - left);
     const top = Math.max(0, box.y - padding);
     const height = box.h + padding * 2;
