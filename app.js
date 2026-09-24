@@ -84,7 +84,7 @@ const OCR_EDGE_PAD = 2; // 対象文字の字形がbboxから少しはみ出す�
 const OCR_FIRST_SYMBOL_MIN_HEIGHT_RATIO = 0.25; // 1文字目bboxが極端に薄い時だけ補正
 const OCR_FIRST_SYMBOL_LEFT_EXTRA = 28; // 異常な1文字目だけ左へ追加する余白(px)
 const OCR_FIRST_SYMBOL_MAX_WIDTH_RATIO = 0.6; // 2文字目に対して1文字目の幅が極端に狭い時だけ補正
-const OCR_FIRST_SYMBOL_WIDTH_LEFT_EXTRA = 10; // 幅が異常に狭い1文字目への追加補正(px)
+const OCR_FIRST_SYMBOL_WIDTH_LEFT_EXTRA = 13; // 幅が異常に狭い1文字目への追加補正(px)
 const OCR_RESCUE_LEFT_EXTRA = 18; // 近似候補救出だけ左端を追加する余白(px)
 
 function getOcrPaintBox(box, symbols = []) {
@@ -137,7 +137,8 @@ function paintOcr(box, text = "", symbols = [], rescue = false) {
     // 1文字目の幅異常を検出した場合だけ、右側のpaddingを増やさない。
     // 左側は微補正しつつ、対象の直後にある文字を巻き込むのを防ぐ。
     const rightPadding = box._firstSymbolWidthAnomaly ? 0 : padding;
-    const right = Math.min(canvas.width, box.x + box.w + OCR_EDGE_PAD + rightPadding);
+const rightEdgePad = box._firstSymbolWidthAnomaly ? 0 : OCR_EDGE_PAD;
+const right = Math.min(canvas.width, box.x + box.w + rightEdgePad + rightPadding);
     const width = Math.max(1, right - left);
     const top = Math.max(0, box.y - padding);
     const height = box.h + padding * 2;
