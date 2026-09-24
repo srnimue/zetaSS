@@ -815,13 +815,8 @@ async function run(){
 
     // 通常OCRで見つかった対象文字を黒塗り。
     const paintBoxes=matches.map(b=>({
-  x:b.x0*scale,
-  y:b.y0*scale,
-  w:(b.x1-b.x0)*scale,
-  h:(b.y1-b.y0)*scale,
-  symbols:b.symbols||[],
-  source:"OCR"
-}));
+      x:b.x0, y:b.y0, w:b.x1-b.x0, h:b.y1-b.y0, symbols:b.symbols||[], source:"OCR"
+    }));
 
     // 通常OCRで拾えなかった候補だけ、V33の局所再OCRを実行。
     // 再OCRで対象文字を確認できた地点は、その候補文字のbboxを黒塗り範囲として追加する。
