@@ -84,7 +84,7 @@ const OCR_EDGE_PAD = 2; // 対象文字の字形がbboxから少しはみ出す�
 const OCR_FIRST_SYMBOL_MIN_HEIGHT_RATIO = 0.25; // 1文字目bboxが極端に薄い時だけ補正
 const OCR_FIRST_SYMBOL_LEFT_EXTRA = 28; // 異常な1文字目だけ左へ追加する余白(px)
 const OCR_FIRST_SYMBOL_MAX_WIDTH_RATIO = 0.6; // 2文字目に対して1文字目の幅が極端に狭い時だけ補正
-const OCR_FIRST_SYMBOL_WIDTH_LEFT_EXTRA = 20; // 幅が異常に狭い1文字目への追加補正(px)
+const OCR_FIRST_SYMBOL_WIDTH_LEFT_EXTRA = 0; // 幅が異常に狭い1文字目への追加補正(px)
 const OCR_RESCUE_LEFT_EXTRA = 18; // 近似候補救出だけ左端を追加する余白(px)
 
 function getOcrPaintBox(box, symbols = []) {
@@ -489,7 +489,42 @@ function makeSourceCandidateCrop(candidate, scale) {
   return { canvas: c, x0: sx0, y0: sy0 };
 }
 
-async function recognizeVariant(worker,inputCanvas,target,mode,scale){const result=await worker.recognize(inputCanvas,{tessedit_pageseg_mode:"11"});const data=result?.data||{},lines=data.lines||[],matches=[];for(const line of lines){const units=extractLineUnits(line),hits=findTargetInUnits(units,target),lineText=units.map(u=>u.ch).join("");for(const hit of hits)matches.push({x0:hit.targetBox.x0/scale,y0:hit.targetBox.y0/scale,x1:hit.targetBox.x1/scale,y1:hit.targetBox.y1/scale,mode,lineText,symbols:hit.symbols});}return {mode,lines,words:data.words||[],rawText:String(data.text||""),matches,near:findNearCandidates(lines,target)};}
+async function recognizeVariant(worker, inputCanvas, target, mode, scale) {
+    const result = await worker.recognize(inputCanvas, {
+        tessedit_pageseg_mode: "11"
+    });
+
+    const data = result?.data || {};
+    const lines = data.lines || [];
+    const matches = [];
+
+    for (const line of lines) {
+        const units = extractLineUnits(line);
+        const hits = findTargetInUnits(units, target);
+        const lineText = units.map(u => u.ch).join("");
+
+        for (const hit of hits) {
+            matches.push({
+                x0: hit.targetBox.x0 / scale,
+                y0: hit.targetBox.y0 / scale,
+                x1: hit.targetBox.x1 / scale,
+                y1: hit.targetBox.y1 / scale,
+                mode,
+                lineText,
+                symbols: hit.symbols
+            });
+        }
+    }
+
+    return {
+        mode,
+        lines,
+        words: data.words || [],
+        rawText: String(data.text || ""),
+        matches,
+        near: findNearCandidates(lines, target)
+    };
+}
 
 function buildOcrCanvas(){
   // OCR用キャンバスだけを作る。表示用canvasはここでは絶対に変更しない。
