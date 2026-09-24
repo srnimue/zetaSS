@@ -139,9 +139,14 @@ function paintOcr(box, text = "", symbols = [], rescue = false) {
     const rightPadding = box._firstSymbolWidthAnomaly ? 0 : padding;
 const rightEdgePad = box._firstSymbolWidthAnomaly ? 0 : OCR_EDGE_PAD;
 const right = Math.min(canvas.width, box.x + box.w + rightEdgePad + rightPadding);
-    const width = Math.max(1, right - left);
-    const top = Math.max(0, box.y - padding);
-    const height = box.h + padding * 2;
+    console.log("PAINT", {
+  box,
+  left,
+  right,
+  top,
+  height,
+  width
+});
 
     ctx.fillStyle = "#000";
     ctx.fillRect(left, top, width, height);
