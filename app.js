@@ -92,20 +92,18 @@ function getOcrPaintBox(box, symbols = []) {
     if (symbols.length && box.h > 0) {
         const first = symbols[0]?.bbox;
         const second = symbols[1]?.bbox;
-
         if (first) {
             const firstHeight = Math.max(0, first.y1 - first.y0);
             const ratio = firstHeight / box.h;
-
             // 正常な「ゆ」は触らず、今回のような極端に薄いbboxだけを補正する。
             if (ratio < OCR_FIRST_SYMBOL_MIN_HEIGHT_RATIO) {
                 out.x = Math.max(0, out.x - OCR_FIRST_SYMBOL_LEFT_EXTRA);
                 out.w += OCR_FIRST_SYMBOL_LEFT_EXTRA;
             }
 
-            // 2文字目に対して1文字目の幅だけが極端に狭い場合、
-            // OCRが1文字目の左側を十分に拾えていない可能性があるため微補正する。
-            if (second) {
+            // 2文字の対象で、1文字目の幅だけが極端に狭い場合は、
+            // 右端を広げず左端だけを微補正する。
+            if (symbols.length === 2 && second) {
                 const firstWidth = Math.max(0, first.x1 - first.x0);
                 const secondWidth = Math.max(0, second.x1 - second.x0);
 
@@ -113,8 +111,7 @@ function getOcrPaintBox(box, symbols = []) {
                     secondWidth > 0 &&
                     firstWidth / secondWidth < OCR_FIRST_SYMBOL_MAX_WIDTH_RATIO
                 ) {
-                    out.x = Math.max(0, out.x - OCR_FIRST_SYMBOL_WIDTH_LEFT_EXTRA);
-                    out.w += OCR_FIRST_SYMBOL_WIDTH_LEFT_EXTRA;
+                    out._firstSymbolWidthLeftExtra = OCR_FIRST_SYMBOL_WIDTH_LEFT_EXTRA;
                 }
             }
         }
@@ -131,7 +128,11 @@ function paintOcr(box, text = "", symbols = [], rescue = false) {
         box.w += OCR_RESCUE_LEFT_EXTRA;
     }
     const padding = Math.max(3, Math.round(Math.min(box.w, box.h) * 0.08));
-    const left = Math.max(0, box.x - OCR_EDGE_PAD - padding + OCR_LEFT_TRIM);
+    const firstSymbolWidthLeftExtra = box._firstSymbolWidthLeftExtra || 0;
+    const left = Math.max(
+        0,
+        box.x - OCR_EDGE_PAD - padding - firstSymbolWidthLeftExtra + OCR_LEFT_TRIM
+    );
     const right = Math.min(canvas.width, box.x + box.w + OCR_EDGE_PAD + padding);
     const width = Math.max(1, right - left);
     const top = Math.max(0, box.y - padding);
