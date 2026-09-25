@@ -518,6 +518,63 @@ async function recognizeVariant(worker,inputCanvas,target,mode,scale){const resu
     matches.push({x0:hit.targetBox.x0/scale,y0:hit.targetBox.y0/scale,x1:hit.targetBox.x1/scale,y1:hit.targetBox.y1/scale,mode,lineText,symbols});
 }}return {mode,lines,words:data.words||[],rawText:String(data.text||""),matches,near:findNearCandidates(lines,target)};}
 
+// 完全一致した箇所でも、Tesseractがページ全体を一度にOCRした際に
+// 文字1つ分だけ座標がズレて報告されることがある（周辺のノイズ・隣接文字の影響）。
+// 単語のbbox自体がそのズレた文字から組み立てられている場合、
+// symbolsLookValidの内部チェックだけではすり抜けてしまう。
+// なので、候補の周辺だけを切り出してノイズを減らし、高倍率で再OCRすることで
+// より位置ズレの少ないbboxを取り直す。見つからなければ元のboxをそのまま使う
+// （黒塗りが消えることは絶対にないようにする）。
+async function refineExactHitBox(worker, box, target, baseCanvas) {
+    const padX = Math.max(30, box.w);
+    const padY = Math.max(20, box.h * 0.8);
+    const x0 = Math.max(0, Math.round(box.x - padX));
+    const y0 = Math.max(0, Math.round(box.y - padY));
+    const x1 = Math.min(baseCanvas.width, Math.round(box.x + box.w + padX));
+    const y1 = Math.min(baseCanvas.height, Math.round(box.y + box.h + padY));
+    if (x1 <= x0 || y1 <= y0) return box;
+
+    const LOCAL_SCALE = 4;
+    const crop = document.createElement('canvas');
+    crop.width = Math.max(1, Math.round((x1 - x0) * LOCAL_SCALE));
+    crop.height = Math.max(1, Math.round((y1 - y0) * LOCAL_SCALE));
+    const cctx = crop.getContext('2d');
+    cctx.imageSmoothingEnabled = true;
+    cctx.imageSmoothingQuality = 'high';
+    cctx.drawImage(baseCanvas, x0, y0, x1 - x0, y1 - y0, 0, 0, crop.width, crop.height);
+
+    try {
+        const result = await worker.recognize(crop, { tessedit_pageseg_mode: '7' });
+        const lines = result?.data?.lines || [];
+        for (const line of lines) {
+            const units = extractLineUnits(line);
+            const hits = findTargetInUnits(units, target);
+            if (hits.length) {
+                const h = hits[0].targetBox;
+                return {
+                    x: x0 + h.x0 / LOCAL_SCALE,
+                    y: y0 + h.y0 / LOCAL_SCALE,
+                    w: (h.x1 - h.x0) / LOCAL_SCALE,
+                    h: (h.y1 - h.y0) / LOCAL_SCALE,
+                    symbols: hits[0].symbols.map(s => ({
+                        ...s,
+                        bbox: {
+                            x0: x0 + s.bbox.x0 / LOCAL_SCALE, y0: y0 + s.bbox.y0 / LOCAL_SCALE,
+                            x1: x0 + s.bbox.x1 / LOCAL_SCALE, y1: y0 + s.bbox.y1 / LOCAL_SCALE
+                        }
+                    })),
+                    source: box.source
+                };
+            }
+        }
+    } catch (e) {
+        // 失敗しても黙って元のboxを使う。
+    } finally {
+        crop.width = 1; crop.height = 1;
+    }
+    return box;
+}
+
 function buildOcrCanvas(){
   // OCR用キャンバスだけを作る。表示用canvasはここでは絶対に変更しない。
   const scale=2.5;
@@ -845,6 +902,14 @@ async function run(){
       x:b.x0, y:b.y0, w:b.x1-b.x0, h:b.y1-b.y0, symbols:b.symbols||[], source:"OCR"
     }));
 
+    // 完全一致した箇所でも、周辺ノイズが少ない状態で高倍率再OCRし、
+    // 文字1つ分ズレるようなbboxの誤検出を取り直す。見つからなければ元のboxのまま。
+    status("OCR中…\n黒塗り位置を検証しています。");
+    for(let i=0;i<paintBoxes.length;i++){
+      const refinedBox=await refineExactHitBox(worker,paintBoxes[i],target,canvas);
+      paintBoxes[i]={...paintBoxes[i],...refinedBox};
+    }
+
     // 通常OCRで拾えなかった候補だけ、V33の局所再OCRを実行。
     // 再OCRで対象文字を確認できた地点は、その候補文字のbboxを黒塗り範囲として追加する。
     const refine=await refineNearCandidates(worker,results,ocrCanvas,target,scale);
@@ -931,6 +996,21 @@ async function diagnoseOCR(){
       }
     }
     if(!refined.length && !acceptedNear.length) lines.push('再OCR・近似候補救出で対象文字を確認できた候補地点はありません。');
+
+    lines.push("",`===== 完全一致の位置検証（周辺再OCR） =====`);
+    const exactMatches=mergeMatches(results);
+    const verifyStarted=performance.now();
+    let changedCount=0;
+    for(const m of exactMatches){
+      const before={x:m.x0,y:m.y0,w:m.x1-m.x0,h:m.y1-m.y0};
+      const after=await refineExactHitBox(worker,before,target,canvas);
+      const moved=Math.abs(after.x-before.x)>1||Math.abs(after.y-before.y)>1||Math.abs(after.w-before.w)>1||Math.abs(after.h-before.h)>1;
+      if(moved)changedCount++;
+      lines.push(`「${m.lineText}」： 元bbox=(${Math.round(before.x)},${Math.round(before.y)},w${Math.round(before.w)},h${Math.round(before.h)}) → 検証後=(${Math.round(after.x)},${Math.round(after.y)},w${Math.round(after.w)},h${Math.round(after.h)}) ${moved?'※位置を修正':'変更なし'}`);
+    }
+    const verifyElapsed=performance.now()-verifyStarted;
+    lines.push(`検証時間：${(verifyElapsed/1000).toFixed(2)}秒 / 修正：${changedCount}件 / 対象：${exactMatches.length}件`);
+
     lines.push("",
       `===== 処理時間 =====`,
       `OCR全体：${(ocrElapsed/1000).toFixed(2)}秒`,
