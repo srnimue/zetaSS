@@ -80,8 +80,8 @@ function normalize(text) {
 }
 
 const OCR_EDGE_PAD = 2; // 対象文字の字形がbboxから少しはみ出す場合の左右余白(px)
-const OCR_MIN_PADDING = 4; // 最低限のパディング(px)。文字が小さくても黒塗りが欠けないように。
-const OCR_PADDING_RATIO = 0.10; // 文字サイズに対するパディング比率
+const OCR_MIN_PADDING = 3; // 最低限のパディング(px)。文字が小さくても黒塗りが欠けないように。
+const OCR_PADDING_RATIO = 0.08; // 文字サイズに対するパディング比率
 const OCR_FIRST_SYMBOL_MIN_HEIGHT_RATIO = 0.25; // 1文字目bboxが極端に薄い時だけ補正
 const OCR_FIRST_SYMBOL_MAX_WIDTH_RATIO = 0.6; // 2文字目に対して1文字目の幅が極端に狭い時だけ補正
 const OCR_RESCUE_EXTRA = 14; // 近似候補救出だけ左右に追加する余白(px)
@@ -330,7 +330,29 @@ function makeOcrVariant(baseCanvas, name) {
     return c;
 }
 
-function extractLineUnits(line){const units=[];for(const word of (line?.words||[])){const syms=(word?.symbols||[]).filter(s=>s?.bbox&&normalize(s.text));if(syms.length){for(const s of syms){for(const ch of [...normalize(s.text)]) units.push({ch,bbox:s.bbox,raw:s.text});}}else if(word?.bbox&&normalize(word.text)){const chars=[...normalize(word.text)],b=word.bbox;chars.forEach((ch,i)=>units.push({ch,raw:word.text,bbox:{x0:b.x0+(b.x1-b.x0)*i/chars.length,y0:b.y0,x1:b.x0+(b.x1-b.x0)*(i+1)/chars.length,y1:b.y1}}));}}return units;}
+// Tesseractは稀に、単語内の1文字だけbboxの位置を誤検出することがある
+// （例：「ネ」の実際の描画位置より1文字分右にずれた座標を報告する等）。
+// そのまま使うと黒塗り位置そのものがズレてしまい、paddingを足しても直せない。
+// なので「単語内のsymbolが順番通りに並び、単語全体のbboxの端まできちんと
+// 埋まっているか」を確認し、怪しい場合だけ単語bboxの均等分割にフォールバックする。
+function symbolsLookValid(word, syms) {
+    const wb = word?.bbox;
+    if (!wb || !syms.length) return false;
+    let prevX1 = wb.x0 - 1;
+    for (const s of syms) {
+        if (s.bbox.x0 < prevX1 - 2) return false; // 前の文字と逆転/大きく重複＝並び順が崩れている
+        prevX1 = s.bbox.x1;
+    }
+    const first = syms[0].bbox, last = syms[syms.length - 1].bbox;
+    const wordWidth = Math.max(1, wb.x1 - wb.x0);
+    const leftGap = first.x0 - wb.x0;
+    const rightGap = wb.x1 - last.x1;
+    // 先頭/末尾の文字が単語の枠から離れすぎている＝どこかの文字が
+    // 本来の位置からズレて報告されている可能性が高い。
+    return leftGap <= wordWidth * 0.25 && rightGap <= wordWidth * 0.25;
+}
+
+function extractLineUnits(line){const units=[];for(const word of (line?.words||[])){const syms=(word?.symbols||[]).filter(s=>s?.bbox&&normalize(s.text));if(syms.length&&symbolsLookValid(word,syms)){for(const s of syms){for(const ch of [...normalize(s.text)]) units.push({ch,bbox:s.bbox,raw:s.text});}}else if(word?.bbox&&normalize(word.text)){const chars=[...normalize(word.text)],b=word.bbox;chars.forEach((ch,i)=>units.push({ch,raw:word.text,bbox:{x0:b.x0+(b.x1-b.x0)*i/chars.length,y0:b.y0,x1:b.x0+(b.x1-b.x0)*(i+1)/chars.length,y1:b.y1}}));}}return units;}
 
 function findTargetInUnits(units,target){const text=units.map(u=>u.ch).join(""),hits=[];let from=0;while(from<=text.length-target.length){const i=text.indexOf(target,from);if(i<0)break;const selected=units.slice(i,i+target.length);if(selected.length===target.length)hits.push({targetBox:{x0:Math.min(...selected.map(u=>u.bbox.x0)),y0:Math.min(...selected.map(u=>u.bbox.y0)),x1:Math.max(...selected.map(u=>u.bbox.x1)),y1:Math.max(...selected.map(u=>u.bbox.y1))},symbols:selected});from=i+Math.max(1,target.length);}return hits;}
 
