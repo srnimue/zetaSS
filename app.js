@@ -112,7 +112,7 @@ function paintOcr(box, text = "", symbols = [], rescue = false) {
     }
     const padding = Math.max(3, Math.round(Math.min(box.w, box.h) * 0.08));
     const left = Math.max(0, box.x - OCR_EDGE_PAD - padding + OCR_LEFT_TRIM);
-    const right = Math.min(canvas.width, box.x + box.w + OCR_EDGE_PAD + padding);
+    const right = Math.min(canvas.width, box.x + box.w);
     const width = Math.max(1, right - left);
     const top = Math.max(0, box.y - padding);
     const height = box.h + padding * 2;
