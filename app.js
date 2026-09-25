@@ -525,13 +525,21 @@ async function recognizeVariant(worker,inputCanvas,target,mode,scale){const resu
 // なので、候補の周辺だけを切り出してノイズを減らし、高倍率で再OCRすることで
 // より位置ズレの少ないbboxを取り直す。見つからなければ元のboxをそのまま使う
 // （黒塗りが消えることは絶対にないようにする）。
-async function refineExactHitBox(worker, box, target, baseCanvas) {
+//
+// 注意：ここは必ず sourceImage（無加工の元画像）から直接切り出す。
+// 表示用canvasは黒塗り実行後は既に黒塗り済みになっているため、そこから切り出すと
+// 「既に黒く塗られた場所」を再OCRすることになり、見つからず「変更なし」という
+// 誤った（一見正しく見える）結果になる。
+async function refineExactHitBox(worker, box, target) {
     const padX = Math.max(30, box.w);
-    const padY = Math.max(20, box.h * 0.8);
+    // 縦方向は広げすぎない。ここを広げすぎると、吹き出し内の次の行まで
+    // 巻き込んでPSM7(単一行想定)の認識がその行またぎでbboxを誤って
+    // 縦に間延びさせてしまう（実際に発生した不具合）。
+    const padY = Math.min(14, Math.max(6, box.h * 0.3));
     const x0 = Math.max(0, Math.round(box.x - padX));
     const y0 = Math.max(0, Math.round(box.y - padY));
-    const x1 = Math.min(baseCanvas.width, Math.round(box.x + box.w + padX));
-    const y1 = Math.min(baseCanvas.height, Math.round(box.y + box.h + padY));
+    const x1 = Math.min(sourceImage.naturalWidth, Math.round(box.x + box.w + padX));
+    const y1 = Math.min(sourceImage.naturalHeight, Math.round(box.y + box.h + padY));
     if (x1 <= x0 || y1 <= y0) return box;
 
     const LOCAL_SCALE = 4;
@@ -541,7 +549,7 @@ async function refineExactHitBox(worker, box, target, baseCanvas) {
     const cctx = crop.getContext('2d');
     cctx.imageSmoothingEnabled = true;
     cctx.imageSmoothingQuality = 'high';
-    cctx.drawImage(baseCanvas, x0, y0, x1 - x0, y1 - y0, 0, 0, crop.width, crop.height);
+    cctx.drawImage(sourceImage, x0, y0, x1 - x0, y1 - y0, 0, 0, crop.width, crop.height);
 
     try {
         const result = await worker.recognize(crop, { tessedit_pageseg_mode: '7' });
@@ -551,11 +559,17 @@ async function refineExactHitBox(worker, box, target, baseCanvas) {
             const hits = findTargetInUnits(units, target);
             if (hits.length) {
                 const h = hits[0].targetBox;
+                const newW = (h.x1 - h.x0) / LOCAL_SCALE;
+                const newH = (h.y1 - h.y0) / LOCAL_SCALE;
+                // 別の行を巻き込んで縦に間延びした・不自然に幅広くなったbboxは
+                // 信用せず、元のboxを使う（隠し漏れより誤爆の方が実害が大きいため）。
+                if (box.h > 0 && newH > box.h * 1.6) return box;
+                if (box.w > 0 && newW > box.w * 1.8) return box;
                 return {
                     x: x0 + h.x0 / LOCAL_SCALE,
                     y: y0 + h.y0 / LOCAL_SCALE,
-                    w: (h.x1 - h.x0) / LOCAL_SCALE,
-                    h: (h.y1 - h.y0) / LOCAL_SCALE,
+                    w: newW,
+                    h: newH,
                     symbols: hits[0].symbols.map(s => ({
                         ...s,
                         bbox: {
@@ -919,7 +933,7 @@ async function run(){
     // 文字1つ分ズレるようなbboxの誤検出を取り直す。見つからなければ元のboxのまま。
     status("OCR中…\n黒塗り位置を検証しています。");
     for(let i=0;i<paintBoxes.length;i++){
-      const refinedBox=await refineExactHitBox(worker,paintBoxes[i],target,canvas);
+      const refinedBox=await refineExactHitBox(worker,paintBoxes[i],target);
       paintBoxes[i]={...paintBoxes[i],...refinedBox};
     }
 
@@ -1016,7 +1030,7 @@ async function diagnoseOCR(){
     let changedCount=0;
     for(const m of exactMatches){
       const before={x:m.x0,y:m.y0,w:m.x1-m.x0,h:m.y1-m.y0};
-      const after=await refineExactHitBox(worker,before,target,canvas);
+      const after=await refineExactHitBox(worker,before,target);
       const moved=Math.abs(after.x-before.x)>1||Math.abs(after.y-before.y)>1||Math.abs(after.w-before.w)>1||Math.abs(after.h-before.h)>1;
       if(moved)changedCount++;
       lines.push(`「${m.lineText}」： 元bbox=(${Math.round(before.x)},${Math.round(before.y)},w${Math.round(before.w)},h${Math.round(before.h)}) → 検証後=(${Math.round(after.x)},${Math.round(after.y)},w${Math.round(after.w)},h${Math.round(after.h)}) ${moved?'※位置を修正':'変更なし'}`);
