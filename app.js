@@ -141,6 +141,9 @@ function getOcrPaintBox(box, symbols = []) {
                         out.w = rightEdge - newX0;
                     }
                 }
+                // paddingが直前の文字（「？」など）まで侵食しないよう、
+                // 直前シンボルの右端を絶対に超えない境界として持っておく。
+                out._leftBoundary = prev.x1 + 1;
             }
         }
     }
@@ -158,7 +161,8 @@ function paintOcr(box, text = "", symbols = [], rescue = false) {
     // パディングは常に左右・上下対称。片側だけ削る特殊分岐は作らない
     // （そこが今回、文字の一部を隠し漏らしていた原因だったため）。
     const padding = Math.max(OCR_MIN_PADDING, Math.round(Math.min(box.w, box.h) * OCR_PADDING_RATIO));
-    const left = Math.max(0, box.x - OCR_EDGE_PAD - padding);
+    let left = Math.max(0, box.x - OCR_EDGE_PAD - padding);
+    if (typeof box._leftBoundary === "number") left = Math.max(left, box._leftBoundary);
     const right = Math.min(canvas.width, box.x + box.w + OCR_EDGE_PAD + padding);
     const width = Math.max(1, right - left);
     const top = Math.max(0, box.y - padding);
