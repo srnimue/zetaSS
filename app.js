@@ -93,6 +93,9 @@ const OCR_RESCUE_EXTRA = 14; // 近似候補救出だけ左右に追加する余
 // 「パディングを削って帳尻を合わせる」のではなく、box自体(x, w)を
 // その文字の本来の位置まで広げる。黒塗りツールは隠しすぎるより
 // 隠し漏れる方が致命的なので、疑わしい時は常に広げる方向で補正する。
+const OCR_PREV_GAP_MAX = 10; // 直前の生シンボルとの隙間がこれを超えたら位置ズレを疑う(px)
+const OCR_PREV_GAP_REANCHOR = 2; // 位置ズレを疑った時、直前シンボルの右端からこの分だけ空けて開始点にする(px)
+
 function getOcrPaintBox(box, symbols = []) {
     const out = { ...box };
     if (symbols.length && box.h > 0) {
@@ -118,6 +121,25 @@ function getOcrPaintBox(box, symbols = []) {
                     const missing = Math.max(0, expectedWidth - firstWidth);
                     out.x = Math.max(0, Math.min(out.x, first.x0) - missing);
                     out.w = (box.x + box.w) - out.x;
+                }
+            }
+
+            // 「？」などの記号の直後の文字だけ、bboxが不自然に右へズレて
+            // 報告されるケースが繰り返し確認されている（記号自体の認識位置は
+            // 合っているのに、直後の文字が1文字分ほど右にズレる）。
+            // 直前の生シンボル（正規化で消える記号も含む）との隙間が
+            // 通常のカーニングよりあきらかに大きい場合は、位置ズレを疑って
+            // 直前シンボルの右端まで左端を戻す。
+            const prev = symbols[0]?.prevRawBbox;
+            if (prev) {
+                const gap = first.x0 - prev.x1;
+                if (gap > OCR_PREV_GAP_MAX) {
+                    const newX0 = Math.max(0, prev.x1 + OCR_PREV_GAP_REANCHOR);
+                    if (newX0 < out.x) {
+                        const rightEdge = out.x + out.w;
+                        out.x = newX0;
+                        out.w = rightEdge - newX0;
+                    }
                 }
             }
         }
@@ -352,7 +374,35 @@ function symbolsLookValid(word, syms) {
     return leftGap <= wordWidth * 0.25 && rightGap <= wordWidth * 0.25;
 }
 
-function extractLineUnits(line){const units=[];for(const word of (line?.words||[])){const syms=(word?.symbols||[]).filter(s=>s?.bbox&&normalize(s.text));if(syms.length&&symbolsLookValid(word,syms)){for(const s of syms){for(const ch of [...normalize(s.text)]) units.push({ch,bbox:s.bbox,raw:s.text});}}else if(word?.bbox&&normalize(word.text)){const chars=[...normalize(word.text)],b=word.bbox;chars.forEach((ch,i)=>units.push({ch,raw:word.text,bbox:{x0:b.x0+(b.x1-b.x0)*i/chars.length,y0:b.y0,x1:b.x0+(b.x1-b.x0)*(i+1)/chars.length,y1:b.y1}}));}}return units;}
+// punctuation（正規化で消える記号）も含めて「直前の生シンボルのbbox」を
+// 各文字に記録しておく。「？」の直後の文字だけbboxが不自然に右へズレる
+// パターンが繰り返し確認されているため、後段(getOcrPaintBox)でこの
+// prevRawBboxとの隙間を見て、怪しければ位置を補正する。
+function extractLineUnits(line){
+  const units=[];
+  let prevBbox=null;
+  for(const word of (line?.words||[])){
+    const rawSyms=(word?.symbols||[]).filter(s=>s?.bbox);
+    const kept=rawSyms.filter(s=>normalize(s.text));
+    if(kept.length&&symbolsLookValid(word,kept)){
+      for(const s of rawSyms){
+        const chNorm=normalize(s.text);
+        if(chNorm){
+          [...chNorm].forEach((ch,ci)=>units.push({ch,bbox:s.bbox,raw:s.text,prevRawBbox:ci===0?prevBbox:s.bbox}));
+        }
+        prevBbox=s.bbox;
+      }
+    }else if(word?.bbox&&normalize(word.text)){
+      const chars=[...normalize(word.text)],b=word.bbox;
+      chars.forEach((ch,i)=>{
+        const bbox={x0:b.x0+(b.x1-b.x0)*i/chars.length,y0:b.y0,x1:b.x0+(b.x1-b.x0)*(i+1)/chars.length,y1:b.y1};
+        units.push({ch,raw:word.text,bbox,prevRawBbox:prevBbox});
+        prevBbox=bbox;
+      });
+    }
+  }
+  return units;
+}
 
 function findTargetInUnits(units,target){const text=units.map(u=>u.ch).join(""),hits=[];let from=0;while(from<=text.length-target.length){const i=text.indexOf(target,from);if(i<0)break;const selected=units.slice(i,i+target.length);if(selected.length===target.length)hits.push({targetBox:{x0:Math.min(...selected.map(u=>u.bbox.x0)),y0:Math.min(...selected.map(u=>u.bbox.y0)),x1:Math.max(...selected.map(u=>u.bbox.x1)),y1:Math.max(...selected.map(u=>u.bbox.y1))},symbols:selected});from=i+Math.max(1,target.length);}return hits;}
 
@@ -514,7 +564,8 @@ async function recognizeVariant(worker,inputCanvas,target,mode,scale){const resu
     // symbols[].bbox は OCR用に拡大したcanvas(scale倍)の座標のまま渡ってくる。
     // x0/y0/x1/y1 はscaleで割って元画像座標に戻しているので、symbolsも同じ座標系に
     // 揃えておかないと、getOcrPaintBoxでの高さ・幅比較がscale分ズレて誤判定する。
-    const symbols=hit.symbols.map(s=>({...s,bbox:{x0:s.bbox.x0/scale,y0:s.bbox.y0/scale,x1:s.bbox.x1/scale,y1:s.bbox.y1/scale}}));
+    const scaleBbox=b=>b?{x0:b.x0/scale,y0:b.y0/scale,x1:b.x1/scale,y1:b.y1/scale}:null;
+    const symbols=hit.symbols.map(s=>({...s,bbox:scaleBbox(s.bbox),prevRawBbox:scaleBbox(s.prevRawBbox)}));
     matches.push({x0:hit.targetBox.x0/scale,y0:hit.targetBox.y0/scale,x1:hit.targetBox.x1/scale,y1:hit.targetBox.y1/scale,mode,lineText,symbols});
 }}return {mode,lines,words:data.words||[],rawText:String(data.text||""),matches,near:findNearCandidates(lines,target)};}
 
@@ -565,6 +616,7 @@ async function refineExactHitBox(worker, box, target) {
                 // 信用せず、元のboxを使う（隠し漏れより誤爆の方が実害が大きいため）。
                 if (box.h > 0 && newH > box.h * 1.6) return box;
                 if (box.w > 0 && newW > box.w * 1.8) return box;
+                const mapBbox=b=>b?{x0:x0+b.x0/LOCAL_SCALE,y0:y0+b.y0/LOCAL_SCALE,x1:x0+b.x1/LOCAL_SCALE,y1:y0+b.y1/LOCAL_SCALE}:null;
                 return {
                     x: x0 + h.x0 / LOCAL_SCALE,
                     y: y0 + h.y0 / LOCAL_SCALE,
@@ -572,10 +624,8 @@ async function refineExactHitBox(worker, box, target) {
                     h: newH,
                     symbols: hits[0].symbols.map(s => ({
                         ...s,
-                        bbox: {
-                            x0: x0 + s.bbox.x0 / LOCAL_SCALE, y0: y0 + s.bbox.y0 / LOCAL_SCALE,
-                            x1: x0 + s.bbox.x1 / LOCAL_SCALE, y1: y0 + s.bbox.y1 / LOCAL_SCALE
-                        }
+                        bbox: mapBbox(s.bbox),
+                        prevRawBbox: mapBbox(s.prevRawBbox)
                     })),
                     source: box.source
                 };
