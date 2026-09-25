@@ -403,6 +403,13 @@ function extractLineUnits(line){
         units.push({ch,raw:word.text,bbox,prevRawBbox:prevBbox});
         prevBbox=bbox;
       });
+    }else if(rawSyms.length){
+      // 「？」単体のように、文字としては1つも残らない(=正規化で空になる)
+      // 単語。ここでunitsには何も追加しないが、直後の文字が正しく
+      // 「直前の右端」を参照できるよう、この単語の右端だけは必ず記録する。
+      prevBbox=rawSyms[rawSyms.length-1].bbox;
+    }else if(word?.bbox){
+      prevBbox=word.bbox;
     }
   }
   return units;
