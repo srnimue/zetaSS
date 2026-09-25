@@ -79,14 +79,20 @@ function normalize(text) {
         .toLowerCase();
 }
 
-const OCR_LEFT_TRIM = 0; // OCR対象範囲の左端微調整。+で左側を削る。
 const OCR_EDGE_PAD = 2; // 対象文字の字形がbboxから少しはみ出す場合の左右余白(px)
+const OCR_MIN_PADDING = 4; // 最低限のパディング(px)。文字が小さくても黒塗りが欠けないように。
+const OCR_PADDING_RATIO = 0.10; // 文字サイズに対するパディング比率
 const OCR_FIRST_SYMBOL_MIN_HEIGHT_RATIO = 0.25; // 1文字目bboxが極端に薄い時だけ補正
-const OCR_FIRST_SYMBOL_LEFT_EXTRA = 28; // 異常な1文字目だけ左へ追加する余白(px)
 const OCR_FIRST_SYMBOL_MAX_WIDTH_RATIO = 0.6; // 2文字目に対して1文字目の幅が極端に狭い時だけ補正
-const OCR_FIRST_SYMBOL_WIDTH_LEFT_EXTRA = 0; // 幅が異常に狭い1文字目への追加補正(px)
-const OCR_RESCUE_LEFT_EXTRA = 18; // 近似候補救出だけ左端を追加する余白(px)
+const OCR_RESCUE_EXTRA = 14; // 近似候補救出だけ左右に追加する余白(px)
 
+// symbols[].bbox は呼び出し側で必ずbox.x/w/y/hと同じ座標系(元画像のcanvas座標)に
+// 揃えてから渡すこと。座標系が食い違うと、ここでの比率判定が正しく機能しない。
+//
+// 方針：1文字目のbboxがOCRの癖で極端に細い/薄いと分かった場合、
+// 「パディングを削って帳尻を合わせる」のではなく、box自体(x, w)を
+// その文字の本来の位置まで広げる。黒塗りツールは隠しすぎるより
+// 隠し漏れる方が致命的なので、疑わしい時は常に広げる方向で補正する。
 function getOcrPaintBox(box, symbols = []) {
     const out = { ...box };
     if (symbols.length && box.h > 0) {
@@ -94,25 +100,24 @@ function getOcrPaintBox(box, symbols = []) {
         const second = symbols[1]?.bbox;
         if (first) {
             const firstHeight = Math.max(0, first.y1 - first.y0);
-            const ratio = firstHeight / box.h;
-            // 正常な「ゆ」は触らず、今回のような極端に薄いbboxだけを補正する。
-            if (ratio < OCR_FIRST_SYMBOL_MIN_HEIGHT_RATIO) {
-                out.x = Math.max(0, out.x - OCR_FIRST_SYMBOL_LEFT_EXTRA);
-                out.w += OCR_FIRST_SYMBOL_LEFT_EXTRA;
+            if (firstHeight / box.h < OCR_FIRST_SYMBOL_MIN_HEIGHT_RATIO) {
+                // 高さが極端に薄い＝bboxが文字の一部しか捉えていない可能性が高い。
+                // 左端をその分広げる（右端はそのまま、対象外の文字を巻き込まない）。
+                const extra = Math.max(0, box.h - firstHeight);
+                out.x = Math.max(0, Math.min(out.x, first.x0) - extra);
+                out.w = (box.x + box.w) - out.x;
             }
 
-            // 2文字の対象で、1文字目の幅だけが極端に狭い場合は、
-            // 右端を広げず左端だけを微補正する。
             if (symbols.length === 2 && second) {
                 const firstWidth = Math.max(0, first.x1 - first.x0);
                 const secondWidth = Math.max(0, second.x1 - second.x0);
-
-                if (
-                    secondWidth > 0 &&
-                    firstWidth / secondWidth < OCR_FIRST_SYMBOL_MAX_WIDTH_RATIO
-                ) {
-                    out._firstSymbolWidthLeftExtra = OCR_FIRST_SYMBOL_WIDTH_LEFT_EXTRA;
-                    out._firstSymbolWidthAnomaly = true;
+                if (secondWidth > 0 && firstWidth / secondWidth < OCR_FIRST_SYMBOL_MAX_WIDTH_RATIO) {
+                    // 1文字目の幅だけが極端に狭い＝右端の検出漏れの可能性が高い。
+                    // box全体の左端を、1文字目の本来の開始位置まで広げる。
+                    const expectedWidth = secondWidth; // 2文字目と同程度の幅があったはず
+                    const missing = Math.max(0, expectedWidth - firstWidth);
+                    out.x = Math.max(0, Math.min(out.x, first.x0) - missing);
+                    out.w = (box.x + box.w) - out.x;
                 }
             }
         }
@@ -122,31 +127,20 @@ function getOcrPaintBox(box, symbols = []) {
 
 function paintOcr(box, text = "", symbols = [], rescue = false) {
     box = getOcrPaintBox(box, symbols);
-    // 近似候補救出（例：「めーざー」→「ゆーざー」）だけ、
-    // 1文字目の誤認で左端が右へ寄るケースを補正する。通常HITには適用しない。
+    // 近似候補救出（例：「めーざー」→「ゆーざー」）は、1文字目の誤認で
+    // 位置がずれやすいので、左右均等に余白を足す。
     if (rescue) {
-        box.x = Math.max(0, box.x - OCR_RESCUE_LEFT_EXTRA);
-        box.w += OCR_RESCUE_LEFT_EXTRA;
+        box.x = Math.max(0, box.x - OCR_RESCUE_EXTRA);
+        box.w += OCR_RESCUE_EXTRA * 2;
     }
-    const padding = Math.max(3, Math.round(Math.min(box.w, box.h) * 0.08));
-    const firstSymbolWidthLeftExtra = box._firstSymbolWidthLeftExtra || 0;
-    const left = Math.max(
-        0,
-        box.x - OCR_EDGE_PAD - padding - firstSymbolWidthLeftExtra + OCR_LEFT_TRIM
-    );
-    // 1文字目の幅異常を検出した場合だけ、右側のpaddingを増やさない。
-    // 左側は微補正しつつ、対象の直後にある文字を巻き込むのを防ぐ。
-    const rightPadding = box._firstSymbolWidthAnomaly ? 0 : padding;
-const rightEdgePad = box._firstSymbolWidthAnomaly ? 0 : OCR_EDGE_PAD;
-const right = Math.min(canvas.width, box.x + box.w + rightEdgePad + rightPadding);
-    console.log("PAINT", {
-  box,
-  left,
-  right,
-  top,
-  height,
-  width
-});
+    // パディングは常に左右・上下対称。片側だけ削る特殊分岐は作らない
+    // （そこが今回、文字の一部を隠し漏らしていた原因だったため）。
+    const padding = Math.max(OCR_MIN_PADDING, Math.round(Math.min(box.w, box.h) * OCR_PADDING_RATIO));
+    const left = Math.max(0, box.x - OCR_EDGE_PAD - padding);
+    const right = Math.min(canvas.width, box.x + box.w + OCR_EDGE_PAD + padding);
+    const width = Math.max(1, right - left);
+    const top = Math.max(0, box.y - padding);
+    const height = box.h + padding * 2;
 
     ctx.fillStyle = "#000";
     ctx.fillRect(left, top, width, height);
@@ -494,42 +488,13 @@ function makeSourceCandidateCrop(candidate, scale) {
   return { canvas: c, x0: sx0, y0: sy0 };
 }
 
-async function recognizeVariant(worker, inputCanvas, target, mode, scale) {
-    const result = await worker.recognize(inputCanvas, {
-        tessedit_pageseg_mode: "11"
-    });
-
-    const data = result?.data || {};
-    const lines = data.lines || [];
-    const matches = [];
-
-    for (const line of lines) {
-        const units = extractLineUnits(line);
-        const hits = findTargetInUnits(units, target);
-        const lineText = units.map(u => u.ch).join("");
-
-        for (const hit of hits) {
-            matches.push({
-                x0: hit.targetBox.x0 / scale,
-                y0: hit.targetBox.y0 / scale,
-                x1: hit.targetBox.x1 / scale,
-                y1: hit.targetBox.y1 / scale,
-                mode,
-                lineText,
-                symbols: hit.symbols
-            });
-        }
-    }
-
-    return {
-        mode,
-        lines,
-        words: data.words || [],
-        rawText: String(data.text || ""),
-        matches,
-        near: findNearCandidates(lines, target)
-    };
-}
+async function recognizeVariant(worker,inputCanvas,target,mode,scale){const result=await worker.recognize(inputCanvas,{tessedit_pageseg_mode:"11"});const data=result?.data||{},lines=data.lines||[],matches=[];for(const line of lines){const units=extractLineUnits(line),hits=findTargetInUnits(units,target),lineText=units.map(u=>u.ch).join("");for(const hit of hits){
+    // symbols[].bbox は OCR用に拡大したcanvas(scale倍)の座標のまま渡ってくる。
+    // x0/y0/x1/y1 はscaleで割って元画像座標に戻しているので、symbolsも同じ座標系に
+    // 揃えておかないと、getOcrPaintBoxでの高さ・幅比較がscale分ズレて誤判定する。
+    const symbols=hit.symbols.map(s=>({...s,bbox:{x0:s.bbox.x0/scale,y0:s.bbox.y0/scale,x1:s.bbox.x1/scale,y1:s.bbox.y1/scale}}));
+    matches.push({x0:hit.targetBox.x0/scale,y0:hit.targetBox.y0/scale,x1:hit.targetBox.x1/scale,y1:hit.targetBox.y1/scale,mode,lineText,symbols});
+}}return {mode,lines,words:data.words||[],rawText:String(data.text||""),matches,near:findNearCandidates(lines,target)};}
 
 function buildOcrCanvas(){
   // OCR用キャンバスだけを作る。表示用canvasはここでは絶対に変更しない。
@@ -874,9 +839,7 @@ async function run(){
       });
       if(!duplicate) paintBoxes.push({x:b.x0,y:b.y0,w:b.x1-b.x0,h:b.y1-b.y0,symbols:r.symbols||[],source:r.recovery||"再OCR",rescue:r.recovery==="近似候補救出"});
     }
-      
-console.log("PAINT BOX", paintBoxes);
-      
+
     for(const b of paintBoxes){
       paintOcr({x:b.x,y:b.y,w:b.w,h:b.h},overlayName.checked?overlayText.value:"",b.symbols||[],b.rescue===true);
     }
