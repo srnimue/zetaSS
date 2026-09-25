@@ -138,7 +138,7 @@ function getOcrPaintRectForDiagnostic(box, symbols = [], rescue = false) {
     }
     const padding = Math.max(3, Math.round(Math.min(paintBox.w, paintBox.h) * 0.08));
     const left = Math.max(0, paintBox.x - OCR_EDGE_PAD - padding + OCR_LEFT_TRIM);
-    const right = Math.min(canvas.width, paintBox.x + paintBox.w + OCR_EDGE_PAD + padding);
+    const right = Math.min(canvas.width, paintBox.x + paintBox.w);
     const width = Math.max(1, right - left);
     const top = Math.max(0, paintBox.y - padding);
     const height = paintBox.h + padding * 2;
