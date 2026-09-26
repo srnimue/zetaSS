@@ -389,24 +389,27 @@ function extractLineUnits(line){
     const rawSyms=(word?.symbols||[]).filter(s=>s?.bbox);
     const kept=rawSyms.filter(s=>normalize(s.text));
     if(kept.length&&symbolsLookValid(word,kept)){
-      for(const s of rawSyms){
+      for(let idx=0;idx<rawSyms.length;idx++){
+        const s=rawSyms[idx];
         const chNorm=normalize(s.text);
         if(chNorm){
           const chars=[...chNorm];
+          let ch;
           if(chars.length>1){
-            // Tesseractが稀に、1文字ぶんのbboxしかない場所に2文字以上の
-            // テキストを誤って割り当てることがある（例：本来「ネ」だけの
-            // 位置に「ネル」という認識結果を返す）。そのまま同じbboxを
-            // 全文字に使い回すと位置が重複しておかしくなるので、
-            // このsymbol自身のbbox幅を文字数で均等に割る。
-            const b=s.bbox;
-            chars.forEach((ch,ci)=>{
-              const bbox={x0:b.x0+(b.x1-b.x0)*ci/chars.length,y0:b.y0,x1:b.x0+(b.x1-b.x0)*(ci+1)/chars.length,y1:b.y1};
-              units.push({ch,bbox,raw:s.text,prevRawBbox:ci===0?prevBbox:bbox});
-            });
+            // Tesseractが稀に、本来1文字ずつ正しく分かれているsymbol列に対して、
+            // 同じ複数文字のテキスト（例：「ネル」）を重複して報告することがある
+            // （bboxの分割自体は正しいのに、textラベルだけ被って長くなる）。
+            // このsymbol自身のbboxはそのまま信用し、直前から続く「同じテキストを
+            // 繰り返す連続グループ」の中で自分が何番目かを見て、その順番の
+            // 1文字だけを割り当てる。
+            let runStart=idx;
+            while(runStart>0&&normalize(rawSyms[runStart-1].text)===chNorm)runStart--;
+            const posInRun=idx-runStart;
+            ch=chars[Math.min(posInRun,chars.length-1)];
           }else{
-            units.push({ch:chars[0],bbox:s.bbox,raw:s.text,prevRawBbox:prevBbox});
+            ch=chars[0];
           }
+          units.push({ch,bbox:s.bbox,raw:s.text,prevRawBbox:prevBbox});
         }
         prevBbox=s.bbox;
       }
@@ -641,6 +644,9 @@ async function refineExactHitBox(worker, box, target) {
                 // 信用せず、元のboxを使う（隠し漏れより誤爆の方が実害が大きいため）。
                 if (box.h > 0 && newH > box.h * 1.6) return box;
                 if (box.w > 0 && newW > box.w * 1.8) return box;
+                // 逆に、元のboxよりあきらかに狭すぎる結果（＝縦棒のような
+                // 潰れた黒塗りになる）も信用せず、元のboxを使う。
+                if (box.w > 0 && newW < box.w * 0.5) return box;
                 const mapBbox=b=>b?{x0:x0+b.x0/LOCAL_SCALE,y0:y0+b.y0/LOCAL_SCALE,x1:x0+b.x1/LOCAL_SCALE,y1:y0+b.y1/LOCAL_SCALE}:null;
                 return {
                     x: x0 + h.x0 / LOCAL_SCALE,
