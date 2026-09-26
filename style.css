@@ -17,6 +17,7 @@ input[type="text"] { padding: 10px 12px; border: 1px solid #ccc; border-radius: 
 .checkbox input { width: 18px; height: 18px; }
 .button-row { display: flex; flex-wrap: nowrap; justify-content: center; align-items: center; gap: 8px; }
 .button-row button { flex: 0 1 auto; white-space: nowrap; }
+.button-row-left { display: flex; justify-content: flex-start; margin-top: 8px; }
 button {
 border: 0; border-radius: 8px; padding: 11px 14px; font-size: 15px;
 font-weight: 600; cursor: pointer; background: #222; color: #fff;

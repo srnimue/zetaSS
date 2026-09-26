@@ -12,6 +12,7 @@ const redactBtn = $("redactBtn");
 const diagnoseBtn = $("diagnoseBtn");
 const manualBtn = $("manualBtn");
 const undoBtn = $("undoBtn");
+const resetBtn = $("resetBtn");
 const manualDoneBtn = $("manualDoneBtn");
 const saveBtn = $("saveBtn");
 const manualHelp = $("manualHelp");
@@ -301,7 +302,7 @@ async function getWorker(preferredLang = "jpn") {
     worker = await Tesseract.createWorker(preferredLang, 1, {
         logger: message => {
             if (message?.progress != null) {
-                status(`${preferredLang === "jpn" ? "日本語" : "英語"}OCR準備中… ${message.status || ""} ${Math.round(message.progress * 100)}%`);
+                status("実行中…");
             }
         }
     });
@@ -704,7 +705,7 @@ async function collectOcrResults(worker,target){
   // ここで1件でも正確に見つかれば、追加の全体OCRは省略する。
   // ※診断用の速度実験版。見落としの有無を確認するため、V32は別に保存しておく。
   const primaryStarted=performance.now();
-  status(`OCR中…\n前処理：${stats.primaryName}`);
+  status("実行中…");
   const primaryVariant=makeOcrVariant(oc,stats.primaryName);
   try {
     const primary=await recognizeVariant(worker,primaryVariant,target,stats.primaryName,scale);
@@ -721,7 +722,7 @@ async function collectOcrResults(worker,target){
     stats.fallbackUsed=true;
     const fallbackStarted=performance.now();
     for(const name of stats.fallbackNames){
-      status(`OCR中…\n追加前処理：${name}`);
+      status("実行中…");
       const variant=makeOcrVariant(oc,name);
       try {
         results.push(await recognizeVariant(worker,variant,target,name,scale));
@@ -1401,6 +1402,15 @@ undoBtn.addEventListener("click", () => {
     status(`直前の手動黒塗りを取り消しました。\n残り：${manualStamps.length}箇所`);
 });
 
+resetBtn.addEventListener("click", () => {
+    if (!sourceImage) return;
+    // 自動(OCR)・手動を問わず、黒塗りを全て取り消して元画像の状態に戻す。
+    manualStamps.length = 0;
+    ocrBaseCanvas = null;
+    redrawFromBase();
+    status("黒塗りをすべてリセットしました。");
+});
+
 manualBtn.addEventListener("click", startManualMode);
 manualDoneBtn.addEventListener("click", stopManualMode);
 
@@ -1426,6 +1436,7 @@ fileInput.addEventListener("change", async () => {
         diagnoseBtn.disabled = !ENABLE_DIAGNOSTIC;
         manualBtn.disabled = false;
         saveBtn.disabled = false;
+        resetBtn.disabled = false;
         updateUndoButton();
         status(`画像を読み込みました。\n${canvas.width} × ${canvas.height}px`);
     } catch (error) {

@@ -39,11 +39,17 @@
 <button id="undoBtn" type="button" disabled>直前の黒塗りを取り消す</button>
 </div>
 
+<div class="button-row-left">
+<button id="resetBtn" class="secondary" type="button" disabled>黒塗りリセット</button>
+</div>
+
 <p class="manual-help" id="manualHelp" hidden>
 手動黒塗り中：画像の上を指やマウスでドラッグして、隠したい範囲を選択してください。何個でも追加できます。
 </p>
 <button id="manualDoneBtn" class="secondary" type="button" hidden>手動黒塗り終了</button>
 </section>
+
+<pre id="status" class="status">画像を選択してください。</pre>
 
 <section class="canvas-panel">
 <div id="canvasWrap">
@@ -62,7 +68,6 @@
 <button id="saveBtn" type="button" disabled>画像を保存</button>
 </section>
 
-<pre id="status" class="status">画像を選択してください。</pre>
 <pre id="errorDetails" class="error" hidden></pre>
 <pre id="ocrDiagnostics" class="diagnostics" hidden></pre>
 </main>
