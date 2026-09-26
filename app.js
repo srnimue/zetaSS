@@ -392,7 +392,21 @@ function extractLineUnits(line){
       for(const s of rawSyms){
         const chNorm=normalize(s.text);
         if(chNorm){
-          [...chNorm].forEach((ch,ci)=>units.push({ch,bbox:s.bbox,raw:s.text,prevRawBbox:ci===0?prevBbox:s.bbox}));
+          const chars=[...chNorm];
+          if(chars.length>1){
+            // Tesseractが稀に、1文字ぶんのbboxしかない場所に2文字以上の
+            // テキストを誤って割り当てることがある（例：本来「ネ」だけの
+            // 位置に「ネル」という認識結果を返す）。そのまま同じbboxを
+            // 全文字に使い回すと位置が重複しておかしくなるので、
+            // このsymbol自身のbbox幅を文字数で均等に割る。
+            const b=s.bbox;
+            chars.forEach((ch,ci)=>{
+              const bbox={x0:b.x0+(b.x1-b.x0)*ci/chars.length,y0:b.y0,x1:b.x0+(b.x1-b.x0)*(ci+1)/chars.length,y1:b.y1};
+              units.push({ch,bbox,raw:s.text,prevRawBbox:ci===0?prevBbox:bbox});
+            });
+          }else{
+            units.push({ch:chars[0],bbox:s.bbox,raw:s.text,prevRawBbox:prevBbox});
+          }
         }
         prevBbox=s.bbox;
       }
