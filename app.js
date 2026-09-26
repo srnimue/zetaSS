@@ -143,7 +143,14 @@ function getOcrPaintBox(box, symbols = []) {
                 }
                 // paddingが直前の文字（「？」など）まで侵食しないよう、
                 // 直前シンボルの右端を絶対に超えない境界として持っておく。
-                out._leftBoundary = prev.x1 + 1;
+                // ただし、prevRawBbox自体が（ローカル再OCR時など）誤って
+                // 対象文字の右端より右に来てしまうと、境界線が本体を
+                // 追い越してbox幅が潰れる（＝縦棒になる）ため、
+                // 境界が対象boxの右端より十分左にある時だけ採用する。
+                const candidateBoundary = prev.x1 + 1;
+                if (candidateBoundary < (out.x + out.w) - 4) {
+                    out._leftBoundary = candidateBoundary;
+                }
             }
         }
     }
@@ -162,8 +169,13 @@ function paintOcr(box, text = "", symbols = [], rescue = false) {
     // （そこが今回、文字の一部を隠し漏らしていた原因だったため）。
     const padding = Math.max(OCR_MIN_PADDING, Math.round(Math.min(box.w, box.h) * OCR_PADDING_RATIO));
     let left = Math.max(0, box.x - OCR_EDGE_PAD - padding);
-    if (typeof box._leftBoundary === "number") left = Math.max(left, box._leftBoundary);
     const right = Math.min(canvas.width, box.x + box.w + OCR_EDGE_PAD + padding);
+    // _leftBoundaryは「直前の文字を巻き込まない」ためだけの制約なので、
+    // 万一おかしな値が来ても、最低限の幅(box.wの半分か8pxの大きい方)は必ず確保する。
+    if (typeof box._leftBoundary === "number") {
+        const minWidth = Math.max(8, box.w * 0.5);
+        left = Math.max(left, Math.min(box._leftBoundary, right - minWidth));
+    }
     const width = Math.max(1, right - left);
     const top = Math.max(0, box.y - padding);
     const height = box.h + padding * 2;
@@ -1115,6 +1127,20 @@ async function diagnoseOCR(){
       const moved=Math.abs(after.x-before.x)>1||Math.abs(after.y-before.y)>1||Math.abs(after.w-before.w)>1||Math.abs(after.h-before.h)>1;
       if(moved)changedCount++;
       lines.push(`「${m.lineText}」： 元bbox=(${Math.round(before.x)},${Math.round(before.y)},w${Math.round(before.w)},h${Math.round(before.h)}) → 検証後=(${Math.round(after.x)},${Math.round(after.y)},w${Math.round(after.w)},h${Math.round(after.h)}) ${moved?'※位置を修正':'変更なし'}`);
+      // 実際に黒塗りが描画される最終矩形も、同じ計算式でここに再現しておく。
+      // 「見た目上どうなるか」を診断だけで確認できるようにするため。
+      const paintBox=getOcrPaintBox(after,after.symbols||[]);
+      const padding=Math.max(OCR_MIN_PADDING,Math.round(Math.min(paintBox.w,paintBox.h)*OCR_PADDING_RATIO));
+      let finalLeft=Math.max(0,paintBox.x-OCR_EDGE_PAD-padding);
+      const finalRight=Math.min(canvas.width,paintBox.x+paintBox.w+OCR_EDGE_PAD+padding);
+      if(typeof paintBox._leftBoundary==="number"){
+        const minWidth=Math.max(8,paintBox.w*0.5);
+        finalLeft=Math.max(finalLeft,Math.min(paintBox._leftBoundary,finalRight-minWidth));
+      }
+      const finalWidth=Math.max(1,finalRight-finalLeft);
+      const finalTop=Math.max(0,paintBox.y-padding);
+      const finalHeight=paintBox.h+padding*2;
+      lines.push(`　→ 最終黒塗り座標=(${Math.round(finalLeft)},${Math.round(finalTop)},w${Math.round(finalWidth)},h${Math.round(finalHeight)})${finalWidth<=4?' ※幅が極端に狭い(縦棒の疑いあり)':''}`);
     }
     const verifyElapsed=performance.now()-verifyStarted;
     lines.push(`検証時間：${(verifyElapsed/1000).toFixed(2)}秒 / 修正：${changedCount}件 / 対象：${exactMatches.length}件`);
