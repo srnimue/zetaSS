@@ -344,65 +344,38 @@ function makeInverted(src){
   for(let i=0;i<d.length;i+=4){d[i]=255-d[i];d[i+1]=255-d[i+1];d[i+2]=255-d[i+2];}
   ctx.putImageData(img,0,0); return c;
 }
-function makeOtsu(baseCanvas) {
-    const c = document.createElement("canvas");
-    c.width = baseCanvas.width;
-    c.height = baseCanvas.height;
-    const g = c.getContext("2d");
-    g.drawImage(baseCanvas, 0, 0);
-
-    const img = g.getImageData(0, 0, c.width, c.height);
-    const d = img.data;
+// Otsu法：グレースケールのヒストグラムから、白と黒の2グループの
+// クラス間分散が最大になる閾値を自動で求める。固定値(180/220)と違い、
+// 画像ごと(局所クロップなら切り出し範囲ごと)に最適な閾値が決まる。
+function computeOtsuThreshold(d) {
     const hist = new Uint32Array(256);
-    const total = c.width * c.height;
-
-    // まず輝度ヒストグラムを作る。
+    let total = 0;
     for (let i = 0; i < d.length; i += 4) {
-        const y = Math.max(0, Math.min(255, Math.round(
-            d[i] * 0.299 + d[i + 1] * 0.587 + d[i + 2] * 0.114
-        )));
+        const y = Math.round(d[i] * .299 + d[i + 1] * .587 + d[i + 2] * .114);
         hist[y]++;
+        total++;
     }
+    if (!total) return 128;
 
-    // Otsu法でクラス間分散が最大になる閾値を求める。
-    let sum = 0;
-    for (let i = 0; i < 256; i++) sum += i * hist[i];
+    let sumAll = 0;
+    for (let t = 0; t < 256; t++) sumAll += t * hist[t];
 
-    let sumB = 0;
-    let weightB = 0;
-    let maxVariance = -1;
-    let threshold = 128;
-
+    let sumB = 0, wB = 0, best = 0, threshold = 128;
     for (let t = 0; t < 256; t++) {
-        weightB += hist[t];
-        if (!weightB) continue;
-
-        const weightF = total - weightB;
-        if (!weightF) break;
-
+        wB += hist[t];
+        if (!wB) continue;
+        const wF = total - wB;
+        if (!wF) break;
         sumB += t * hist[t];
-
-        const meanB = sumB / weightB;
-        const meanF = (sum - sumB) / weightF;
-        const variance = weightB * weightF * (meanB - meanF) * (meanB - meanF);
-
-        if (variance > maxVariance) {
-            maxVariance = variance;
+        const mB = sumB / wB;
+        const mF = (sumAll - sumB) / wF;
+        const between = wB * wF * (mB - mF) * (mB - mF);
+        if (between > best) {
+            best = between;
             threshold = t;
         }
     }
-
-    // 二値画像にする。背景・文字のどちらが白でもTesseract側で処理できるため、
-    // ここでは単純な白黒化だけを行う。
-    for (let i = 0; i < d.length; i += 4) {
-        const y = Math.round(d[i] * 0.299 + d[i + 1] * 0.587 + d[i + 2] * 0.114);
-        const v = y >= threshold ? 255 : 0;
-        d[i] = d[i + 1] = d[i + 2] = v;
-    }
-
-    g.putImageData(img, 0, 0);
-    c._otsuThreshold = threshold;
-    return c;
+    return threshold;
 }
 
 function makeOcrVariant(baseCanvas, name) {
@@ -425,6 +398,13 @@ function makeOcrVariant(baseCanvas, name) {
         for (let i = 0; i < d.length; i += 4) {
             const y = d[i] * .299 + d[i + 1] * .587 + d[i + 2] * .114;
             const v = Math.max(0, Math.min(255, Math.round((y - 128) * 1.65 + 128)));
+            d[i] = d[i + 1] = d[i + 2] = v;
+        }
+    } else if (name === "二値化Otsu") {
+        const threshold = computeOtsuThreshold(d);
+        for (let i = 0; i < d.length; i += 4) {
+            const y = d[i] * .299 + d[i + 1] * .587 + d[i + 2] * .114;
+            const v = y > threshold ? 255 : 0;
             d[i] = d[i + 1] = d[i + 2] = v;
         }
     } else if (name === "二値化180" || name === "二値化220") {
@@ -776,7 +756,7 @@ function buildOcrCanvas(){
 async function collectOcrResults(worker,target){
   const {canvas:oc,scale}=buildOcrCanvas();
   const results=[];
-  const stats={primaryMs:0,fallbackMs:0,primaryHitCount:0,fallbackUsed:false,primaryName:"グレー＋コントラスト",fallbackNames:["Otsu二値化","二値化180","二値化220","反転"]};
+  const stats={primaryMs:0,fallbackMs:0,primaryHitCount:0,fallbackUsed:false,primaryName:"グレー＋コントラスト",fallbackNames:["二値化Otsu","二値化180","二値化220","反転"]};
 
   // まず今回の実験で最も安定していた「グレー＋コントラスト」だけを実行。
   // ここで1件でも正確に見つかれば、追加の全体OCRは省略する。
@@ -794,15 +774,13 @@ async function collectOcrResults(worker,target){
   }
 
   // グレー＋コントラストで1件も見つからなかった場合だけ、
-  // 補助的な全体OCRを追加する。今回の実験では最初にOtsu二値化を試し、
-  // それでもダメなら従来の固定閾値・反転へ進む。
-  // Otsuは通常ルートを変更せず、「見つからなかった時だけ」追加する。
+  // 補助的な全体OCRを追加する。通常・グレースケールは今回の実験では外す。
   if(stats.primaryHitCount===0){
     stats.fallbackUsed=true;
     const fallbackStarted=performance.now();
     for(const name of stats.fallbackNames){
       status("実行中…");
-      const variant = name === "Otsu二値化" ? makeOtsu(oc) : makeOcrVariant(oc,name);
+      const variant=makeOcrVariant(oc,name);
       try {
         results.push(await recognizeVariant(worker,variant,target,name,scale));
       } finally {
@@ -1036,7 +1014,7 @@ async function refineNearCandidates(worker, results, ocrCanvas, target, scale) {
     // 絞って試す。全体OCRでこれらを毎回回すと画像全体分の時間がかかるが、
     // 候補地点（最大8箇所）だけなら低コストで済む。
     if (!ok && sourceCrop) {
-      for (const variantName of ['二値化180', '二値化220', '反転']) {
+      for (const variantName of ['二値化Otsu', '二値化180', '二値化220', '反転']) {
         if (ok) break;
         extraPasses++;
         const variantCanvas = makeOcrVariant(sourceCrop.canvas, variantName);
@@ -1235,8 +1213,8 @@ async function diagnoseOCR(){
       `候補地点：${candidateGroups.length} / 近似候補救出：${refine.fastRecovered} / 再OCR実行：${refine.attempted} / 再OCR追加パス：${refine.extraPasses} / 既存HITで省略：${refine.skippedExact}`,
       "",
       `※ 今回は速度実験として、まずグレー＋コントラストだけを全体OCRします。`,
-      `※ 第1段階で1件以上HITした場合、二値化180・220・反転の全体OCRは省略します。`,
-      `※ 第1段階でHITが0件の場合だけ、二値化180・220・反転を追加します。`,
+      `※ 第1段階で1件以上HITした場合、二値化Otsu・180・220・反転の全体OCRは省略します。`,
+      `※ 第1段階でHITが0件の場合だけ、二値化Otsu・180・220・反転を追加します。`,
       `※ 候補地点は同じ位置付近の候補をまとめています。`,
       `※ 近似候補は、対象文字と同じ文字数で、3文字以上の対象なら「対象の1文字違い」程度を先に救出します。
 ※ 近似候補の黒塗り範囲は、候補地点全体ではなく採用候補自身のbboxを使います。`,
