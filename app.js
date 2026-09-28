@@ -52,7 +52,7 @@ const pointers = new Map();
 let pinchStartDistance = 0;
 let pinchStartZoom = 1;
 let panLastCenter = null;
-const TOUCH_Y_OFFSET = 60; // タッチ時だけ指の少し上に選択位置を出す（表示上のpx）
+const TOUCH_Y_OFFSET = 60;
 
 function status(message, error = null) {
     statusEl.textContent = message;
@@ -274,15 +274,6 @@ function getPointerDistance() {
     const values = [...pointers.values()];
     if (values.length < 2) return 0;
     return Math.hypot(values[0].x - values[1].x, values[0].y - values[1].y);
-}
-
-function getPointerCenter() {
-    const values = [...pointers.values()];
-    if (values.length < 2) return null;
-    return {
-        x: (values[0].x + values[1].x) / 2,
-        y: (values[0].y + values[1].y) / 2
-    };
 }
 
 function updateUndoButton() {
@@ -1205,11 +1196,9 @@ async function diagnoseOCR(){
 }
 function getCanvasPoint(event) {
     const rect = canvas.getBoundingClientRect();
-    const touchOffset = event.pointerType === "touch" ? TOUCH_Y_OFFSET : 0;
-    const y = event.clientY - rect.top - touchOffset;
     return {
-        x: Math.max(0, Math.min(canvas.width, (event.clientX - rect.left) * canvas.width / rect.width)),
-        y: Math.max(0, Math.min(canvas.height, y * canvas.height / rect.height))
+        x: (event.clientX - rect.left) * canvas.width / rect.width,
+        y: (event.clientY - rect.top) * canvas.height / rect.height
     };
 }
 
@@ -1309,6 +1298,22 @@ function finishStamp(point) {
     dragStart = null;
 }
 
+function getManualPoint(event) {
+    if (event.pointerType === "touch") {
+        return getCanvasPoint({ clientX: event.clientX, clientY: event.clientY - TOUCH_Y_OFFSET });
+    }
+    return getCanvasPoint(event);
+}
+
+function getPointerCenter() {
+    const values = [...pointers.values()];
+    if (!values.length) return null;
+    return {
+        x: values.reduce((sum, p) => sum + p.x, 0) / values.length,
+        y: values.reduce((sum, p) => sum + p.y, 0) / values.length
+    };
+}
+
 canvasWrap.addEventListener("pointerdown", event => {
     if (!sourceImage) return;
     pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
@@ -1317,7 +1322,6 @@ canvasWrap.addEventListener("pointerdown", event => {
     if (pointers.size >= 2) {
         isDragging = false;
         dragStart = null;
-        stampTapStart = null;
         selection.hidden = true;
         pinchStartDistance = getPointerDistance();
         pinchStartZoom = zoom;
@@ -1326,9 +1330,11 @@ canvasWrap.addEventListener("pointerdown", event => {
         return;
     }
 
+    panLastCenter = null;
+
     if (!manualMode) return;
     event.preventDefault();
-    dragStart = getCanvasPoint(event);
+    dragStart = getManualPoint(event);
 
     if (stampMode.checked && manualStamps.length) {
         stampTapStart = { x: event.clientX, y: event.clientY };
@@ -1352,10 +1358,10 @@ canvasWrap.addEventListener("pointermove", event => {
 
     if (pointers.size >= 2) {
         const distance = getPointerDistance();
+        const center = getPointerCenter();
         if (pinchStartDistance > 0 && distance > 0) {
             setZoom(pinchStartZoom * distance / pinchStartDistance);
         }
-        const center = getPointerCenter();
         if (center && panLastCenter) {
             canvasWrap.scrollLeft -= center.x - panLastCenter.x;
             canvasWrap.scrollTop -= center.y - panLastCenter.y;
@@ -1369,7 +1375,7 @@ canvasWrap.addEventListener("pointermove", event => {
     event.preventDefault();
 
     if (stampMode.checked && stampTapStart && manualStamps.length) {
-        const point = getCanvasPoint(event);
+        const point = getManualPoint(event);
         const last = manualStamps[manualStamps.length - 1];
         updateSelection(
             { x: point.x - last.w / 2, y: point.y - last.h / 2 },
@@ -1379,7 +1385,7 @@ canvasWrap.addEventListener("pointermove", event => {
     }
 
     if (!isDragging || !dragStart) return;
-    updateSelection(dragStart, getCanvasPoint(event));
+    updateSelection(dragStart, getManualPoint(event));
 });
 
 function endPointer(event) {
@@ -1390,8 +1396,6 @@ function endPointer(event) {
         dragStart = null;
         selection.hidden = true;
         panLastCenter = getPointerCenter();
-        pinchStartDistance = getPointerDistance();
-        pinchStartZoom = zoom;
         return;
     }
 
@@ -1402,7 +1406,7 @@ function endPointer(event) {
 
     if (stampMode.checked && stampTapStart && manualStamps.length) {
         const moved = Math.hypot(event.clientX - stampTapStart.x, event.clientY - stampTapStart.y);
-        const point = getCanvasPoint(event);
+        const point = getManualPoint(event);
         stampTapStart = null;
         selection.hidden = true;
         dragStart = null;
@@ -1413,16 +1417,16 @@ function endPointer(event) {
 
     if (!isDragging || !dragStart) return;
     isDragging = false;
-    finishStamp(getCanvasPoint(event));
+    finishStamp(getManualPoint(event));
 }
 
 canvasWrap.addEventListener("pointerup", endPointer);
 canvasWrap.addEventListener("pointercancel", event => {
     pointers.delete(event.pointerId);
+    panLastCenter = pointers.size ? getPointerCenter() : null;
     isDragging = false;
     dragStart = null;
     stampTapStart = null;
-    panLastCenter = getPointerCenter();
     selection.hidden = true;
 });
 

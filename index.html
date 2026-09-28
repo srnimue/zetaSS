@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Zetaスクショ黒塗りツール V41 OCR黒塗りbbox補正</title>
-<link rel="stylesheet" href="style.css?v=28">
+<link rel="stylesheet" href="style.css?v=29">
 <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
 </head>
 <body>
@@ -32,14 +32,14 @@
 スタンプモード（直前の手動黒塗りと同じサイズ）
 </label>
 
-<div class="button-row">
+<div class="button-row main-actions">
 <button id="redactBtn" type="button" disabled>✨ 自動検出</button>
 <button id="manualBtn" type="button" disabled>🖊 手動</button>
 <button id="undoBtn" type="button" disabled>↩️ 戻す</button>
-<button id="resetBtn" class="secondary" type="button" disabled>🗑</button>
+<button id="resetBtn" class="secondary reset-button" type="button" disabled>🗑</button>
 </div>
 
-<div class="button-row diagnosis-row">
+<div class="button-row-left diagnostic-row">
 <button id="diagnoseBtn" type="button" disabled>OCR診断</button>
 </div>
 
@@ -71,6 +71,6 @@
 <pre id="errorDetails" class="error" hidden></pre>
 <pre id="ocrDiagnostics" class="diagnostics" hidden></pre>
 </main>
-<script src="app.js?v=28"></script>
+<script src="app.js?v=29"></script>
 </body>
 </html>
