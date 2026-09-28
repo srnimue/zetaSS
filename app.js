@@ -344,40 +344,6 @@ function makeInverted(src){
   for(let i=0;i<d.length;i+=4){d[i]=255-d[i];d[i+1]=255-d[i+1];d[i+2]=255-d[i+2];}
   ctx.putImageData(img,0,0); return c;
 }
-// Otsu法：グレースケールのヒストグラムから、白と黒の2グループの
-// クラス間分散が最大になる閾値を自動で求める。固定値(180/220)と違い、
-// 画像ごと(局所クロップなら切り出し範囲ごと)に最適な閾値が決まる。
-function computeOtsuThreshold(d) {
-    const hist = new Uint32Array(256);
-    let total = 0;
-    for (let i = 0; i < d.length; i += 4) {
-        const y = Math.round(d[i] * .299 + d[i + 1] * .587 + d[i + 2] * .114);
-        hist[y]++;
-        total++;
-    }
-    if (!total) return 128;
-
-    let sumAll = 0;
-    for (let t = 0; t < 256; t++) sumAll += t * hist[t];
-
-    let sumB = 0, wB = 0, best = 0, threshold = 128;
-    for (let t = 0; t < 256; t++) {
-        wB += hist[t];
-        if (!wB) continue;
-        const wF = total - wB;
-        if (!wF) break;
-        sumB += t * hist[t];
-        const mB = sumB / wB;
-        const mF = (sumAll - sumB) / wF;
-        const between = wB * wF * (mB - mF) * (mB - mF);
-        if (between > best) {
-            best = between;
-            threshold = t;
-        }
-    }
-    return threshold;
-}
-
 function makeOcrVariant(baseCanvas, name) {
     if (name === "通常") return baseCanvas;
 
@@ -398,13 +364,6 @@ function makeOcrVariant(baseCanvas, name) {
         for (let i = 0; i < d.length; i += 4) {
             const y = d[i] * .299 + d[i + 1] * .587 + d[i + 2] * .114;
             const v = Math.max(0, Math.min(255, Math.round((y - 128) * 1.65 + 128)));
-            d[i] = d[i + 1] = d[i + 2] = v;
-        }
-    } else if (name === "二値化Otsu") {
-        const threshold = computeOtsuThreshold(d);
-        for (let i = 0; i < d.length; i += 4) {
-            const y = d[i] * .299 + d[i + 1] * .587 + d[i + 2] * .114;
-            const v = y > threshold ? 255 : 0;
             d[i] = d[i + 1] = d[i + 2] = v;
         }
     } else if (name === "二値化180" || name === "二値化220") {
@@ -756,7 +715,7 @@ function buildOcrCanvas(){
 async function collectOcrResults(worker,target){
   const {canvas:oc,scale}=buildOcrCanvas();
   const results=[];
-  const stats={primaryMs:0,fallbackMs:0,primaryHitCount:0,fallbackUsed:false,primaryName:"グレー＋コントラスト",fallbackNames:["二値化Otsu","二値化180","二値化220","反転"]};
+  const stats={primaryMs:0,fallbackMs:0,primaryHitCount:0,fallbackUsed:false,primaryName:"グレー＋コントラスト",fallbackNames:["二値化180","二値化220","反転"]};
 
   // まず今回の実験で最も安定していた「グレー＋コントラスト」だけを実行。
   // ここで1件でも正確に見つかれば、追加の全体OCRは省略する。
@@ -773,28 +732,12 @@ async function collectOcrResults(worker,target){
     stats.primaryMs=performance.now()-primaryStarted;
   }
 
-  // 第2段階：「二値化Otsu」は、第1段階のHIT数に関わらず常に追加で1回実行する。
-  // 第1段階で数件ヒットしていても、同じ画像内の別の箇所が取りこぼされる
-  // ことがあるため。重複するHITはmergeMatches()で1つにまとめられ、
-  // 第1段階の結果が優先される。
-  const fallbackStarted=performance.now();
-  const secondPass="二値化Otsu";
-  {
-    stats.fallbackUsed=true;
-    status("実行中…");
-    const variant=makeOcrVariant(oc,secondPass);
-    try {
-      results.push(await recognizeVariant(worker,variant,target,secondPass,scale));
-    } finally {
-      if(variant!==oc){variant.width=1;variant.height=1;}
-    }
-  }
-
   // グレー＋コントラストで1件も見つからなかった場合だけ、
-  // さらに残りの補助的な全体OCR(Otsu以外)を追加する。
+  // 補助的な全体OCRを追加する。通常・グレースケールは今回の実験では外す。
   if(stats.primaryHitCount===0){
+    stats.fallbackUsed=true;
+    const fallbackStarted=performance.now();
     for(const name of stats.fallbackNames){
-      if(name===secondPass) continue;
       status("実行中…");
       const variant=makeOcrVariant(oc,name);
       try {
@@ -803,8 +746,8 @@ async function collectOcrResults(worker,target){
         if(variant!==oc){variant.width=1;variant.height=1;}
       }
     }
+    stats.fallbackMs=performance.now()-fallbackStarted;
   }
-  stats.fallbackMs=performance.now()-fallbackStarted;
 
   return {results,scale,ocrCanvas:oc,stats};
 }
@@ -1020,17 +963,25 @@ async function refineNearCandidates(worker, results, ocrCanvas, target, scale) {
       ok = await runLocalCrop(grayCrop, 'グレー', 7);
     }
 
-    // それでもダメな「ゆーゴー」「めーざぴー」のような候補だけ、PSM8を1回追加。
+    // それでもダメな候補だけ、PSM8（単語・短い文字列向け）を追加。
+    // 既存のPSM7ルートは変更せず、比較実験としてPSM8を後段に置く。
     if (!ok && (cand.similarity < 0.70 || (cand.exactChars || 0) <= 2)) {
       extraPasses++;
       ok = await runLocalCrop(sourceCrop || grayCrop, '元画像', 8);
     }
 
-    // 元画像・グレー・PSM8でも読めない候補だけ、二値化・反転もこの候補地点に
+    // PSM10（単一文字向け）は、対象文字が1文字の候補だけで試す。
+    // 2文字以上では使わず、文字列全体を1文字として誤認するリスクを避ける。
+    if (!ok && [...target].length === 1) {
+      extraPasses++;
+      ok = await runLocalCrop(sourceCrop || grayCrop, '元画像', 10);
+    }
+
+    // 元画像・グレー・PSM8/10でも読めない候補だけ、二値化・反転もこの候補地点に
     // 絞って試す。全体OCRでこれらを毎回回すと画像全体分の時間がかかるが、
     // 候補地点（最大8箇所）だけなら低コストで済む。
     if (!ok && sourceCrop) {
-      for (const variantName of ['二値化Otsu', '二値化180', '二値化220', '反転']) {
+      for (const variantName of ['二値化180', '二値化220', '反転']) {
         if (ok) break;
         extraPasses++;
         const variantCanvas = makeOcrVariant(sourceCrop.canvas, variantName);
@@ -1229,13 +1180,15 @@ async function diagnoseOCR(){
       `候補地点：${candidateGroups.length} / 近似候補救出：${refine.fastRecovered} / 再OCR実行：${refine.attempted} / 再OCR追加パス：${refine.extraPasses} / 既存HITで省略：${refine.skippedExact}`,
       "",
       `※ 今回は速度実験として、まずグレー＋コントラストだけを全体OCRします。`,
-      `※ 二値化Otsuは第1段階のHIT数に関わらず常に追加実行します。`,
-      `※ 第1段階でHITが0件の場合だけ、さらに二値化180・220・反転を追加します。`,
+      `※ 第1段階で1件以上HITした場合、二値化180・220・反転の全体OCRは省略します。`,
+      `※ 第1段階でHITが0件の場合だけ、二値化180・220・反転を追加します。`,
       `※ 候補地点は同じ位置付近の候補をまとめています。`,
       `※ 近似候補は、対象文字と同じ文字数で、3文字以上の対象なら「対象の1文字違い」程度を先に救出します。
 ※ 近似候補の黒塗り範囲は、候補地点全体ではなく採用候補自身のbboxを使います。`,
       `※ 近似候補救出は再OCRより先に判定し、時間を増やしにくい構成です。`,
       `※ 再OCRは近似候補救出で確定できなかった地点だけ実行します。`,
+      `※ PSM8は候補再OCRの後段で、短い候補を中心に比較実験しています。`,
+      `※ PSM10は対象文字が1文字の場合だけ候補再OCRで試します。`,
       `※ 診断で救出した候補は、自動黒塗りにも使用されます。`
     );
     ocrDiagnostics.textContent=lines.join("\n");
