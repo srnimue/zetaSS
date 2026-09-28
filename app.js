@@ -52,7 +52,9 @@ const pointers = new Map();
 let pinchStartDistance = 0;
 let pinchStartZoom = 1;
 let panLastCenter = null;
-const TOUCH_Y_OFFSET = 60;
+const TOUCH_X_OFFSET = 30;
+const TOUCH_Y_OFFSET = -40;
+
 
 function status(message, error = null) {
     statusEl.textContent = message;
