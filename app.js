@@ -773,12 +773,28 @@ async function collectOcrResults(worker,target){
     stats.primaryMs=performance.now()-primaryStarted;
   }
 
-  // グレー＋コントラストで1件も見つからなかった場合だけ、
-  // 補助的な全体OCRを追加する。通常・グレースケールは今回の実験では外す。
-  if(stats.primaryHitCount===0){
+  // 第2段階：「二値化Otsu」は、第1段階のHIT数に関わらず常に追加で1回実行する。
+  // 第1段階で数件ヒットしていても、同じ画像内の別の箇所が取りこぼされる
+  // ことがあるため。重複するHITはmergeMatches()で1つにまとめられ、
+  // 第1段階の結果が優先される。
+  const fallbackStarted=performance.now();
+  const secondPass="二値化Otsu";
+  {
     stats.fallbackUsed=true;
-    const fallbackStarted=performance.now();
+    status("実行中…");
+    const variant=makeOcrVariant(oc,secondPass);
+    try {
+      results.push(await recognizeVariant(worker,variant,target,secondPass,scale));
+    } finally {
+      if(variant!==oc){variant.width=1;variant.height=1;}
+    }
+  }
+
+  // グレー＋コントラストで1件も見つからなかった場合だけ、
+  // さらに残りの補助的な全体OCR(Otsu以外)を追加する。
+  if(stats.primaryHitCount===0){
     for(const name of stats.fallbackNames){
+      if(name===secondPass) continue;
       status("実行中…");
       const variant=makeOcrVariant(oc,name);
       try {
@@ -787,8 +803,8 @@ async function collectOcrResults(worker,target){
         if(variant!==oc){variant.width=1;variant.height=1;}
       }
     }
-    stats.fallbackMs=performance.now()-fallbackStarted;
   }
+  stats.fallbackMs=performance.now()-fallbackStarted;
 
   return {results,scale,ocrCanvas:oc,stats};
 }
@@ -1213,8 +1229,8 @@ async function diagnoseOCR(){
       `候補地点：${candidateGroups.length} / 近似候補救出：${refine.fastRecovered} / 再OCR実行：${refine.attempted} / 再OCR追加パス：${refine.extraPasses} / 既存HITで省略：${refine.skippedExact}`,
       "",
       `※ 今回は速度実験として、まずグレー＋コントラストだけを全体OCRします。`,
-      `※ 第1段階で1件以上HITした場合、二値化Otsu・180・220・反転の全体OCRは省略します。`,
-      `※ 第1段階でHITが0件の場合だけ、二値化Otsu・180・220・反転を追加します。`,
+      `※ 二値化Otsuは第1段階のHIT数に関わらず常に追加実行します。`,
+      `※ 第1段階でHITが0件の場合だけ、さらに二値化180・220・反転を追加します。`,
       `※ 候補地点は同じ位置付近の候補をまとめています。`,
       `※ 近似候補は、対象文字と同じ文字数で、3文字以上の対象なら「対象の1文字違い」程度を先に救出します。
 ※ 近似候補の黒塗り範囲は、候補地点全体ではなく採用候補自身のbboxを使います。`,
