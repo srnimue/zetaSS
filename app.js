@@ -301,7 +301,7 @@ function redrawFromBase() {
     updateUndoButton();
 }
 
-async function getWorker(preferredLang = "jpn") {
+async function getWorker(preferredLang = "jpn_best") {
     if (!window.Tesseract) {
         throw new Error("Tesseract.jsを読み込めませんでした。インターネット接続や外部スクリプト制限を確認してください。");
     }
@@ -314,8 +314,9 @@ async function getWorker(preferredLang = "jpn") {
         workerLang = null;
     }
 
-    status(`${preferredLang === "jpn" ? "日本語" : "英語"}OCRエンジンを準備中…\n初回は少し時間がかかります。`);
+    status(`${preferredLang === "jpn_best" ? "日本語（jpn_best）" : "英語"}OCRエンジンを準備中…\n初回は少し時間がかかります。`);
     worker = await Tesseract.createWorker(preferredLang, 1, {
+        ...(preferredLang === "jpn_best" ? { langPath: "https://cdn.jsdelivr.net/gh/naptha/tessdata@gh-pages/4.0.0_best" } : {}),
         logger: message => {
             if (message?.progress != null) {
                 status("実行中…");
@@ -327,7 +328,7 @@ async function getWorker(preferredLang = "jpn") {
 }
 
 function getOcrLanguage(target) {
-    return /[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff]/u.test(target) ? "jpn" : "eng";
+    return /[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff]/u.test(target) ? "jpn_best" : "eng";
 }
 
 function makeGrayContrast(src){
@@ -963,21 +964,13 @@ async function refineNearCandidates(worker, results, ocrCanvas, target, scale) {
       ok = await runLocalCrop(grayCrop, 'グレー', 7);
     }
 
-    // それでもダメな候補だけ、PSM8（単語・短い文字列向け）を追加。
-    // 既存のPSM7ルートは変更せず、比較実験としてPSM8を後段に置く。
+    // それでもダメな「ゆーゴー」「めーざぴー」のような候補だけ、PSM8を1回追加。
     if (!ok && (cand.similarity < 0.70 || (cand.exactChars || 0) <= 2)) {
       extraPasses++;
       ok = await runLocalCrop(sourceCrop || grayCrop, '元画像', 8);
     }
 
-    // PSM10（単一文字向け）は、対象文字が1文字の候補だけで試す。
-    // 2文字以上では使わず、文字列全体を1文字として誤認するリスクを避ける。
-    if (!ok && [...target].length === 1) {
-      extraPasses++;
-      ok = await runLocalCrop(sourceCrop || grayCrop, '元画像', 10);
-    }
-
-    // 元画像・グレー・PSM8/10でも読めない候補だけ、二値化・反転もこの候補地点に
+    // 元画像・グレー・PSM8でも読めない候補だけ、二値化・反転もこの候補地点に
     // 絞って試す。全体OCRでこれらを毎回回すと画像全体分の時間がかかるが、
     // 候補地点（最大8箇所）だけなら低コストで済む。
     if (!ok && sourceCrop) {
@@ -1187,8 +1180,6 @@ async function diagnoseOCR(){
 ※ 近似候補の黒塗り範囲は、候補地点全体ではなく採用候補自身のbboxを使います。`,
       `※ 近似候補救出は再OCRより先に判定し、時間を増やしにくい構成です。`,
       `※ 再OCRは近似候補救出で確定できなかった地点だけ実行します。`,
-      `※ PSM8は候補再OCRの後段で、短い候補を中心に比較実験しています。`,
-      `※ PSM10は対象文字が1文字の場合だけ候補再OCRで試します。`,
       `※ 診断で救出した候補は、自動黒塗りにも使用されます。`
     );
     ocrDiagnostics.textContent=lines.join("\n");
