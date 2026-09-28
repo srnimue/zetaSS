@@ -15,15 +15,17 @@ input[type="file"], input[type="text"] { width: 100%; margin-bottom: 14px; }
 input[type="text"] { padding: 10px 12px; border: 1px solid #ccc; border-radius: 8px; font-size: 16px; }
 .checkbox { display: flex; align-items: center; gap: 8px; margin-bottom: 14px; font-weight: 400; }
 .checkbox input { width: 18px; height: 18px; }
-.button-row { display: flex; flex-wrap: nowrap; justify-content: center; align-items: center; gap: 8px; }
-.button-row button { flex: 0 1 auto; white-space: nowrap; }
-.button-row-right { display: flex; justify-content: flex-end; margin-top: 8px; }
+.button-row { display: flex; flex-wrap: nowrap; align-items: center; gap: 8px; }
+.button-row button { flex: 1 1 0; min-width: 0; white-space: nowrap; }
+.button-row button:last-child { margin-left: 10px; }
+.diagnosis-row { margin-top: 8px; }
+.diagnosis-row button { flex: 0 0 auto; }
 button {
 border: 0; border-radius: 8px; padding: 11px 14px; font-size: 15px;
 font-weight: 600; cursor: pointer; background: #222; color: #fff;
 }
 button:disabled { opacity: .45; cursor: default; }
-button.secondary { margin-top: 10px; background: #666; }
+button.secondary { background: #666; }
 .manual-help { margin: 12px 0 0; padding: 10px 12px; background: #f0f0f0; border-radius: 8px; line-height: 1.6; font-size: 14px; }
 #canvasWrap { position: relative; width: 100%; overflow: auto; border-radius: 8px; background: #eee; touch-action: none; }
 #canvas { display: block; max-width: 100%; height: auto; margin: 0 auto; user-select: none; -webkit-user-select: none; touch-action: none; }
@@ -46,5 +48,6 @@ button.secondary { margin-top: 10px; background: #666; }
 @media (max-width: 600px) {
 body { padding: 12px; } h1 { font-size: 21px; } .panel, .canvas-panel { padding: 12px; }
 .button-row { gap: 5px; }
-.button-row button { flex: 1 1 0; min-width: 0; padding: 10px 5px; font-size: 11px; white-space: nowrap; }
+.button-row button { flex: 1 1 0; min-width: 0; padding: 10px 5px; font-size: 12px; white-space: nowrap; }
+.button-row button:last-child { margin-left: 6px; }
 }
