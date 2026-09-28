@@ -1300,7 +1300,7 @@ function finishStamp(point) {
 
 function getManualPoint(event) {
     if (event.pointerType === "touch") {
-        return getCanvasPoint({ clientX: event.clientX, clientY: event.clientY - TOUCH_Y_OFFSET });
+        return getCanvasPoint({ clientX: event.clientX, clientY: event.clientY + TOUCH_Y_OFFSET });
     }
     return getCanvasPoint(event);
 }
