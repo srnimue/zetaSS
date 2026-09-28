@@ -115,7 +115,13 @@ function getOcrPaintBox(box, symbols = []) {
             if (symbols.length === 2 && second) {
                 const firstWidth = Math.max(0, first.x1 - first.x0);
                 const secondWidth = Math.max(0, second.x1 - second.x0);
-                if (secondWidth > 0 && firstWidth / secondWidth < OCR_FIRST_SYMBOL_MAX_WIDTH_RATIO) {
+                // secondWidthを「1文字目の本来の幅」の基準として使う前に、
+                // それ自体が1文字ぶんとして妥当な幅かを確認する。文字の高さに対して
+                // 幅が異常に大きい場合、Tesseractがその文字自体を隣接文字と
+                // 巻き込んで誤検出している（＝基準にできない）ため、widthを
+                // 使った補正はスキップする（変に広げるより何もしない方が安全）。
+                const secondPlausible = secondWidth > 0 && secondWidth <= box.h * 1.6;
+                if (secondPlausible && firstWidth / secondWidth < OCR_FIRST_SYMBOL_MAX_WIDTH_RATIO) {
                     // 1文字目の幅だけが極端に狭い＝右端の検出漏れの可能性が高い。
                     // box全体の左端を、1文字目の本来の開始位置まで広げる。
                     const expectedWidth = secondWidth; // 2文字目と同程度の幅があったはず
@@ -153,6 +159,16 @@ function getOcrPaintBox(box, symbols = []) {
                     out._leftBoundary = candidateBoundary;
                 }
             }
+        }
+
+        // 最終保険：文字数に対してboxの幅があきらかに広すぎる場合
+        // （＝どこかのsymbol自体のbboxがガタっと壊れている可能性が高い）は、
+        // 左端はそのままに、幅を「1文字あたり高さの2倍」程度まで切り詰める。
+        // 隠したい本体（1文字目）は左端にあるはずなので、切り詰めても
+        // 対象自体が露出することはなく、余計な巻き込みだけを防げる。
+        const maxPlausibleWidth = box.h * Math.max(1, symbols.length) * 2;
+        if (out.w > maxPlausibleWidth) {
+            out.w = maxPlausibleWidth;
         }
     }
     return out;
@@ -328,6 +344,67 @@ function makeInverted(src){
   for(let i=0;i<d.length;i+=4){d[i]=255-d[i];d[i+1]=255-d[i+1];d[i+2]=255-d[i+2];}
   ctx.putImageData(img,0,0); return c;
 }
+function makeOtsu(baseCanvas) {
+    const c = document.createElement("canvas");
+    c.width = baseCanvas.width;
+    c.height = baseCanvas.height;
+    const g = c.getContext("2d");
+    g.drawImage(baseCanvas, 0, 0);
+
+    const img = g.getImageData(0, 0, c.width, c.height);
+    const d = img.data;
+    const hist = new Uint32Array(256);
+    const total = c.width * c.height;
+
+    // まず輝度ヒストグラムを作る。
+    for (let i = 0; i < d.length; i += 4) {
+        const y = Math.max(0, Math.min(255, Math.round(
+            d[i] * 0.299 + d[i + 1] * 0.587 + d[i + 2] * 0.114
+        )));
+        hist[y]++;
+    }
+
+    // Otsu法でクラス間分散が最大になる閾値を求める。
+    let sum = 0;
+    for (let i = 0; i < 256; i++) sum += i * hist[i];
+
+    let sumB = 0;
+    let weightB = 0;
+    let maxVariance = -1;
+    let threshold = 128;
+
+    for (let t = 0; t < 256; t++) {
+        weightB += hist[t];
+        if (!weightB) continue;
+
+        const weightF = total - weightB;
+        if (!weightF) break;
+
+        sumB += t * hist[t];
+
+        const meanB = sumB / weightB;
+        const meanF = (sum - sumB) / weightF;
+        const variance = weightB * weightF * (meanB - meanF) * (meanB - meanF);
+
+        if (variance > maxVariance) {
+            maxVariance = variance;
+            threshold = t;
+        }
+    }
+
+    // 二値画像にする。背景・文字のどちらが白でもTesseract側で処理できるため、
+    // ここでは単純な白黒化だけを行う。
+    for (let i = 0; i < d.length; i += 4) {
+        const y = Math.round(d[i] * 0.299 + d[i + 1] * 0.587 + d[i + 2] * 0.114);
+        const v = y >= threshold ? 255 : 0;
+        d[i] = d[i + 1] = d[i + 2] = v;
+    }
+
+    g.putImageData(img, 0, 0);
+    c._otsuThreshold = threshold;
+    return c;
+}
+
 function makeOcrVariant(baseCanvas, name) {
     if (name === "通常") return baseCanvas;
 
@@ -699,7 +776,7 @@ function buildOcrCanvas(){
 async function collectOcrResults(worker,target){
   const {canvas:oc,scale}=buildOcrCanvas();
   const results=[];
-  const stats={primaryMs:0,fallbackMs:0,primaryHitCount:0,fallbackUsed:false,primaryName:"グレー＋コントラスト",fallbackNames:["二値化180","二値化220","反転"]};
+  const stats={primaryMs:0,fallbackMs:0,primaryHitCount:0,fallbackUsed:false,primaryName:"グレー＋コントラスト",fallbackNames:["Otsu二値化","二値化180","二値化220","反転"]};
 
   // まず今回の実験で最も安定していた「グレー＋コントラスト」だけを実行。
   // ここで1件でも正確に見つかれば、追加の全体OCRは省略する。
@@ -717,13 +794,15 @@ async function collectOcrResults(worker,target){
   }
 
   // グレー＋コントラストで1件も見つからなかった場合だけ、
-  // 補助的な全体OCRを追加する。通常・グレースケールは今回の実験では外す。
+  // 補助的な全体OCRを追加する。今回の実験では最初にOtsu二値化を試し、
+  // それでもダメなら従来の固定閾値・反転へ進む。
+  // Otsuは通常ルートを変更せず、「見つからなかった時だけ」追加する。
   if(stats.primaryHitCount===0){
     stats.fallbackUsed=true;
     const fallbackStarted=performance.now();
     for(const name of stats.fallbackNames){
       status("実行中…");
-      const variant=makeOcrVariant(oc,name);
+      const variant = name === "Otsu二値化" ? makeOtsu(oc) : makeOcrVariant(oc,name);
       try {
         results.push(await recognizeVariant(worker,variant,target,name,scale));
       } finally {
