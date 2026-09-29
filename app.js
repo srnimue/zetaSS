@@ -44,6 +44,10 @@ let isDragging = false;
 let dragStart = null;
 let ocrBaseCanvas = null;
 const manualStamps = [];
+const manualHistory = [];
+let selectedManualIndex = -1;
+let editMode = null; // { type: "move" | "resize", handle: string|null, startPoint, original }
+const MIN_MANUAL_SIZE = 4;
 
 let zoom = 1;
 const MIN_ZOOM = 1;
@@ -52,9 +56,7 @@ const pointers = new Map();
 let pinchStartDistance = 0;
 let pinchStartZoom = 1;
 let panLastCenter = null;
-const TOUCH_X_OFFSET = -60;
-const TOUCH_Y_OFFSET = -40;
-
+const TOUCH_Y_OFFSET = 60;
 
 function status(message, error = null) {
     statusEl.textContent = message;
@@ -279,9 +281,112 @@ function getPointerDistance() {
 }
 
 function updateUndoButton() {
-    undoBtn.disabled = manualStamps.length === 0;
+    undoBtn.disabled = manualHistory.length === 0;
     stampMode.disabled = manualStamps.length === 0;
     if (manualStamps.length === 0) stampMode.checked = false;
+}
+
+function snapshotManualStamps() {
+    return manualStamps.map(stamp => ({ ...stamp }));
+}
+
+function pushManualHistory() {
+    manualHistory.push(snapshotManualStamps());
+    if (manualHistory.length > 50) manualHistory.shift();
+}
+
+function restoreManualSnapshot(snapshot) {
+    manualStamps.length = 0;
+    for (const stamp of snapshot) manualStamps.push({ ...stamp });
+    selectedManualIndex = -1;
+    editMode = null;
+    selection.hidden = true;
+    redrawFromBase();
+}
+
+function getManualVisualRect(stamp) {
+    const padding = Math.max(4, Math.round(Math.min(stamp.w, stamp.h) * 0.12));
+    const verticalPadding = padding + 2;
+    return {
+        x: Math.max(0, stamp.x - padding - 6),
+        y: Math.max(0, stamp.y - verticalPadding),
+        w: stamp.w + padding,
+        h: stamp.h + verticalPadding * 2
+    };
+}
+
+function renderManualSelection() {
+    if (selectedManualIndex < 0 || !manualStamps[selectedManualIndex]) {
+        selection.hidden = true;
+        selection.innerHTML = "";
+        return;
+    }
+    const stamp = manualStamps[selectedManualIndex];
+    const transform = getCanvasDisplayTransform();
+    selection.hidden = false;
+    selection.style.left = `${transform.left + stamp.x * transform.scaleX}px`;
+    selection.style.top = `${transform.top + stamp.y * transform.scaleY}px`;
+    selection.style.width = `${stamp.w * transform.scaleX}px`;
+    selection.style.height = `${stamp.h * transform.scaleY}px`;
+    selection.innerHTML = "";
+    for (const handle of ["nw", "ne", "sw", "se"]) {
+        const el = document.createElement("span");
+        el.className = `edit-handle handle-${handle}`;
+        el.dataset.handle = handle;
+        selection.appendChild(el);
+    }
+}
+
+function hitTestManual(point) {
+    for (let i = manualStamps.length - 1; i >= 0; i--) {
+        const b = manualStamps[i];
+        const padX = Math.max(8, b.w * 0.08);
+        const padY = Math.max(8, b.h * 0.08);
+        if (point.x >= b.x - padX && point.x <= b.x + b.w + padX &&
+            point.y >= b.y - padY && point.y <= b.y + b.h + padY) return i;
+    }
+    return -1;
+}
+
+function getResizeHandle(point, stamp) {
+    const transform = getCanvasDisplayTransform();
+    const size = 22 / Math.max(transform.scaleX, transform.scaleY);
+    const handles = {
+        nw: [stamp.x, stamp.y],
+        ne: [stamp.x + stamp.w, stamp.y],
+        sw: [stamp.x, stamp.y + stamp.h],
+        se: [stamp.x + stamp.w, stamp.y + stamp.h]
+    };
+    for (const [name, [x, y]] of Object.entries(handles)) {
+        if (Math.hypot(point.x - x, point.y - y) <= size) return name;
+    }
+    return null;
+}
+
+function applyMoveEdit(current) {
+    const b = manualStamps[selectedManualIndex];
+    const dx = current.x - editMode.startPoint.x;
+    const dy = current.y - editMode.startPoint.y;
+    b.x = Math.max(0, Math.min(canvas.width - b.w, editMode.original.x + dx));
+    b.y = Math.max(0, Math.min(canvas.height - b.h, editMode.original.y + dy));
+}
+
+function applyResizeEdit(current) {
+    const b = manualStamps[selectedManualIndex];
+    const o = editMode.original;
+    let x = o.x, y = o.y, w = o.w, h = o.h;
+    const dx = current.x - editMode.startPoint.x;
+    const dy = current.y - editMode.startPoint.y;
+    const handle = editMode.handle;
+    if (handle.includes("e")) w = o.w + dx;
+    if (handle.includes("s")) h = o.h + dy;
+    if (handle.includes("w")) { x = o.x + dx; w = o.w - dx; }
+    if (handle.includes("n")) { y = o.y + dy; h = o.h - dy; }
+    if (w < MIN_MANUAL_SIZE) { if (handle.includes("w")) x = o.x + o.w - MIN_MANUAL_SIZE; w = MIN_MANUAL_SIZE; }
+    if (h < MIN_MANUAL_SIZE) { if (handle.includes("n")) y = o.y + o.h - MIN_MANUAL_SIZE; h = MIN_MANUAL_SIZE; }
+    x = Math.max(0, Math.min(canvas.width - w, x));
+    y = Math.max(0, Math.min(canvas.height - h, y));
+    b.x = x; b.y = y; b.w = w; b.h = h;
 }
 
 function redrawFromBase() {
@@ -303,6 +408,7 @@ function redrawFromBase() {
         paintManual(stamp, stamp.text);
     }
     updateUndoButton();
+    renderManualSelection();
 }
 
 async function getWorker(preferredLang = "jpn") {
@@ -1030,7 +1136,7 @@ async function run(){
     const target=normalize(targetText.value);
     if(!target) throw new Error("黒塗りする文字を入力してください。");
 
-    manualStamps.length=0; ocrBaseCanvas=null; redrawFromBase();
+    manualStamps.length=0; manualHistory.length=0; selectedManualIndex=-1; editMode=null; ocrBaseCanvas=null; redrawFromBase();
     const worker=await getWorker(getOcrLanguage(target));
     status("OCR中…\n対象文字を探しています。");
 
@@ -1271,6 +1377,8 @@ function placeStampAt(point) {
     stamp.x = Math.max(0, Math.min(canvas.width - stamp.w, stamp.x));
     stamp.y = Math.max(0, Math.min(canvas.height - stamp.h, stamp.y));
 
+    pushManualHistory();
+    pushManualHistory();
     manualStamps.push(stamp);
     paintManual(stamp, stamp.text);
     updateUndoButton();
@@ -1338,6 +1446,30 @@ canvasWrap.addEventListener("pointerdown", event => {
     event.preventDefault();
     dragStart = getManualPoint(event);
 
+    // 既存の手動黒塗りをタップすると編集対象にする。
+    // スタンプモード中でも、まず既存黒塗りの編集を優先する。
+    const hitIndex = hitTestManual(dragStart);
+    if (hitIndex >= 0) {
+        selectedManualIndex = hitIndex;
+        const hitStamp = manualStamps[hitIndex];
+        const handle = getResizeHandle(dragStart, hitStamp);
+        editMode = {
+            type: handle ? "resize" : "move",
+            handle,
+            startPoint: { ...dragStart },
+            original: { ...hitStamp },
+            historyPushed: false
+        };
+        isDragging = true;
+        renderManualSelection();
+        status("黒塗りを選択中です。\n中央をドラッグ：移動 / 四隅をドラッグ：サイズ変更");
+        return;
+    }
+
+    selectedManualIndex = -1;
+    editMode = null;
+    renderManualSelection();
+
     if (stampMode.checked && manualStamps.length) {
         stampTapStart = { x: event.clientX, y: event.clientY };
         isDragging = false;
@@ -1376,6 +1508,18 @@ canvasWrap.addEventListener("pointermove", event => {
     if (!manualMode) return;
     event.preventDefault();
 
+    if (editMode && selectedManualIndex >= 0 && isDragging) {
+        const point = getManualPoint(event);
+        if (!editMode.historyPushed) {
+            pushManualHistory();
+            editMode.historyPushed = true;
+        }
+        if (editMode.type === "move") applyMoveEdit(point);
+        else applyResizeEdit(point);
+        redrawFromBase();
+        return;
+    }
+
     if (stampMode.checked && stampTapStart && manualStamps.length) {
         const point = getManualPoint(event);
         const last = manualStamps[manualStamps.length - 1];
@@ -1406,6 +1550,18 @@ function endPointer(event) {
     if (!manualMode) return;
     event.preventDefault();
 
+    if (editMode && selectedManualIndex >= 0 && isDragging) {
+        const point = getManualPoint(event);
+        if (!editMode.historyPushed) {
+            pushManualHistory();
+            editMode.historyPushed = true;
+        }
+        if (editMode.type === "move") applyMoveEdit(point);
+        else applyResizeEdit(point);
+        redrawFromBase();
+        return;
+    }
+
     if (stampMode.checked && stampTapStart && manualStamps.length) {
         const moved = Math.hypot(event.clientX - stampTapStart.x, event.clientY - stampTapStart.y);
         const point = getManualPoint(event);
@@ -1423,6 +1579,19 @@ function endPointer(event) {
 }
 
 canvasWrap.addEventListener("pointerup", endPointer);
+canvasWrap.addEventListener("dblclick", event => {
+    if (!manualMode || selectedManualIndex < 0 || !manualStamps[selectedManualIndex]) return;
+    const point = getManualPoint(event);
+    if (hitTestManual(point) !== selectedManualIndex) return;
+    pushManualHistory();
+    manualStamps.splice(selectedManualIndex, 1);
+    selectedManualIndex = -1;
+    editMode = null;
+    redrawFromBase();
+    saveBtn.disabled = false;
+    status(`選択した黒塗りを削除しました。\n残り：${manualStamps.length}箇所`);
+});
+
 canvasWrap.addEventListener("pointercancel", event => {
     pointers.delete(event.pointerId);
     panLastCenter = pointers.size ? getPointerCenter() : null;
@@ -1445,16 +1614,19 @@ zoomOutBtn.addEventListener("click", () => setZoom(zoom - 0.25));
 zoomInBtn.addEventListener("click", () => setZoom(zoom + 0.25));
 
 undoBtn.addEventListener("click", () => {
-    if (!manualStamps.length) return;
-    manualStamps.pop();
-    redrawFromBase();
-    status(`直前の手動黒塗りを取り消しました。\n残り：${manualStamps.length}箇所`);
+    if (!manualHistory.length) return;
+    const previous = manualHistory.pop();
+    restoreManualSnapshot(previous);
+    status(`直前の操作を取り消しました。\n残り：${manualStamps.length}箇所`);
 });
 
 resetBtn.addEventListener("click", () => {
     if (!sourceImage) return;
     // 自動(OCR)・手動を問わず、黒塗りを全て取り消して元画像の状態に戻す。
     manualStamps.length = 0;
+    manualHistory.length = 0;
+    selectedManualIndex = -1;
+    editMode = null;
     ocrBaseCanvas = null;
     redrawFromBase();
     status("黒塗りをすべてリセットしました。");
@@ -1475,6 +1647,9 @@ fileInput.addEventListener("change", async () => {
         sourceImage = await loadImage(file);
         fileName = (file.name.replace(/\.[^.]+$/, "") || "redacted") + "_redacted.png";
         manualStamps.length = 0;
+        manualHistory.length = 0;
+        selectedManualIndex = -1;
+        editMode = null;
         ocrBaseCanvas = null;
         canvas.width = sourceImage.naturalWidth;
         canvas.height = sourceImage.naturalHeight;

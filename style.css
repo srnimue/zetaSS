@@ -53,3 +53,19 @@ body { padding: 12px; } h1 { font-size: 21px; } .panel, .canvas-panel { padding:
 .button-row button { flex: 1 1 0; min-width: 0; padding: 10px 5px; font-size: 11px; white-space: nowrap; }
 .main-actions .reset-button { flex: 0 0 42px; width: 42px; min-width: 42px; margin-left: 6px; }
 }
+
+/* 手動黒塗り編集用ハンドル */
+#selection { pointer-events: none; border: 2px solid rgba(255,255,255,.95); background: rgba(255,255,255,.08); }
+#selection .edit-handle {
+  position: absolute;
+  width: 14px;
+  height: 14px;
+  border: 2px solid #fff;
+  background: #222;
+  border-radius: 3px;
+  pointer-events: none;
+}
+#selection .handle-nw { left: -8px; top: -8px; }
+#selection .handle-ne { right: -8px; top: -8px; }
+#selection .handle-sw { left: -8px; bottom: -8px; }
+#selection .handle-se { right: -8px; bottom: -8px; }
