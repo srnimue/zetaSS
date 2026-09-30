@@ -57,7 +57,7 @@ let pinchStartDistance = 0;
 let pinchStartZoom = 1;
 let panLastCenter = null;
 const TOUCH_X_OFFSET = -30;
-const TOUCH_Y_OFFSET = -50;
+const TOUCH_Y_OFFSET = -40;
 
 function status(message, error = null) {
     statusEl.textContent = message;
@@ -393,6 +393,13 @@ function applyResizeEdit(current) {
 function redrawFromBase() {
     if (!sourceImage) return;
 
+    // 編集中にcanvasを描き直しても、現在のズーム率とスクロール位置を
+    // 変えない。canvas.width/heightを書き換えるとブラウザがスクロール位置を
+    // 戻してしまうことがあるため、編集前の表示位置を保存して復元する。
+    const keepZoom = zoom;
+    const keepScrollLeft = canvasWrap.scrollLeft;
+    const keepScrollTop = canvasWrap.scrollTop;
+
     if (ocrBaseCanvas) {
         canvas.width = ocrBaseCanvas.width;
         canvas.height = ocrBaseCanvas.height;
@@ -410,6 +417,20 @@ function redrawFromBase() {
     }
     updateUndoButton();
     renderManualSelection();
+
+    if (ocrBaseCanvas && keepZoom > 1.001) {
+        zoom = keepZoom;
+        canvasWrap.classList.add("zoomed");
+        const base = getBaseDisplaySize();
+        canvas.style.width = `${base.width * zoom}px`;
+        canvas.style.height = `${base.height * zoom}px`;
+        zoomLabel.textContent = `${Math.round(zoom * 100)}%`;
+        requestAnimationFrame(() => {
+            canvasWrap.scrollLeft = keepScrollLeft;
+            canvasWrap.scrollTop = keepScrollTop;
+            renderManualSelection();
+        });
+    }
 }
 
 async function getWorker(preferredLang = "jpn") {
