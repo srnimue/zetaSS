@@ -44,6 +44,10 @@ let isDragging = false;
 let dragStart = null;
 let ocrBaseCanvas = null;
 const manualStamps = [];
+const manualHistory = [];
+let selectedManualIndex = -1;
+let editMode = null; // { type: "move" | "resize", handle: string|null, startPoint, original }
+const MIN_MANUAL_SIZE = 4;
 
 let zoom = 1;
 const MIN_ZOOM = 1;
@@ -51,6 +55,9 @@ const MAX_ZOOM = 4;
 const pointers = new Map();
 let pinchStartDistance = 0;
 let pinchStartZoom = 1;
+let panLastCenter = null;
+const TOUCH_X_OFFSET = -30;
+const TOUCH_Y_OFFSET = -50;
 
 function status(message, error = null) {
     statusEl.textContent = message;
@@ -275,9 +282,112 @@ function getPointerDistance() {
 }
 
 function updateUndoButton() {
-    undoBtn.disabled = manualStamps.length === 0;
+    undoBtn.disabled = manualHistory.length === 0;
     stampMode.disabled = manualStamps.length === 0;
     if (manualStamps.length === 0) stampMode.checked = false;
+}
+
+function snapshotManualStamps() {
+    return manualStamps.map(stamp => ({ ...stamp }));
+}
+
+function pushManualHistory() {
+    manualHistory.push(snapshotManualStamps());
+    if (manualHistory.length > 50) manualHistory.shift();
+}
+
+function restoreManualSnapshot(snapshot) {
+    manualStamps.length = 0;
+    for (const stamp of snapshot) manualStamps.push({ ...stamp });
+    selectedManualIndex = -1;
+    editMode = null;
+    selection.hidden = true;
+    redrawFromBase();
+}
+
+function getManualVisualRect(stamp) {
+    const padding = Math.max(4, Math.round(Math.min(stamp.w, stamp.h) * 0.12));
+    const verticalPadding = padding + 2;
+    return {
+        x: Math.max(0, stamp.x - padding - 6),
+        y: Math.max(0, stamp.y - verticalPadding),
+        w: stamp.w + padding,
+        h: stamp.h + verticalPadding * 2
+    };
+}
+
+function renderManualSelection() {
+    if (selectedManualIndex < 0 || !manualStamps[selectedManualIndex]) {
+        selection.hidden = true;
+        selection.innerHTML = "";
+        return;
+    }
+    const stamp = manualStamps[selectedManualIndex];
+    const transform = getCanvasDisplayTransform();
+    selection.hidden = false;
+    selection.style.left = `${transform.left + stamp.x * transform.scaleX}px`;
+    selection.style.top = `${transform.top + stamp.y * transform.scaleY}px`;
+    selection.style.width = `${stamp.w * transform.scaleX}px`;
+    selection.style.height = `${stamp.h * transform.scaleY}px`;
+    selection.innerHTML = "";
+    for (const handle of ["nw", "ne", "sw", "se"]) {
+        const el = document.createElement("span");
+        el.className = `edit-handle handle-${handle}`;
+        el.dataset.handle = handle;
+        selection.appendChild(el);
+    }
+}
+
+function hitTestManual(point) {
+    for (let i = manualStamps.length - 1; i >= 0; i--) {
+        const b = manualStamps[i];
+        const padX = Math.max(8, b.w * 0.08);
+        const padY = Math.max(8, b.h * 0.08);
+        if (point.x >= b.x - padX && point.x <= b.x + b.w + padX &&
+            point.y >= b.y - padY && point.y <= b.y + b.h + padY) return i;
+    }
+    return -1;
+}
+
+function getResizeHandle(point, stamp) {
+    const transform = getCanvasDisplayTransform();
+    const size = 22 / Math.max(transform.scaleX, transform.scaleY);
+    const handles = {
+        nw: [stamp.x, stamp.y],
+        ne: [stamp.x + stamp.w, stamp.y],
+        sw: [stamp.x, stamp.y + stamp.h],
+        se: [stamp.x + stamp.w, stamp.y + stamp.h]
+    };
+    for (const [name, [x, y]] of Object.entries(handles)) {
+        if (Math.hypot(point.x - x, point.y - y) <= size) return name;
+    }
+    return null;
+}
+
+function applyMoveEdit(current) {
+    const b = manualStamps[selectedManualIndex];
+    const dx = current.x - editMode.startPoint.x;
+    const dy = current.y - editMode.startPoint.y;
+    b.x = Math.max(0, Math.min(canvas.width - b.w, editMode.original.x + dx));
+    b.y = Math.max(0, Math.min(canvas.height - b.h, editMode.original.y + dy));
+}
+
+function applyResizeEdit(current) {
+    const b = manualStamps[selectedManualIndex];
+    const o = editMode.original;
+    let x = o.x, y = o.y, w = o.w, h = o.h;
+    const dx = current.x - editMode.startPoint.x;
+    const dy = current.y - editMode.startPoint.y;
+    const handle = editMode.handle;
+    if (handle.includes("e")) w = o.w + dx;
+    if (handle.includes("s")) h = o.h + dy;
+    if (handle.includes("w")) { x = o.x + dx; w = o.w - dx; }
+    if (handle.includes("n")) { y = o.y + dy; h = o.h - dy; }
+    if (w < MIN_MANUAL_SIZE) { if (handle.includes("w")) x = o.x + o.w - MIN_MANUAL_SIZE; w = MIN_MANUAL_SIZE; }
+    if (h < MIN_MANUAL_SIZE) { if (handle.includes("n")) y = o.y + o.h - MIN_MANUAL_SIZE; h = MIN_MANUAL_SIZE; }
+    x = Math.max(0, Math.min(canvas.width - w, x));
+    y = Math.max(0, Math.min(canvas.height - h, y));
+    b.x = x; b.y = y; b.w = w; b.h = h;
 }
 
 function redrawFromBase() {
@@ -299,24 +409,7 @@ function redrawFromBase() {
         paintManual(stamp, stamp.text);
     }
     updateUndoButton();
-}
-
-// 日本語は「高精度(best)」系の言語データを優先して試し、読み込めなければ
-// 順に次の候補、最後は標準データにフォールバックする。
-// ※ ブラウザ側のキャッシュはlang名(jpn)単位のキーなので、標準データと
-//   混ざらないよう候補ごとにcachePathを分けている。
-const JPN_MODEL_CANDIDATES = [
-    { label: "jpn 高精度(best_int)", langPath: "https://cdn.jsdelivr.net/npm/@tesseract.js-data/jpn/4.0.0_best_int", cachePath: "jpn-best-int" },
-    { label: "jpn 高精度(best)", langPath: "https://cdn.jsdelivr.net/gh/tesseract-ocr/tessdata_best@main", gzip: false, cachePath: "jpn-best" },
-    { label: "jpn 標準", langPath: null, cachePath: null }
-];
-const MODEL_LOAD_TIMEOUT_MS = 90000;
-let workerModelLabel = "";
-
-function withTimeout(promise, ms, message) {
-    let timer;
-    const timeout = new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(message)), ms); });
-    return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+    renderManualSelection();
 }
 
 async function getWorker(preferredLang = "jpn") {
@@ -333,37 +426,15 @@ async function getWorker(preferredLang = "jpn") {
     }
 
     status(`${preferredLang === "jpn" ? "日本語" : "英語"}OCRエンジンを準備中…\n初回は少し時間がかかります。`);
-    const logger = message => {
-        if (message?.progress != null) {
-            status("実行中…");
+    worker = await Tesseract.createWorker(preferredLang, 1, {
+        logger: message => {
+            if (message?.progress != null) {
+                status("実行中…");
+            }
         }
-    };
-
-    const candidates = preferredLang === "jpn"
-        ? JPN_MODEL_CANDIDATES
-        : [{ label: `${preferredLang} 標準`, langPath: null, cachePath: null }];
-
-    let lastError = null;
-    for (const c of candidates) {
-        const options = { logger };
-        if (c.langPath) options.langPath = c.langPath;
-        if (c.gzip === false) options.gzip = false;
-        if (c.cachePath) options.cachePath = c.cachePath;
-        try {
-            worker = await withTimeout(
-                Tesseract.createWorker(preferredLang, 1, options),
-                MODEL_LOAD_TIMEOUT_MS,
-                `${c.label} の読み込みがタイムアウトしました。`
-            );
-            workerModelLabel = c.label;
-            workerLang = preferredLang;
-            return worker;
-        } catch (error) {
-            lastError = error;
-            console.warn(`OCRモデル読み込み失敗: ${c.label}`, error);
-        }
-    }
-    throw lastError || new Error("OCRエンジンを準備できませんでした。");
+    });
+    workerLang = preferredLang;
+    return worker;
 }
 
 function getOcrLanguage(target) {
@@ -384,40 +455,6 @@ function makeInverted(src){
   for(let i=0;i<d.length;i+=4){d[i]=255-d[i];d[i+1]=255-d[i+1];d[i+2]=255-d[i+2];}
   ctx.putImageData(img,0,0); return c;
 }
-// Otsu法：グレースケールのヒストグラムから、白と黒の2グループの
-// クラス間分散が最大になる閾値を自動で求める。固定値(180/220)と違い、
-// 画像ごと(局所クロップなら切り出し範囲ごと)に最適な閾値が決まる。
-function computeOtsuThreshold(d) {
-    const hist = new Uint32Array(256);
-    let total = 0;
-    for (let i = 0; i < d.length; i += 4) {
-        const y = Math.round(d[i] * .299 + d[i + 1] * .587 + d[i + 2] * .114);
-        hist[y]++;
-        total++;
-    }
-    if (!total) return 128;
-
-    let sumAll = 0;
-    for (let t = 0; t < 256; t++) sumAll += t * hist[t];
-
-    let sumB = 0, wB = 0, best = 0, threshold = 128;
-    for (let t = 0; t < 256; t++) {
-        wB += hist[t];
-        if (!wB) continue;
-        const wF = total - wB;
-        if (!wF) break;
-        sumB += t * hist[t];
-        const mB = sumB / wB;
-        const mF = (sumAll - sumB) / wF;
-        const between = wB * wF * (mB - mF) * (mB - mF);
-        if (between > best) {
-            best = between;
-            threshold = t;
-        }
-    }
-    return threshold;
-}
-
 function makeOcrVariant(baseCanvas, name) {
     if (name === "通常") return baseCanvas;
 
@@ -438,13 +475,6 @@ function makeOcrVariant(baseCanvas, name) {
         for (let i = 0; i < d.length; i += 4) {
             const y = d[i] * .299 + d[i + 1] * .587 + d[i + 2] * .114;
             const v = Math.max(0, Math.min(255, Math.round((y - 128) * 1.65 + 128)));
-            d[i] = d[i + 1] = d[i + 2] = v;
-        }
-    } else if (name === "二値化Otsu") {
-        const threshold = computeOtsuThreshold(d);
-        for (let i = 0; i < d.length; i += 4) {
-            const y = d[i] * .299 + d[i + 1] * .587 + d[i + 2] * .114;
-            const v = y > threshold ? 255 : 0;
             d[i] = d[i + 1] = d[i + 2] = v;
         }
     } else if (name === "二値化180" || name === "二値化220") {
@@ -793,14 +823,10 @@ function buildOcrCanvas(){
   return {canvas:oc,scale};
 }
 
-// 二値化Otsuを第1段階のHIT数に関わらず常に追加実行するか。
-// 前回の検証ではヒット数が増えず処理時間だけ約2倍になったため、既定はオフ。
-const ALWAYS_RUN_OTSU = false;
-
 async function collectOcrResults(worker,target){
   const {canvas:oc,scale}=buildOcrCanvas();
   const results=[];
-  const stats={primaryMs:0,fallbackMs:0,primaryHitCount:0,fallbackUsed:false,primaryName:"グレー＋コントラスト",fallbackNames:["二値化Otsu","二値化180","二値化220","反転"]};
+  const stats={primaryMs:0,fallbackMs:0,primaryHitCount:0,fallbackUsed:false,primaryName:"グレー＋コントラスト",fallbackNames:["二値化180","二値化220","反転"]};
 
   // まず今回の実験で最も安定していた「グレー＋コントラスト」だけを実行。
   // ここで1件でも正確に見つかれば、追加の全体OCRは省略する。
@@ -817,29 +843,12 @@ async function collectOcrResults(worker,target){
     stats.primaryMs=performance.now()-primaryStarted;
   }
 
-  // 第2段階：「二値化Otsu」は、第1段階のHIT数に関わらず常に追加で1回実行する。
-  // 第1段階で数件ヒットしていても、同じ画像内の別の箇所が取りこぼされる
-  // ことがあるため。重複するHITはmergeMatches()で1つにまとめられ、
-  // 第1段階の結果が優先される。
-  const fallbackStarted=performance.now();
-  const secondPass="二値化Otsu";
-  if(ALWAYS_RUN_OTSU){
-    stats.fallbackUsed=true;
-    status("実行中…");
-    const variant=makeOcrVariant(oc,secondPass);
-    try {
-      results.push(await recognizeVariant(worker,variant,target,secondPass,scale));
-    } finally {
-      if(variant!==oc){variant.width=1;variant.height=1;}
-    }
-  }
-
   // グレー＋コントラストで1件も見つからなかった場合だけ、
-  // さらに残りの補助的な全体OCR(Otsu以外)を追加する。
+  // 補助的な全体OCRを追加する。通常・グレースケールは今回の実験では外す。
   if(stats.primaryHitCount===0){
     stats.fallbackUsed=true;
+    const fallbackStarted=performance.now();
     for(const name of stats.fallbackNames){
-      if(ALWAYS_RUN_OTSU && name===secondPass) continue;
       status("実行中…");
       const variant=makeOcrVariant(oc,name);
       try {
@@ -848,8 +857,8 @@ async function collectOcrResults(worker,target){
         if(variant!==oc){variant.width=1;variant.height=1;}
       }
     }
+    stats.fallbackMs=performance.now()-fallbackStarted;
   }
-  stats.fallbackMs=performance.now()-fallbackStarted;
 
   return {results,scale,ocrCanvas:oc,stats};
 }
@@ -1075,7 +1084,7 @@ async function refineNearCandidates(worker, results, ocrCanvas, target, scale) {
     // 絞って試す。全体OCRでこれらを毎回回すと画像全体分の時間がかかるが、
     // 候補地点（最大8箇所）だけなら低コストで済む。
     if (!ok && sourceCrop) {
-      for (const variantName of ['二値化Otsu', '二値化180', '二値化220', '反転']) {
+      for (const variantName of ['二値化180', '二値化220', '反転']) {
         if (ok) break;
         extraPasses++;
         const variantCanvas = makeOcrVariant(sourceCrop.canvas, variantName);
@@ -1128,7 +1137,7 @@ async function run(){
     const target=normalize(targetText.value);
     if(!target) throw new Error("黒塗りする文字を入力してください。");
 
-    manualStamps.length=0; ocrBaseCanvas=null; redrawFromBase();
+    manualStamps.length=0; manualHistory.length=0; selectedManualIndex=-1; editMode=null; ocrBaseCanvas=null; redrawFromBase();
     const worker=await getWorker(getOcrLanguage(target));
     status("OCR中…\n対象文字を探しています。");
 
@@ -1202,7 +1211,7 @@ async function diagnoseOCR(){
     const totalElapsed=performance.now()-totalStarted;
     const exactCount=results.reduce((n,r)=>n+r.matches.length,0);
     const candidateCount=results.reduce((n,r)=>n+r.near.length,0);
-    const lines=[`対象文字：${targetText.value}`,`正規化後：${target}`,`使用モデル：${workerModelLabel||"不明"}`,""];
+    const lines=[`対象文字：${targetText.value}`,`正規化後：${target}`,""];
     for(const r of results){
       lines.push(`===== ${r.mode} / PSM 11 =====`,`HIT：${r.matches.length}件`);
       for(const m of r.matches){
@@ -1274,8 +1283,8 @@ async function diagnoseOCR(){
       `候補地点：${candidateGroups.length} / 近似候補救出：${refine.fastRecovered} / 再OCR実行：${refine.attempted} / 再OCR追加パス：${refine.extraPasses} / 既存HITで省略：${refine.skippedExact}`,
       "",
       `※ 今回は速度実験として、まずグレー＋コントラストだけを全体OCRします。`,
-      `※ 第1段階で1件以上HITした場合、追加の全体OCRは省略します。`,
-      `※ 第1段階でHITが0件の場合だけ、二値化Otsu・180・220・反転を追加します。`,
+      `※ 第1段階で1件以上HITした場合、二値化180・220・反転の全体OCRは省略します。`,
+      `※ 第1段階でHITが0件の場合だけ、二値化180・220・反転を追加します。`,
       `※ 候補地点は同じ位置付近の候補をまとめています。`,
       `※ 近似候補は、対象文字と同じ文字数で、3文字以上の対象なら「対象の1文字違い」程度を先に救出します。
 ※ 近似候補の黒塗り範囲は、候補地点全体ではなく採用候補自身のbboxを使います。`,
@@ -1369,6 +1378,8 @@ function placeStampAt(point) {
     stamp.x = Math.max(0, Math.min(canvas.width - stamp.w, stamp.x));
     stamp.y = Math.max(0, Math.min(canvas.height - stamp.h, stamp.y));
 
+    pushManualHistory();
+    pushManualHistory();
     manualStamps.push(stamp);
     paintManual(stamp, stamp.text);
     updateUndoButton();
@@ -1398,6 +1409,31 @@ function finishStamp(point) {
     dragStart = null;
 }
 
+function getRawManualPoint(event) {
+    return getCanvasPoint(event);
+}
+
+// 新規黒塗りを作るときだけ、指から少し左上へ操作位置をずらす。
+// 既存黒塗りの編集（移動・サイズ変更）では指の位置をそのまま使う。
+function getManualPoint(event, applyOffset = true) {
+    if (applyOffset && event.pointerType === "touch") {
+        return getCanvasPoint({
+            clientX: event.clientX + TOUCH_X_OFFSET,
+            clientY: event.clientY + TOUCH_Y_OFFSET
+        });
+    }
+    return getRawManualPoint(event);
+}
+
+function getPointerCenter() {
+    const values = [...pointers.values()];
+    if (!values.length) return null;
+    return {
+        x: values.reduce((sum, p) => sum + p.x, 0) / values.length,
+        y: values.reduce((sum, p) => sum + p.y, 0) / values.length
+    };
+}
+
 canvasWrap.addEventListener("pointerdown", event => {
     if (!sourceImage) return;
     pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
@@ -1409,13 +1445,42 @@ canvasWrap.addEventListener("pointerdown", event => {
         selection.hidden = true;
         pinchStartDistance = getPointerDistance();
         pinchStartZoom = zoom;
+        panLastCenter = getPointerCenter();
         event.preventDefault();
         return;
     }
 
+    panLastCenter = null;
+
     if (!manualMode) return;
     event.preventDefault();
-    dragStart = getCanvasPoint(event);
+    const rawPoint = getRawManualPoint(event);
+
+    // 既存の手動黒塗りをタップすると編集対象にする。
+    // 編集時はオフセットを使わず、指の位置をそのまま操作位置にする。
+    // スタンプモード中でも、まず既存黒塗りの編集を優先する。
+    const hitIndex = hitTestManual(rawPoint);
+    if (hitIndex >= 0) {
+        dragStart = rawPoint;
+        selectedManualIndex = hitIndex;
+        const hitStamp = manualStamps[hitIndex];
+        const handle = getResizeHandle(rawPoint, hitStamp);
+        editMode = {
+            type: handle ? "resize" : "move",
+            handle,
+            startPoint: { ...dragStart },
+            original: { ...hitStamp },
+            historyPushed: false
+        };
+        isDragging = true;
+        renderManualSelection();
+        status("黒塗りを選択中です。\n中央をドラッグ：移動 / 四隅をドラッグ：サイズ変更");
+        return;
+    }
+
+    selectedManualIndex = -1;
+    editMode = null;
+    renderManualSelection();
 
     if (stampMode.checked && manualStamps.length) {
         stampTapStart = { x: event.clientX, y: event.clientY };
@@ -1439,9 +1504,15 @@ canvasWrap.addEventListener("pointermove", event => {
 
     if (pointers.size >= 2) {
         const distance = getPointerDistance();
+        const center = getPointerCenter();
         if (pinchStartDistance > 0 && distance > 0) {
             setZoom(pinchStartZoom * distance / pinchStartDistance);
         }
+        if (center && panLastCenter) {
+            canvasWrap.scrollLeft -= center.x - panLastCenter.x;
+            canvasWrap.scrollTop -= center.y - panLastCenter.y;
+        }
+        panLastCenter = center;
         event.preventDefault();
         return;
     }
@@ -1449,8 +1520,20 @@ canvasWrap.addEventListener("pointermove", event => {
     if (!manualMode) return;
     event.preventDefault();
 
+    if (editMode && selectedManualIndex >= 0 && isDragging) {
+        const point = getManualPoint(event, false);
+        if (!editMode.historyPushed) {
+            pushManualHistory();
+            editMode.historyPushed = true;
+        }
+        if (editMode.type === "move") applyMoveEdit(point);
+        else applyResizeEdit(point);
+        redrawFromBase();
+        return;
+    }
+
     if (stampMode.checked && stampTapStart && manualStamps.length) {
-        const point = getCanvasPoint(event);
+        const point = getManualPoint(event, false);
         const last = manualStamps[manualStamps.length - 1];
         updateSelection(
             { x: point.x - last.w / 2, y: point.y - last.h / 2 },
@@ -1460,7 +1543,7 @@ canvasWrap.addEventListener("pointermove", event => {
     }
 
     if (!isDragging || !dragStart) return;
-    updateSelection(dragStart, getCanvasPoint(event));
+    updateSelection(dragStart, getManualPoint(event));
 });
 
 function endPointer(event) {
@@ -1470,15 +1553,30 @@ function endPointer(event) {
         isDragging = false;
         dragStart = null;
         selection.hidden = true;
+        panLastCenter = getPointerCenter();
         return;
     }
+
+    panLastCenter = null;
 
     if (!manualMode) return;
     event.preventDefault();
 
+    if (editMode && selectedManualIndex >= 0 && isDragging) {
+        const point = getManualPoint(event);
+        if (!editMode.historyPushed) {
+            pushManualHistory();
+            editMode.historyPushed = true;
+        }
+        if (editMode.type === "move") applyMoveEdit(point);
+        else applyResizeEdit(point);
+        redrawFromBase();
+        return;
+    }
+
     if (stampMode.checked && stampTapStart && manualStamps.length) {
         const moved = Math.hypot(event.clientX - stampTapStart.x, event.clientY - stampTapStart.y);
-        const point = getCanvasPoint(event);
+        const point = getManualPoint(event);
         stampTapStart = null;
         selection.hidden = true;
         dragStart = null;
@@ -1489,12 +1587,26 @@ function endPointer(event) {
 
     if (!isDragging || !dragStart) return;
     isDragging = false;
-    finishStamp(getCanvasPoint(event));
+    finishStamp(getManualPoint(event));
 }
 
 canvasWrap.addEventListener("pointerup", endPointer);
+canvasWrap.addEventListener("dblclick", event => {
+    if (!manualMode || selectedManualIndex < 0 || !manualStamps[selectedManualIndex]) return;
+    const point = getRawManualPoint(event);
+    if (hitTestManual(point) !== selectedManualIndex) return;
+    pushManualHistory();
+    manualStamps.splice(selectedManualIndex, 1);
+    selectedManualIndex = -1;
+    editMode = null;
+    redrawFromBase();
+    saveBtn.disabled = false;
+    status(`選択した黒塗りを削除しました。\n残り：${manualStamps.length}箇所`);
+});
+
 canvasWrap.addEventListener("pointercancel", event => {
     pointers.delete(event.pointerId);
+    panLastCenter = pointers.size ? getPointerCenter() : null;
     isDragging = false;
     dragStart = null;
     stampTapStart = null;
@@ -1514,16 +1626,19 @@ zoomOutBtn.addEventListener("click", () => setZoom(zoom - 0.25));
 zoomInBtn.addEventListener("click", () => setZoom(zoom + 0.25));
 
 undoBtn.addEventListener("click", () => {
-    if (!manualStamps.length) return;
-    manualStamps.pop();
-    redrawFromBase();
-    status(`直前の手動黒塗りを取り消しました。\n残り：${manualStamps.length}箇所`);
+    if (!manualHistory.length) return;
+    const previous = manualHistory.pop();
+    restoreManualSnapshot(previous);
+    status(`直前の操作を取り消しました。\n残り：${manualStamps.length}箇所`);
 });
 
 resetBtn.addEventListener("click", () => {
     if (!sourceImage) return;
     // 自動(OCR)・手動を問わず、黒塗りを全て取り消して元画像の状態に戻す。
     manualStamps.length = 0;
+    manualHistory.length = 0;
+    selectedManualIndex = -1;
+    editMode = null;
     ocrBaseCanvas = null;
     redrawFromBase();
     status("黒塗りをすべてリセットしました。");
@@ -1544,6 +1659,9 @@ fileInput.addEventListener("change", async () => {
         sourceImage = await loadImage(file);
         fileName = (file.name.replace(/\.[^.]+$/, "") || "redacted") + "_redacted.png";
         manualStamps.length = 0;
+        manualHistory.length = 0;
+        selectedManualIndex = -1;
+        editMode = null;
         ocrBaseCanvas = null;
         canvas.width = sourceImage.naturalWidth;
         canvas.height = sourceImage.naturalHeight;
