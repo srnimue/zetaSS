@@ -1482,6 +1482,9 @@ canvasWrap.addEventListener("pointerdown", event => {
     editMode = null;
     renderManualSelection();
 
+    // 新規黒塗りは指から左上へオフセットした位置を使う。
+    dragStart = getManualPoint(event, true);
+
     if (stampMode.checked && manualStamps.length) {
         stampTapStart = { x: event.clientX, y: event.clientY };
         isDragging = false;
@@ -1533,7 +1536,7 @@ canvasWrap.addEventListener("pointermove", event => {
     }
 
     if (stampMode.checked && stampTapStart && manualStamps.length) {
-        const point = getManualPoint(event, false);
+        const point = getManualPoint(event, true);
         const last = manualStamps[manualStamps.length - 1];
         updateSelection(
             { x: point.x - last.w / 2, y: point.y - last.h / 2 },
@@ -1543,7 +1546,7 @@ canvasWrap.addEventListener("pointermove", event => {
     }
 
     if (!isDragging || !dragStart) return;
-    updateSelection(dragStart, getManualPoint(event));
+    updateSelection(dragStart, getManualPoint(event, true));
 });
 
 function endPointer(event) {
@@ -1563,7 +1566,7 @@ function endPointer(event) {
     event.preventDefault();
 
     if (editMode && selectedManualIndex >= 0 && isDragging) {
-        const point = getManualPoint(event);
+        const point = getManualPoint(event, false);
         if (!editMode.historyPushed) {
             pushManualHistory();
             editMode.historyPushed = true;
