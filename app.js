@@ -1400,7 +1400,6 @@ function placeStampAt(point) {
     stamp.y = Math.max(0, Math.min(canvas.height - stamp.h, stamp.y));
 
     pushManualHistory();
-    pushManualHistory();
     manualStamps.push(stamp);
     paintManual(stamp, stamp.text);
     updateUndoButton();
@@ -1422,6 +1421,7 @@ function finishStamp(point) {
     }
 
     const stamp = { x, y, w, h, text: overlayName.checked ? overlayText.value : "" };
+    pushManualHistory();
     manualStamps.push(stamp);
     paintManual(stamp, stamp.text);
     updateUndoButton();
