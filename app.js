@@ -181,7 +181,7 @@ function getOcrPaintBox(box, symbols = []) {
     return out;
 }
 
-function paintOcr(box, text = "", symbols = [], rescue = false) {
+function getOcrVisualRect(box, symbols = [], rescue = false) {
     box = getOcrPaintBox(box, symbols);
     // 近似候補救出（例：「めーざー」→「ゆーざー」）は、1文字目の誤認で
     // 位置がずれやすいので、左右均等に余白を足す。
@@ -204,16 +204,22 @@ function paintOcr(box, text = "", symbols = [], rescue = false) {
     const top = Math.max(0, box.y - padding);
     const height = box.h + padding * 2;
 
+    return { x: left, y: top, w: width, h: height };
+}
+
+function paintOcr(box, text = "", symbols = [], rescue = false) {
+    const rect = getOcrVisualRect(box, symbols, rescue);
     ctx.fillStyle = "#000";
-    ctx.fillRect(left, top, width, height);
+    ctx.fillRect(rect.x, rect.y, rect.w, rect.h);
 
     if (text) {
         ctx.fillStyle = "#fff";
         ctx.font = `bold ${Math.max(12, Math.round(box.h * 0.8))}px sans-serif`;
         ctx.textAlign = "center";
         ctx.textBaseline = "middle";
-        ctx.fillText(text, left + width / 2, top + height / 2);
+        ctx.fillText(text, rect.x + rect.w / 2, rect.y + rect.h / 2);
     }
+    return rect;
 }
 
 function paintManual(box, text = "") {
@@ -234,6 +240,22 @@ function paintManual(box, text = "") {
         ctx.textBaseline = "middle";
         ctx.fillText(text, left + width / 2, top + height / 2);
     }
+}
+
+function paintStamp(stamp) {
+    if (stamp.kind === "ocr") {
+        ctx.fillStyle = "#000";
+        ctx.fillRect(stamp.x, stamp.y, stamp.w, stamp.h);
+        if (stamp.text) {
+            ctx.fillStyle = "#fff";
+            ctx.font = `bold ${Math.max(12, Math.round(stamp.h * 0.8))}px sans-serif`;
+            ctx.textAlign = "center";
+            ctx.textBaseline = "middle";
+            ctx.fillText(stamp.text, stamp.x + stamp.w / 2, stamp.y + stamp.h / 2);
+        }
+        return;
+    }
+    paintManual(stamp, stamp.text);
 }
 
 function getBaseDisplaySize() {
@@ -281,10 +303,18 @@ function getPointerDistance() {
     return Math.hypot(values[0].x - values[1].x, values[0].y - values[1].y);
 }
 
+function getLastManualStamp() {
+    for (let i = manualStamps.length - 1; i >= 0; i--) {
+        if (manualStamps[i].kind !== "ocr") return manualStamps[i];
+    }
+    return null;
+}
+
 function updateUndoButton() {
     undoBtn.disabled = manualHistory.length === 0;
-    stampMode.disabled = manualStamps.length === 0;
-    if (manualStamps.length === 0) stampMode.checked = false;
+    const lastManual = getLastManualStamp();
+    stampMode.disabled = !lastManual;
+    if (!lastManual) stampMode.checked = false;
 }
 
 function snapshotManualStamps() {
@@ -413,7 +443,7 @@ function redrawFromBase() {
     }
 
     for (const stamp of manualStamps) {
-        paintManual(stamp, stamp.text);
+        paintStamp(stamp);
     }
     updateUndoButton();
     renderManualSelection();
@@ -1166,7 +1196,8 @@ async function run(){
     const {results,scale,ocrCanvas}=await collectOcrResults(worker,target);
     const matches=mergeMatches(results);
 
-    // 通常OCRで見つかった対象文字を黒塗り。
+    // 通常OCRで見つかった対象文字を黒塗り候補として登録。
+    // 実際の描画は最後にまとめて行い、OCR結果も手動黒塗りと同じ編集対象にする。
     const paintBoxes=matches.map(b=>({
       x:b.x0, y:b.y0, w:b.x1-b.x0, h:b.y1-b.y0, symbols:b.symbols||[], source:"OCR"
     }));
@@ -1196,15 +1227,27 @@ async function run(){
       if(!duplicate) paintBoxes.push({x:b.x0,y:b.y0,w:b.x1-b.x0,h:b.y1-b.y0,symbols:r.symbols||[],source:r.recovery||"再OCR",rescue:r.recovery==="近似候補救出"});
     }
 
-    for(const b of paintBoxes){
-      paintOcr({x:b.x,y:b.y,w:b.w,h:b.h},overlayName.checked?overlayText.value:"",b.symbols||[],b.rescue===true);
-    }
-
+    // OCR黒塗りを編集可能なオブジェクトとして登録する。
+    // OCR専用の補正・余白計算はここで一度だけ行い、以後の移動・サイズ変更では
+    // その最終黒塗り矩形をそのまま編集する。
     ocrBaseCanvas=document.createElement("canvas");
     ocrBaseCanvas.width=canvas.width; ocrBaseCanvas.height=canvas.height;
-    ocrBaseCanvas.getContext("2d").drawImage(canvas,0,0);
+    const baseCtx=ocrBaseCanvas.getContext("2d");
+    baseCtx.drawImage(sourceImage,0,0);
+
+    pushManualHistory();
+    for(const b of paintBoxes){
+      const rect=getOcrVisualRect({x:b.x,y:b.y,w:b.w,h:b.h},b.symbols||[],b.rescue===true);
+      if(rect.w < 1 || rect.h < 1) continue;
+      manualStamps.push({
+        x:rect.x, y:rect.y, w:rect.w, h:rect.h,
+        text:overlayName.checked?overlayText.value:"",
+        kind:"ocr"
+      });
+    }
+    redrawFromBase();
     saveBtn.disabled=false; manualBtn.disabled=false;
-    status(`黒塗り完了：${paintBoxes.length}箇所\n通常OCR：${matches.length}箇所 / 再OCR：${paintBoxes.length-matches.length}箇所`);
+    status(`黒塗り完了：${manualStamps.length}箇所\n通常OCR：${matches.length}箇所 / 再OCR：${paintBoxes.length-matches.length}箇所`);
   }catch(error){status("OCRでエラーが発生しました。下のエラー詳細を確認してください。",error);}
 }
 
@@ -1387,13 +1430,15 @@ function stopManualMode() {
 function placeStampAt(point) {
     if (!manualStamps.length) return;
 
-    const last = manualStamps[manualStamps.length - 1];
+    const last = getLastManualStamp();
+    if (!last) return;
     const stamp = {
         x: point.x - last.w / 2,
         y: point.y - last.h / 2,
         w: last.w,
         h: last.h,
-        text: overlayName.checked ? overlayText.value : ""
+        text: overlayName.checked ? overlayText.value : "",
+        kind: "manual"
     };
 
     stamp.x = Math.max(0, Math.min(canvas.width - stamp.w, stamp.x));
@@ -1420,7 +1465,7 @@ function finishStamp(point) {
         return;
     }
 
-    const stamp = { x, y, w, h, text: overlayName.checked ? overlayText.value : "" };
+    const stamp = { x, y, w, h, text: overlayName.checked ? overlayText.value : "", kind: "manual" };
     pushManualHistory();
     manualStamps.push(stamp);
     paintManual(stamp, stamp.text);
@@ -1506,10 +1551,10 @@ canvasWrap.addEventListener("pointerdown", event => {
     // 新規黒塗りは指から左上へオフセットした位置を使う。
     dragStart = getManualPoint(event, true);
 
-    if (stampMode.checked && manualStamps.length) {
+    if (stampMode.checked && getLastManualStamp()) {
         stampTapStart = { x: event.clientX, y: event.clientY };
         isDragging = false;
-        const last = manualStamps[manualStamps.length - 1];
+        const last = getLastManualStamp();
         updateSelection(
             { x: dragStart.x - last.w / 2, y: dragStart.y - last.h / 2 },
             { x: dragStart.x + last.w / 2, y: dragStart.y + last.h / 2 }
@@ -1556,9 +1601,9 @@ canvasWrap.addEventListener("pointermove", event => {
         return;
     }
 
-    if (stampMode.checked && stampTapStart && manualStamps.length) {
+    if (stampMode.checked && stampTapStart && getLastManualStamp()) {
         const point = getManualPoint(event, true);
-        const last = manualStamps[manualStamps.length - 1];
+        const last = getLastManualStamp();
         updateSelection(
             { x: point.x - last.w / 2, y: point.y - last.h / 2 },
             { x: point.x + last.w / 2, y: point.y + last.h / 2 }
@@ -1598,7 +1643,7 @@ function endPointer(event) {
         return;
     }
 
-    if (stampMode.checked && stampTapStart && manualStamps.length) {
+    if (stampMode.checked && stampTapStart && getLastManualStamp()) {
         const moved = Math.hypot(event.clientX - stampTapStart.x, event.clientY - stampTapStart.y);
         const point = getManualPoint(event);
         stampTapStart = null;
