@@ -29,8 +29,9 @@ font-weight: 600; cursor: pointer; background: #222; color: #fff;
 button:disabled { opacity: .45; cursor: default; }
 button.secondary { margin-top: 10px; background: #666; }
 .manual-help { margin: 12px 0 0; padding: 10px 12px; background: #f0f0f0; border-radius: 8px; line-height: 1.6; font-size: 14px; }
-#canvasWrap { position: relative; width: 100%; overflow: auto; border-radius: 8px; background: #eee; touch-action: none; }
+#canvasWrap { position: relative; width: 100%; overflow: auto; border-radius: 8px; background: #eee; touch-action: none; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; }
 #canvas { display: block; max-width: 100%; height: auto; margin: 0 auto; user-select: none; -webkit-user-select: none; touch-action: none; }
+#canvasWrap.zoomed { max-height: 70vh; }
 #canvasWrap.zoomed #canvas { max-width: none; margin: 0; }
 .zoom-controls { display: flex; align-items: center; justify-content: center; gap: 8px; margin-top: 10px; }
 .zoom-controls button { padding: 7px 12px; font-size: 14px; }
@@ -43,7 +44,7 @@ button.secondary { margin-top: 10px; background: #666; }
 
 .actions { margin-bottom: 14px; }
 #saveBtn { width: 100%; font-size: 16px; padding: 13px; }
-.status { white-space: pre-wrap; margin: 0 0 10px; padding: 12px; height: 72px; box-sizing: border-box; overflow: hidden; background: #eee; border-radius: 8px; line-height: 1.5; font-family: inherit; }
+.status { white-space: pre-wrap; margin: 0 0 10px; padding: 12px; height: 72px; box-sizing: border-box; overflow: hidden; background: #eee; border-radius: 8px; line-height: 1.45; font-family: inherit; font-size: 14px; }
 .error { white-space: pre-wrap; overflow-x: auto; margin: 0; padding: 12px; background: #ffecec; border-radius: 8px; color: #900; font-size: 12px; }
 .manual-mode #canvasWrap { cursor: crosshair; }
 #stampMode:disabled { opacity: .45; }
