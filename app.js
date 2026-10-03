@@ -779,14 +779,14 @@ function makeSourceCandidateCrop(candidate, scale) {
   return { canvas: c, x0: sx0, y0: sy0 };
 }
 
-async function recognizeVariant(worker,inputCanvas,target,mode,scale){const result=await worker.recognize(inputCanvas,{tessedit_pageseg_mode:"11"});const data=result?.data||{},lines=data.lines||[],matches=[];for(const line of lines){const units=extractLineUnits(line),hits=findTargetInUnits(units,target),lineText=units.map(u=>u.ch).join("");for(const hit of hits){
+async function recognizeVariant(worker,inputCanvas,target,mode,scale,psm="11"){const result=await worker.recognize(inputCanvas,{tessedit_pageseg_mode:String(psm)});const data=result?.data||{},lines=data.lines||[],matches=[];for(const line of lines){const units=extractLineUnits(line),hits=findTargetInUnits(units,target),lineText=units.map(u=>u.ch).join("");for(const hit of hits){
     // symbols[].bbox は OCR用に拡大したcanvas(scale倍)の座標のまま渡ってくる。
     // x0/y0/x1/y1 はscaleで割って元画像座標に戻しているので、symbolsも同じ座標系に
     // 揃えておかないと、getOcrPaintBoxでの高さ・幅比較がscale分ズレて誤判定する。
     const scaleBbox=b=>b?{x0:b.x0/scale,y0:b.y0/scale,x1:b.x1/scale,y1:b.y1/scale}:null;
     const symbols=hit.symbols.map(s=>({...s,bbox:scaleBbox(s.bbox),prevRawBbox:scaleBbox(s.prevRawBbox)}));
     matches.push({x0:hit.targetBox.x0/scale,y0:hit.targetBox.y0/scale,x1:hit.targetBox.x1/scale,y1:hit.targetBox.y1/scale,mode,lineText,symbols});
-}}return {mode,lines,words:data.words||[],rawText:String(data.text||""),matches,near:findNearCandidates(lines,target)};}
+}}return {mode,psm:String(psm),lines,words:data.words||[],rawText:String(data.text||""),matches,near:findNearCandidates(lines,target)};}
 
 // 完全一致した箇所でも、Tesseractがページ全体を一度にOCRした際に
 // 文字1つ分だけ座標がズレて報告されることがある（周辺のノイズ・隣接文字の影響）。
@@ -812,12 +812,7 @@ async function refineExactHitBox(worker, box, target) {
     const y1 = Math.min(sourceImage.naturalHeight, Math.round(box.y + box.h + padY));
     if (x1 <= x0 || y1 <= y0) return box;
 
-    // 文字の実寸に合わせて局所OCRの倍率を決める。
-    // 小さい文字ほど大きく、すでに十分大きい文字は無駄に拡大しない。
-    // 目標文字高はおよそ40px、倍率は2～6倍に制限する。
-    const targetCharHeight = 40;
-    const baseCharHeight = Math.max(1, box.h);
-    const LOCAL_SCALE = Math.max(2, Math.min(6, targetCharHeight / baseCharHeight));
+    const LOCAL_SCALE = 4;
     const crop = document.createElement('canvas');
     crop.width = Math.max(1, Math.round((x1 - x0) * LOCAL_SCALE));
     crop.height = Math.max(1, Math.round((y1 - y0) * LOCAL_SCALE));
@@ -882,16 +877,23 @@ function buildOcrCanvas(){
 async function collectOcrResults(worker,target){
   const {canvas:oc,scale}=buildOcrCanvas();
   const results=[];
-  const stats={primaryMs:0,fallbackMs:0,primaryHitCount:0,fallbackUsed:false,primaryName:"グレー＋コントラスト",fallbackNames:["二値化180","二値化220","反転"]};
+  const stats={
+    primaryMs:0,
+    fallbackMs:0,
+    primaryHitCount:0,
+    fallbackUsed:false,
+    primaryName:"グレー＋コントラスト",
+    fallbackNames:["元画像","二値化180","二値化220","反転","グレー＋コントラスト・PSM6","元画像・PSM6"]
+  };
 
-  // まず今回の実験で最も安定していた「グレー＋コントラスト」だけを実行。
-  // ここで1件でも正確に見つかれば、追加の全体OCRは省略する。
-  // ※診断用の速度実験版。見落としの有無を確認するため、V32は別に保存しておく。
+  // まずV56と同じ一次OCR。ここで見つかれば追加のOCRは実行しない。
+  // これまでの速度をできるだけ維持しつつ、「一次OCRで見つからない画像」だけ
+  // 複数条件の結果を突き合わせる方式にする。
   const primaryStarted=performance.now();
   status("実行中…");
   const primaryVariant=makeOcrVariant(oc,stats.primaryName);
   try {
-    const primary=await recognizeVariant(worker,primaryVariant,target,stats.primaryName,scale);
+    const primary=await recognizeVariant(worker,primaryVariant,target,stats.primaryName,scale,"11");
     results.push(primary);
     stats.primaryHitCount=primary.matches.length;
   } finally {
@@ -899,16 +901,24 @@ async function collectOcrResults(worker,target){
     stats.primaryMs=performance.now()-primaryStarted;
   }
 
-  // グレー＋コントラストで1件も見つからなかった場合だけ、
-  // 補助的な全体OCRを追加する。通常・グレースケールは今回の実験では外す。
+  // 一次OCRで完全一致がなかった場合だけ、認識条件を変えた複数結果を集める。
+  // 「どの前処理が正しいか」を決め打ちせず、同じ地点から出た候補を後段で
+  // アンサンブルする。これにより、ある条件では拾えない文字を別条件で拾える余地を作る。
   if(stats.primaryHitCount===0){
     stats.fallbackUsed=true;
     const fallbackStarted=performance.now();
     for(const name of stats.fallbackNames){
       status("実行中…");
-      const variant=makeOcrVariant(oc,name);
+      let variant=oc;
+      let psm="11";
+      if(name==="元画像") variant=makeOcrVariant(oc,"元画像");
+      else if(name==="二値化180") variant=makeOcrVariant(oc,"二値化180");
+      else if(name==="二値化220") variant=makeOcrVariant(oc,"二値化220");
+      else if(name==="反転") variant=makeOcrVariant(oc,"反転");
+      else if(name==="グレー＋コントラスト・PSM6") { variant=makeOcrVariant(oc,"グレー＋コントラスト"); psm="6"; }
+      else if(name==="元画像・PSM6") { variant=makeOcrVariant(oc,"元画像"); psm="6"; }
       try {
-        results.push(await recognizeVariant(worker,variant,target,name,scale));
+        results.push(await recognizeVariant(worker,variant,target,name,scale,psm));
       } finally {
         if(variant!==oc){variant.width=1;variant.height=1;}
       }
@@ -918,7 +928,6 @@ async function collectOcrResults(worker,target){
 
   return {results,scale,ocrCanvas:oc,stats};
 }
-
 function getCandidateBox(candidate, scale) {
   const units = candidate.units || [];
   if (!units.length) return null;
