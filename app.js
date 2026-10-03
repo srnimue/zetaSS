@@ -83,8 +83,25 @@ function loadImage(file) {
 function normalize(text) {
     return String(text || "")
         .normalize("NFKC")
-        .replace(/[^\p{L}\p{N}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Han}]/gu, "")
+        // 長音・ハイフン系は検索上は同じ記号として扱う。
+        .replace(/[ｰ‐‑‒–—−]/gu, "ー")
+        // 空白・改行・タブ、引用符や句読点などは検索から除外する。
+        .replace(/[^\p{L}\p{N}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Han}ー]/gu, "")
         .toLowerCase();
+}
+
+// 通常検索で見つからなかった場合だけ使う限定的な誤認識吸収。
+// 常時置換すると誤検出が増えるため、exact match が 0 件の時だけ候補化する。
+function normalizeLoose(text) {
+    return normalize(text)
+        .replace(/[0O]/g, "o")
+        .replace(/[1Il]/g, "i")
+        .replace(/口/g, "ロ")
+        .replace(/二/g, "ニ")
+        .replace(/力/g, "カ")
+        .replace(/工/g, "エ")
+        .replace(/へ/g, "ヘ")
+        .replace(/一/g, "ー");
 }
 
 const OCR_EDGE_PAD = 2; // 対象文字の字形がbboxから少しはみ出す場合の左右余白(px)
@@ -463,6 +480,8 @@ function redrawFromBase() {
     }
 }
 
+const DISABLE_DAWG_FOR_SEARCH = true;
+
 async function getWorker(preferredLang = "jpn") {
     if (!window.Tesseract) {
         throw new Error("Tesseract.jsを読み込めませんでした。インターネット接続や外部スクリプト制限を確認してください。");
@@ -484,6 +503,14 @@ async function getWorker(preferredLang = "jpn") {
             }
         }
     });
+    if (DISABLE_DAWG_FOR_SEARCH) {
+        // zetaSSは全文転記ではなく「指定文字列を探す」用途なので、
+        // 辞書による単語補正を切って未知語・固有名詞を優先する。
+        await worker.setParameters({
+            load_system_dawg: "0",
+            load_freq_dawg: "0"
+        });
+    }
     workerLang = preferredLang;
     return worker;
 }
@@ -623,7 +650,29 @@ function extractLineUnits(line){
   return units;
 }
 
-function findTargetInUnits(units,target){const text=units.map(u=>u.ch).join(""),hits=[];let from=0;while(from<=text.length-target.length){const i=text.indexOf(target,from);if(i<0)break;const selected=units.slice(i,i+target.length);if(selected.length===target.length)hits.push({targetBox:{x0:Math.min(...selected.map(u=>u.bbox.x0)),y0:Math.min(...selected.map(u=>u.bbox.y0)),x1:Math.max(...selected.map(u=>u.bbox.x1)),y1:Math.max(...selected.map(u=>u.bbox.y1))},symbols:selected});from=i+Math.max(1,target.length);}return hits;}
+function findTargetInUnits(units,target,normalizer=normalize){
+  const normalizedUnits=units.map(u=>normalizer(u.ch));
+  const normalizedTarget=normalizer(target);
+  const text=normalizedUnits.join("");
+  const hits=[];
+  let from=0;
+  while(from<=text.length-normalizedTarget.length){
+    const i=text.indexOf(normalizedTarget,from);
+    if(i<0)break;
+    const selected=units.slice(i,i+[...normalizedTarget].length);
+    if(selected.length===[...normalizedTarget].length){
+      hits.push({targetBox:{x0:Math.min(...selected.map(u=>u.bbox.x0)),y0:Math.min(...selected.map(u=>u.bbox.y0)),x1:Math.max(...selected.map(u=>u.bbox.x1)),y1:Math.max(...selected.map(u=>u.bbox.y1))},symbols:selected});
+    }
+    from=i+Math.max(1,[...normalizedTarget].length);
+  }
+  return hits;
+}
+
+function findLooseTargetInUnits(units,target){
+  const normalizedTarget=normalizeLoose(target);
+  if(normalizedTarget===normalize(target)) return [];
+  return findTargetInUnits(units,normalizedTarget,normalizeLoose);
+}
 
 function editDistance(a,b){const A=[...a],B=[...b],d=Array.from({length:A.length+1},()=>Array(B.length+1).fill(0));for(let i=0;i<=A.length;i++)d[i][0]=i;for(let j=0;j<=B.length;j++)d[0][j]=j;for(let i=1;i<=A.length;i++)for(let j=1;j<=B.length;j++)d[i][j]=Math.min(d[i-1][j]+1,d[i][j-1]+1,d[i-1][j-1]+(A[i-1]===B[j-1]?0:1));return d[A.length][B.length];}
 function sequenceSimilarity(a, b) {
@@ -779,14 +828,18 @@ function makeSourceCandidateCrop(candidate, scale) {
   return { canvas: c, x0: sx0, y0: sy0 };
 }
 
-async function recognizeVariant(worker,inputCanvas,target,mode,scale){const result=await worker.recognize(inputCanvas,{tessedit_pageseg_mode:"11"});const data=result?.data||{},lines=data.lines||[],matches=[];for(const line of lines){const units=extractLineUnits(line),hits=findTargetInUnits(units,target),lineText=units.map(u=>u.ch).join("");for(const hit of hits){
+async function recognizeVariant(worker,inputCanvas,target,mode,scale){const result=await worker.recognize(inputCanvas,{tessedit_pageseg_mode:"11"});const data=result?.data||{},lines=data.lines||[],matches=[],looseMatches=[];for(const line of lines){const units=extractLineUnits(line),hits=findTargetInUnits(units,target),lineText=units.map(u=>u.ch).join("");const fallbackHits=hits.length?[]:findLooseTargetInUnits(units,target);for(const hit of hits){
     // symbols[].bbox は OCR用に拡大したcanvas(scale倍)の座標のまま渡ってくる。
     // x0/y0/x1/y1 はscaleで割って元画像座標に戻しているので、symbolsも同じ座標系に
     // 揃えておかないと、getOcrPaintBoxでの高さ・幅比較がscale分ズレて誤判定する。
     const scaleBbox=b=>b?{x0:b.x0/scale,y0:b.y0/scale,x1:b.x1/scale,y1:b.y1/scale}:null;
     const symbols=hit.symbols.map(s=>({...s,bbox:scaleBbox(s.bbox),prevRawBbox:scaleBbox(s.prevRawBbox)}));
     matches.push({x0:hit.targetBox.x0/scale,y0:hit.targetBox.y0/scale,x1:hit.targetBox.x1/scale,y1:hit.targetBox.y1/scale,mode,lineText,symbols});
-}}return {mode,lines,words:data.words||[],rawText:String(data.text||""),matches,near:findNearCandidates(lines,target)};}
+}for(const hit of fallbackHits){
+    const scaleBbox=b=>b?{x0:b.x0/scale,y0:b.y0/scale,x1:b.x1/scale,y1:b.y1/scale}:null;
+    const symbols=hit.symbols.map(s=>({...s,bbox:scaleBbox(s.bbox),prevRawBbox:scaleBbox(s.prevRawBbox)}));
+    looseMatches.push({x0:hit.targetBox.x0/scale,y0:hit.targetBox.y0/scale,x1:hit.targetBox.x1/scale,y1:hit.targetBox.y1/scale,mode,lineText,symbols,loose:true});
+}}return {mode,lines,words:data.words||[],rawText:String(data.text||""),matches,looseMatches,near:findNearCandidates(lines,target)};}
 
 // 完全一致した箇所でも、Tesseractがページ全体を一度にOCRした際に
 // 文字1つ分だけ座標がズレて報告されることがある（周辺のノイズ・隣接文字の影響）。
@@ -1194,7 +1247,14 @@ async function run(){
 
     // V33の高速OCRをそのまま使用。通常HITはV19の黒塗り処理へ接続する。
     const {results,scale,ocrCanvas}=await collectOcrResults(worker,target);
-    const matches=mergeMatches(results);
+    let matches=mergeMatches(results);
+    let looseMatches=[];
+    if(matches.length===0){
+      // exact match が 0 件のときだけ、限定的な誤認識吸収を使う。
+      // 「二/ニ」「口/ロ」などを常時同一視すると誤検出が増えるため。
+      looseMatches=mergeMatches(results.map(r=>({...r,matches:r.looseMatches||[]})));
+      matches=looseMatches;
+    }
 
     // 通常OCRで見つかった対象文字を黒塗り候補として登録。
     // 実際の描画は最後にまとめて行い、OCR結果も手動黒塗りと同じ編集対象にする。
@@ -1247,7 +1307,7 @@ async function run(){
     }
     redrawFromBase();
     saveBtn.disabled=false; manualBtn.disabled=false;
-    status(`黒塗り完了：${manualStamps.length}箇所\n通常OCR：${matches.length}箇所 / 再OCR：${paintBoxes.length-matches.length}箇所`);
+    status(`黒塗り完了：${manualStamps.length}箇所\n${looseMatches.length ? `表記揺れ補正：${looseMatches.length}箇所` : `通常OCR：${matches.length}箇所`} / 再OCR：${paintBoxes.length-matches.length}箇所`);
   }catch(error){status("OCRでエラーが発生しました。下のエラー詳細を確認してください。",error);}
 }
 
