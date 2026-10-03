@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>スクショ黒塗りツール V72</title>
+<title>スクショ黒塗りツール V73</title>
 <link rel="stylesheet" href="style.css?v=31">
 <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
 </head>
@@ -18,6 +18,10 @@
 
 <label for="targetText">黒塗りする文字</label>
 <input id="targetText" type="text" placeholder="例：ゆーざー" autocomplete="off">
+
+<label for="textColors">文字色（カラー抽出テスト）</label>
+<input id="textColors" type="text" value="#FFFFFF, #A1A1A3" autocomplete="off">
+<small>例：#FFFFFF, #A1A1A3　※今回のテストでは色抽出診断だけに使用</small>
 
 <label for="overlayText">置き換え文字</label>
 <input id="overlayText" type="text" value="{{user}}" autocomplete="off">
@@ -72,6 +76,6 @@
 <pre id="errorDetails" class="error" hidden></pre>
 <pre id="ocrDiagnostics" class="diagnostics" hidden></pre>
 </main>
-<script src="app.js?v=72"></script>
+<script src="app.js?v=73"></script>
 </body>
 </html>

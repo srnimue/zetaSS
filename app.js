@@ -1744,6 +1744,77 @@ async function run(){
 }
 
 
+// V73：Claude版の「指定色に近い画素を黒、それ以外を白」にする方式を、
+// V72の色領域＋局所OCRへ追加する実験。元画像や既存OCRは変更しない。
+const COLOR_EXTRACT_TOLERANCE = 60;
+
+function parseTextColors(text) {
+  const out=[];
+  for(const token of String(text||'').split(/[,\\n\\s]+/)){
+    const m=token.trim().match(/^#?([0-9a-fA-F]{6})$/);
+    if(!m) continue;
+    const hex=m[1];
+    out.push({hex:'#'+hex.toUpperCase(),rgb:{r:parseInt(hex.slice(0,2),16),g:parseInt(hex.slice(2,4),16),b:parseInt(hex.slice(4,6),16)}});
+  }
+  return out;
+}
+
+function makeColorExtractVariant(baseCanvas, rgb) {
+  const c=document.createElement('canvas');
+  c.width=baseCanvas.width; c.height=baseCanvas.height;
+  const cctx=c.getContext('2d');
+  cctx.drawImage(baseCanvas,0,0);
+  const img=cctx.getImageData(0,0,c.width,c.height),d=img.data;
+  const tol2=COLOR_EXTRACT_TOLERANCE*COLOR_EXTRACT_TOLERANCE;
+  for(let i=0;i<d.length;i+=4){
+    const dr=d[i]-rgb.r,dg=d[i+1]-rgb.g,db=d[i+2]-rgb.b;
+    const dist2=dr*dr+dg*dg+db*db;
+    const v=dist2<=tol2?0:255;
+    d[i]=d[i+1]=d[i+2]=v;
+  }
+  cctx.putImageData(img,0,0);
+  return c;
+}
+
+async function runColorExtractOCR(worker, sourceCanvas, target, colors, detectedRegions) {
+  const started=performance.now();
+  const matches=[];
+  const tested=[];
+  const seen=[];
+  const SCALE=2;
+  for(const color of colors){
+    for(const r of detectedRegions){
+      const crop=document.createElement('canvas');
+      crop.width=Math.max(1,Math.round(r.w*SCALE));
+      crop.height=Math.max(1,Math.round(r.h*SCALE));
+      const cc=crop.getContext('2d');
+      cc.imageSmoothingEnabled=true;
+      cc.imageSmoothingQuality='high';
+      cc.drawImage(sourceCanvas,r.x,r.y,r.w,r.h,0,0,crop.width,crop.height);
+      const variant=makeColorExtractVariant(crop,color.rgb);
+      const normal=await recognizeLocalRegionVariant(worker,variant,target,`色抽出 ${color.hex}`);
+      const regionMatches=[];
+      for(const hit of normal.matches||[]){
+        const b=hit.targetBox;
+        const mapped={
+          x0:r.x+b.x0/SCALE,y0:r.y+b.y0/SCALE,
+          x1:r.x+b.x1/SCALE,y1:r.y+b.y1/SCALE,
+          symbols:(hit.symbols||[]).map(u=>({...u,bbox:{
+            x0:r.x+u.bbox.x0/SCALE,y0:r.y+u.bbox.y0/SCALE,
+            x1:r.x+u.bbox.x1/SCALE,y1:r.y+u.bbox.y1/SCALE
+          }})),
+          lineText:normal.raw,source:'指定色抽出OCR',color:color.hex
+        };
+        const dup=seen.some(m=>Math.abs(m.x0-mapped.x0)<5&&Math.abs(m.y0-mapped.y0)<5&&Math.abs(m.x1-mapped.x1)<5&&Math.abs(m.y1-mapped.y1)<5);
+        if(!dup){seen.push(mapped);matches.push(mapped);regionMatches.push(mapped);}
+      }
+      tested.push({color:color.hex,region:r,hit:regionMatches.length>0,raw:normal.raw,matches:regionMatches});
+      variant.width=1;variant.height=1;crop.width=1;crop.height=1;
+    }
+  }
+  return {matches,tested,elapsed:performance.now()-started};
+}
+
 // V72：zetaの表示テーマに合わせた「文字色候補領域」抽出の診断。
 // まだ黒塗りには使わず、色のまとまりからOCR対象を絞れるかだけを見る。
 function detectColorTextRegions(sourceCanvas) {
@@ -1875,21 +1946,29 @@ async function diagnoseColorOnly(){
     if(!sourceImage)throw new Error("先に画像を選択してください。");
     const target=normalize(targetText.value);
     if(!target)throw new Error("黒塗りする文字を入力してください。");
+    const colors=parseTextColors(textColorsInput.value);
+    if(!colors.length)throw new Error("文字色を1色以上、#RRGGBB形式で入力してください。");
     const totalStarted=performance.now();
     const worker=await getWorker(getOcrLanguage(target));
-    status("色抽出診断中…\n文字色の候補領域を探しています。");
-    const result=await runColorTextRegionExperiment(worker,canvas,target);
-    const lines=[`対象文字：${targetText.value}`,`正規化後：${target}`,"",`===== V72 色領域抽出＋局所OCR =====`,
-      `色候補：${result.detected.regions.length}領域 / 局所OCR実行：${result.tested.length}領域 / 走査間隔：${result.detected.sample}px / 通常：2倍・PSM7`];
-    result.detected.stats.forEach(s=>lines.push(`  ${s.name}：サンプル該当率 ${(s.ratio*100).toFixed(2)}%（${s.pixelHits} / ${s.sampledPixels}）`));
-    lines.push(`対象文字HIT：${result.tested.filter(r=>r.hit).length}領域 / 実際のHIT：${result.matches.length}件`);
-    result.tested.forEach((r,i)=>{
-      lines.push(`  色領域${i+1}: ${r.mode} / (${r.x},${r.y},w${r.w},h${r.h}) / 密度${(r.coverage*100).toFixed(1)}% / ${r.hit?'★対象HIT':'HITなし'} / 「${r.raw.length>70?r.raw.slice(0,70)+'…':r.raw}」`);
-      (r.matches||[]).forEach((m,j)=>lines.push(`    → HIT${j+1}: bbox=(${Math.round(m.x0)},${Math.round(m.y0)},w${Math.round(m.x1-m.x0)},h${Math.round(m.y1-m.y0)}) / 「${m.lineText}」`));
+    status("色抽出診断中…\n指定色を黒文字・それ以外を白に統一してOCRしています。");
+    const detected=detectColorTextRegions(canvas);
+    const result=await runColorExtractOCR(worker,canvas,target,colors,detected.regions);
+    const lines=[`対象文字：${targetText.value}`,`正規化後：${target}`,`指定色：${colors.map(c=>c.hex).join(' / ')}`,"",
+      `===== V73 指定色抽出＋V72色領域局所OCR =====`,
+      `候補領域：${detected.regions.length}領域 / 色抽出OCR：${result.tested.length}回 / 走査間隔：${detected.sample}px / 2倍・PSM7`,
+      `色抽出許容差：RGB距離 ${COLOR_EXTRACT_TOLERANCE}`];
+    lines.push(`対象文字HIT：${result.matches.length}件`);
+    result.tested.forEach((t,i)=>{
+      const r=t.region;
+      lines.push(`  ${i+1}: ${t.color} / 色領域${detected.regions.indexOf(r)+1} / (${r.x},${r.y},w${r.w},h${r.h}) / ${t.hit?'★対象HIT':'HITなし'} / 「${t.raw.length>70?t.raw.slice(0,70)+'…':t.raw}」`);
+      (t.matches||[]).forEach((m,j)=>lines.push(`    → HIT${j+1}: bbox=(${Math.round(m.x0)},${Math.round(m.y0)},w${Math.round(m.x1-m.x0)},h${Math.round(m.y1-m.y0)}) / 「${m.lineText}」`));
     });
-    lines.push("",`色領域OCR時間：${(result.elapsed/1000).toFixed(2)}秒`,`診断全体：${((performance.now()-totalStarted)/1000).toFixed(2)}秒`,"","※ V72は色条件で候補領域を絞り、その領域だけPSM7 OCRします。まだ自動黒塗りには使用しません。");
+    lines.push("",`指定色抽出OCR時間：${(result.elapsed/1000).toFixed(2)}秒`,`診断全体：${((performance.now()-totalStarted)/1000).toFixed(2)}秒`,"",
+      `※ 指定色に近い画素だけを黒、それ以外を白に変換してからOCRしています。`,
+      `※ まだ自動黒塗りには使用しません。`,
+      `※ 色抽出の許容差はRGB空間のユークリッド距離です。`);
     ocrDiagnostics.textContent=lines.join("\n");
-    status(`色抽出診断完了。\n対象文字HIT：${result.matches.length}件\n処理時間：${((performance.now()-totalStarted)/1000).toFixed(2)}秒\n下の診断結果を確認してください。`);
+    status(`指定色抽出診断完了。\n対象文字HIT：${result.matches.length}件\n処理時間：${((performance.now()-totalStarted)/1000).toFixed(2)}秒\n下の診断結果を確認してください。`);
   }catch(error){status("色抽出診断でエラーが発生しました。",error);}
 }
 
