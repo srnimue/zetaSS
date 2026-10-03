@@ -685,6 +685,7 @@ function runTemplateMatch(sourceCanvas, referenceBox, options={}) {
     }
   }
   candidates.sort((a,b)=>b.score-a.score);
+  const topCandidates=candidates.slice(0,10);
   const picked=[];
   for(const c of candidates){
     if(picked.some(p=>{
@@ -694,7 +695,7 @@ function runTemplateMatch(sourceCanvas, referenceBox, options={}) {
     picked.push(c);
     if(picked.length>=12) break;
   }
-  return {reference:{x:rx,y:ry,w:rw,h:rh}, candidates:picked, scannedStep:step, threshold:.72};
+  return {reference:{x:rx,y:ry,w:rw,h:rh}, candidates:picked, topCandidates, scannedStep:step, threshold:.72, rawCandidateCount:candidates.length};
 }
 
 function editDistance(a,b){const A=[...a],B=[...b],d=Array.from({length:A.length+1},()=>Array(B.length+1).fill(0));for(let i=0;i<=A.length;i++)d[i][0]=i;for(let j=0;j<=B.length;j++)d[0][j]=j;for(let i=1;i<=A.length;i++)for(let j=1;j<=B.length;j++)d[i][j]=Math.min(d[i-1][j]+1,d[i][j-1]+1,d[i-1][j-1]+(A[i-1]===B[j-1]?0:1));return d[A.length][B.length];}
@@ -1416,6 +1417,31 @@ async function diagnoseOCR(){
     }
     const verifyElapsed=performance.now()-verifyStarted;
     lines.push(`検証時間：${(verifyElapsed/1000).toFixed(2)}秒 / 修正：${changedCount}件 / 対象：${exactMatches.length}件`);
+
+    // V62.1実験：テンプレート照合の候補を診断に必ず出す。閾値未満も含め、上位候補を確認する。
+    lines.push("",`===== テンプレート照合実験（V62.1） =====`);
+    if(exactMatches.length){
+      const ref=exactMatches[0];
+      const tr=runTemplateMatch(canvas,{x:ref.x0,y:ref.y0,w:ref.x1-ref.x0,h:ref.y1-ref.y0});
+      const rr=tr.reference;
+      lines.push(`基準テンプレート：(${Math.round(rr.x)},${Math.round(rr.y)},w${Math.round(rr.w)},h${Math.round(rr.h)})`);
+      lines.push(`走査間隔：${tr.scannedStep}px / 採用閾値：${tr.threshold.toFixed(2)} / 閾値以上の生候補：${tr.rawCandidateCount}件`);
+      if(tr.topCandidates?.length){
+        lines.push(`上位候補（閾値未満も表示）：`);
+        tr.topCandidates.forEach((c,i)=>lines.push(`  候補${i+1}: score ${c.score.toFixed(3)} / (${c.x},${c.y},w${c.w},h${c.h})${c.score>=tr.threshold?' ★閾値以上':''}`));
+      }else{
+        lines.push(`上位候補：なし（走査結果がありません）`);
+      }
+      if(tr.candidates.length){
+        lines.push(`重複整理後の閾値以上候補：${tr.candidates.length}件`);
+        tr.candidates.forEach((c,i)=>lines.push(`  採用候補${i+1}: score ${c.score.toFixed(3)} / (${c.x},${c.y},w${c.w},h${c.h})`));
+      }else{
+        lines.push(`重複整理後の閾値以上候補：0件`);
+      }
+      lines.push(`※ 基準位置そのものは除外しています。候補はまだ黒塗りには使用しません。`);
+    }else{
+      lines.push(`完全一致HITがないためテンプレートを作成できません。`);
+    }
 
     lines.push("",
       `===== 処理時間 =====`,
