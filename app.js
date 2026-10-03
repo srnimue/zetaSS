@@ -1743,6 +1743,129 @@ async function run(){
   }catch(error){status("OCRでエラーが発生しました。下のエラー詳細を確認してください。",error);}
 }
 
+
+// V72：zetaの表示テーマに合わせた「文字色候補領域」抽出の診断。
+// まだ黒塗りには使わず、色のまとまりからOCR対象を絞れるかだけを見る。
+function detectColorTextRegions(sourceCanvas) {
+  const ctx=sourceCanvas.getContext('2d',{willReadFrequently:true});
+  const img=ctx.getImageData(0,0,sourceCanvas.width,sourceCanvas.height);
+  const d=img.data, w=img.width, h=img.height;
+  const sample=3;
+  const sw=Math.ceil(w/sample), sh=Math.ceil(h/sample);
+  const modes=[
+    {name:'白文字', test:(r,g,b)=>{
+      const mx=Math.max(r,g,b), mn=Math.min(r,g,b), lum=.299*r+.587*g+.114*b;
+      return lum>=220 && mx-mn<=28;
+    }},
+    {name:'グレー文字', test:(r,g,b)=>{
+      const mx=Math.max(r,g,b), mn=Math.min(r,g,b), lum=.299*r+.587*g+.114*b;
+      return lum>=105 && lum<220 && mx-mn<=30;
+    }},
+    {name:'暗色文字', test:(r,g,b)=>{
+      const mx=Math.max(r,g,b), mn=Math.min(r,g,b), lum=.299*r+.587*g+.114*b;
+      return lum<105 && mx-mn<=35;
+    }}
+  ];
+  const all=[];
+  const stats=[];
+  for(const mode of modes){
+    const rows=new Uint16Array(sh);
+    const rowXs=Array.from({length:sh},()=>[w,h,0,0]);
+    let hits=0, sampled=0;
+    for(let sy=0;sy<sh;sy++){
+      const y=Math.min(h-1,sy*sample);
+      for(let sx=0;sx<sw;sx++){
+        const x=Math.min(w-1,sx*sample);
+        const i=(y*w+x)*4;
+        sampled++;
+        if(!mode.test(d[i],d[i+1],d[i+2])) continue;
+        hits++; rows[sy]++;
+        const rr=rowXs[sy];
+        if(x<rr[0])rr[0]=x;
+        if(y<rr[1])rr[1]=y;
+        if(x>rr[2])rr[2]=x;
+        if(y>rr[3])rr[3]=y;
+      }
+    }
+    stats.push({name:mode.name,pixelHits:hits,sampledPixels:sampled,ratio:hits/Math.max(1,sampled)});
+    let start=-1,last=-1;
+    const finish=(a,b)=>{
+      if(a<0||b<a)return;
+      let x0=w,x1=0,total=0;
+      for(let q=a;q<=b;q++) if(rows[q]){
+        x0=Math.min(x0,rowXs[q][0]);
+        x1=Math.max(x1,rowXs[q][2]);
+        total+=rows[q];
+      }
+      if(x1<=x0)return;
+      const y0=Math.max(0,a*sample-10), y1=Math.min(h,(b+1)*sample+10);
+      x0=Math.max(0,x0-14); x1=Math.min(w,x1+14);
+      const rw=x1-x0, rh=y1-y0;
+      if(rh<14||rh>110||rw<35||rw>Math.min(w,1400))return;
+      const coverage=total/Math.max(1,(rw*rh)/(sample*sample));
+      if(coverage<0.004)return;
+      all.push({x:x0,y:y0,w:rw,h:rh,mode:mode.name,density:coverage});
+    };
+    for(let sy=0;sy<sh;sy++){
+      if(rows[sy]>=Math.max(2,Math.round(sw*.0009))){
+        if(start<0)start=sy;
+        last=sy;
+      }else if(start>=0 && sy-last>2){
+        finish(start,last); start=-1; last=-1;
+      }
+    }
+    if(start>=0)finish(start,last);
+  }
+  all.sort((a,b)=>b.density-a.density);
+  const regions=[];
+  for(const r of all){
+    const overlap=regions.some(q=>{
+      const ix=Math.max(0,Math.min(r.x+r.w,q.x+q.w)-Math.max(r.x,q.x));
+      const iy=Math.max(0,Math.min(r.y+r.h,q.y+q.h)-Math.max(r.y,q.y));
+      return ix*iy>Math.min(r.w*r.h,q.w*q.h)*.45;
+    });
+    if(!overlap)regions.push(r);
+    if(regions.length>=24)break;
+  }
+  return {sample,regions,stats};
+}
+
+async function runColorTextRegionExperiment(worker, sourceCanvas, target) {
+  const detected=detectColorTextRegions(sourceCanvas);
+  const tested=[];
+  const matches=[];
+  const started=performance.now();
+  const SCALE=2;
+  for(const r of detected.regions){
+    const crop=document.createElement('canvas');
+    crop.width=Math.max(1,Math.round(r.w*SCALE));
+    crop.height=Math.max(1,Math.round(r.h*SCALE));
+    const cctx=crop.getContext('2d');
+    cctx.imageSmoothingEnabled=true;
+    cctx.imageSmoothingQuality='high';
+    cctx.drawImage(sourceCanvas,r.x,r.y,r.w,r.h,0,0,crop.width,crop.height);
+    const normal=await recognizeLocalRegionVariant(worker,crop,target,'通常');
+    const regionMatches=[];
+    for(const hit of normal.matches||[]){
+      const b=hit.targetBox;
+      const mapped={
+        x0:r.x+b.x0/SCALE, y0:r.y+b.y0/SCALE,
+        x1:r.x+b.x1/SCALE, y1:r.y+b.y1/SCALE,
+        symbols:(hit.symbols||[]).map(u=>({...u,bbox:{
+          x0:r.x+u.bbox.x0/SCALE,y0:r.y+u.bbox.y0/SCALE,
+          x1:r.x+u.bbox.x1/SCALE,y1:r.y+u.bbox.y1/SCALE
+        }})),
+        lineText:normal.raw, source:'色抽出局所OCR'
+      };
+      regionMatches.push(mapped);
+      matches.push(mapped);
+    }
+    tested.push({...r,hit:normal.hit,raw:normal.raw,matches:regionMatches,lineData:normal.lineData||[],coverage:r.density});
+    crop.width=1; crop.height=1;
+  }
+  return {detected,tested,matches,elapsed:performance.now()-started};
+}
+
 async function diagnoseColorOnly(){
   ocrDiagnostics.hidden=false;
   ocrDebugLayer.hidden=true;
