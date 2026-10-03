@@ -476,12 +476,8 @@ async function getWorker(preferredLang = "jpn") {
         workerLang = null;
     }
 
-    status(`${preferredLang === "jpn" ? "日本語" : "英語"}・高精度OCRモデルを準備中…\n初回は大きな学習データの読み込みがあります。`);
+    status(`${preferredLang === "jpn" ? "日本語" : "英語"}OCRエンジンを準備中…\n初回は少し時間がかかります。`);
     worker = await Tesseract.createWorker(preferredLang, 1, {
-        // V61実験：通常の4.0.0_best_intではなく、元のtessdata_bestを使用。
-        // 既存のOEM 1（LSTM）のまま、モデルだけを高精度版へ切り替える。
-        // app.jsのクエリもV61へ更新して、古いJavaScriptキャッシュを避ける。
-        langPath: "https://cdn.jsdelivr.net/gh/naptha/tessdata@gh-pages/4.0.0_best",
         logger: message => {
             if (message?.progress != null) {
                 status("実行中…");
@@ -628,6 +624,78 @@ function extractLineUnits(line){
 }
 
 function findTargetInUnits(units,target){const text=units.map(u=>u.ch).join(""),hits=[];let from=0;while(from<=text.length-target.length){const i=text.indexOf(target,from);if(i<0)break;const selected=units.slice(i,i+target.length);if(selected.length===target.length)hits.push({targetBox:{x0:Math.min(...selected.map(u=>u.bbox.x0)),y0:Math.min(...selected.map(u=>u.bbox.y0)),x1:Math.max(...selected.map(u=>u.bbox.x1)),y1:Math.max(...selected.map(u=>u.bbox.y1))},symbols:selected});from=i+Math.max(1,target.length);}return hits;}
+
+
+
+// V62実験：OCRで1件だけ正しく見つかった文字列の画像パターンをテンプレートにして、
+// 同じ見た目の文字を画像そのものから探す。OCRが文字として読めなかった場所の救出を検証するための実験機能。
+function grayPixel(data, w, x, y) {
+  const i = (y * w + x) * 4;
+  return data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114;
+}
+
+function makeTemplateSamples(imageData, x, y, w, h, cols=16, rows=8) {
+  const out=[];
+  for(let ry=0; ry<rows; ry++) for(let rx=0; rx<cols; rx++) {
+    const px=Math.min(imageData.width-1, Math.max(0, Math.floor(x+(rx+0.5)*w/cols)));
+    const py=Math.min(imageData.height-1, Math.max(0, Math.floor(y+(ry+0.5)*h/rows)));
+    out.push(grayPixel(imageData.data,imageData.width,px,py));
+  }
+  const mean=out.reduce((a,b)=>a+b,0)/out.length;
+  const norm=Math.sqrt(out.reduce((a,v)=>a+(v-mean)*(v-mean),0))||1;
+  return {values:out,mean,norm,cols,rows,w,h};
+}
+
+function samplePatchScore(imageData, template, x, y, cols=16, rows=8) {
+  const vals=[];
+  for(let ry=0; ry<rows; ry++) for(let rx=0; rx<cols; rx++) {
+    const px=Math.min(imageData.width-1, Math.max(0, Math.floor(x+(rx+0.5)*template.w/cols)));
+    const py=Math.min(imageData.height-1, Math.max(0, Math.floor(y+(ry+0.5)*template.h/rows)));
+    vals.push(grayPixel(imageData.data,imageData.width,px,py));
+  }
+  const mean=vals.reduce((a,b)=>a+b,0)/vals.length;
+  let dot=0, norm=0;
+  for(let i=0;i<vals.length;i++) {
+    const a=template.values[i]-template.mean, b=vals[i]-mean;
+    dot+=a*b; norm+=b*b;
+  }
+  return dot/(template.norm*Math.sqrt(norm)||1);
+}
+
+function runTemplateMatch(sourceCanvas, referenceBox, options={}) {
+  const srcCtx=sourceCanvas.getContext('2d',{willReadFrequently:true});
+  const data=srcCtx.getImageData(0,0,sourceCanvas.width,sourceCanvas.height);
+  const rw=Math.max(12,Math.round(referenceBox.w));
+  const rh=Math.max(10,Math.round(referenceBox.h));
+  const rx=Math.max(0,Math.min(sourceCanvas.width-rw,Math.round(referenceBox.x)));
+  const ry=Math.max(0,Math.min(sourceCanvas.height-rh,Math.round(referenceBox.y)));
+  const template=makeTemplateSamples(data,rx,ry,rw,rh,16,8);
+  const candidates=[];
+  const step=4;
+  const scales=[1];
+  for(const sc of scales){
+    const w=Math.max(12,Math.round(rw*sc)), h=Math.max(10,Math.round(rh*sc));
+    if(w>=sourceCanvas.width || h>=sourceCanvas.height) continue;
+    for(let y=0;y<=sourceCanvas.height-h;y+=step){
+      for(let x=0;x<=sourceCanvas.width-w;x+=step){
+        if(Math.abs(x-rx)<w*0.7 && Math.abs(y-ry)<h*0.7) continue;
+        const score=samplePatchScore(data,template,x,y,16,8);
+        if(score>=0.72) candidates.push({x,y,w,h,score});
+      }
+    }
+  }
+  candidates.sort((a,b)=>b.score-a.score);
+  const picked=[];
+  for(const c of candidates){
+    if(picked.some(p=>{
+      const ix=Math.max(p.x,c.x),iy=Math.max(p.y,c.y),ax=Math.min(p.x+p.w,c.x+c.w),ay=Math.min(p.y+p.h,c.y+c.h);
+      return ax>ix&&ay>iy&&((ax-ix)*(ay-iy))/Math.min(p.w*p.h,c.w*c.h)>.35;
+    })) continue;
+    picked.push(c);
+    if(picked.length>=12) break;
+  }
+  return {reference:{x:rx,y:ry,w:rw,h:rh}, candidates:picked, scannedStep:step, threshold:.72};
+}
 
 function editDistance(a,b){const A=[...a],B=[...b],d=Array.from({length:A.length+1},()=>Array(B.length+1).fill(0));for(let i=0;i<=A.length;i++)d[i][0]=i;for(let j=0;j<=B.length;j++)d[0][j]=j;for(let i=1;i<=A.length;i++)for(let j=1;j<=B.length;j++)d[i][j]=Math.min(d[i-1][j]+1,d[i][j-1]+1,d[i-1][j-1]+(A[i-1]===B[j-1]?0:1));return d[A.length][B.length];}
 function sequenceSimilarity(a, b) {
@@ -1199,6 +1267,14 @@ async function run(){
     // V33の高速OCRをそのまま使用。通常HITはV19の黒塗り処理へ接続する。
     const {results,scale,ocrCanvas}=await collectOcrResults(worker,target);
     const matches=mergeMatches(results);
+
+    // V62実験：完全一致が1件以上ある場合、その実画像をテンプレートとして全体を探索。
+    // 誤爆防止のため、候補は診断にも出すが自動黒塗りにはまだ採用しない。
+    let templateResult=null;
+    if(matches.length){
+      const ref=matches[0];
+      templateResult=runTemplateMatch(canvas,{x:ref.x0,y:ref.y0,w:ref.x1-ref.x0,h:ref.y1-ref.y0});
+    }
 
     // 通常OCRで見つかった対象文字を黒塗り候補として登録。
     // 実際の描画は最後にまとめて行い、OCR結果も手動黒塗りと同じ編集対象にする。
