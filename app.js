@@ -726,6 +726,121 @@ function runGlyphTemplateMatch(sourceCanvas, referenceMatch) {
   };
 }
 
+
+// V64実験：画像を機械的に分割するのではなく、画素の密度から
+// 「文字がありそうな横長の領域」を推定し、その領域だけを局所OCRする。
+// 診断専用。黒塗りには使用しない。
+function detectTextLikeRegions(sourceCanvas) {
+  const ctx=sourceCanvas.getContext('2d',{willReadFrequently:true});
+  const img=ctx.getImageData(0,0,sourceCanvas.width,sourceCanvas.height);
+  const d=img.data, w=img.width, h=img.height;
+  const sample=2;
+  const sw=Math.ceil(w/sample), sh=Math.ceil(h/sample);
+  const regions=[];
+
+  // 黒文字・白文字の両方を軽く見る。スクショの吹き出しや背景を
+  // 完全には判別せず、「文字候補を拾う」ことを目的にする。
+  for(const mode of ['dark','light']){
+    const rows=new Uint16Array(sh);
+    const rowXs=Array.from({length:sh},()=>[w,h,0,0]);
+    for(let sy=0;sy<sh;sy++){
+      const y=Math.min(h-1,sy*sample);
+      for(let sx=0;sx<sw;sx++){
+        const x=Math.min(w-1,sx*sample);
+        const i=(y*w+x)*4;
+        const g=d[i]*.299+d[i+1]*.587+d[i+2]*.114;
+        const hit=mode==='dark'?g<185:g>225;
+        if(!hit) continue;
+        rows[sy]++;
+        const r=rowXs[sy];
+        if(x<r[0])r[0]=x; if(y<r[1])r[1]=y;
+        if(x>r[2])r[2]=x; if(y>r[3])r[3]=y;
+      }
+    }
+    const minHits=Math.max(3,Math.round(sw*.0015));
+    let start=-1,last=-1;
+    for(let sy=0;sy<sh;sy++){
+      if(rows[sy]>=minHits){
+        if(start<0)start=sy;
+        last=sy;
+      }else if(start>=0 && sy-last>3){
+        const y0=Math.max(0,start*sample-10), y1=Math.min(h,(last+1)*sample+10);
+        let x0=w,x1=0,total=0;
+        for(let q=start;q<=last;q++){
+          if(rows[q]){
+            x0=Math.min(x0,rowXs[q][0]);
+            x1=Math.max(x1,rowXs[q][2]);
+            total+=rows[q];
+          }
+        }
+        if(x1>x0){
+          x0=Math.max(0,x0-14); x1=Math.min(w,x1+14);
+          const rw=x1-x0,rh=y1-y0;
+          if(rh>=14&&rh<=110&&rw>=35&&rw<=Math.min(w,1400)){
+            regions.push({x:x0,y:y0,w:rw,h:rh,mode,density:total/Math.max(1,rw*rh/(sample*sample))});
+          }
+        }
+        start=-1; last=-1;
+      }
+    }
+    if(start>=0){
+      const y0=Math.max(0,start*sample-10), y1=Math.min(h,(last+1)*sample+10);
+      let x0=w,x1=0,total=0;
+      for(let q=start;q<=last;q++) if(rows[q]){x0=Math.min(x0,rowXs[q][0]);x1=Math.max(x1,rowXs[q][2]);total+=rows[q];}
+      if(x1>x0){
+        x0=Math.max(0,x0-14);x1=Math.min(w,x1+14);
+        const rw=x1-x0,rh=y1-y0;
+        if(rh>=14&&rh<=110&&rw>=35&&rw<=Math.min(w,1400)) regions.push({x:x0,y:y0,w:rw,h:rh,mode,density:total/Math.max(1,rw*rh/(sample*sample))});
+      }
+    }
+  }
+
+  // 重なったdark/light候補や同じ行の候補をまとめる。
+  regions.sort((a,b)=>b.density-a.density);
+  const dedup=[];
+  for(const r of regions){
+    const overlap=dedup.some(q=>{
+      const ix=Math.max(0,Math.min(r.x+r.w,q.x+q.w)-Math.max(r.x,q.x));
+      const iy=Math.max(0,Math.min(r.y+r.h,q.y+q.h)-Math.max(r.y,q.y));
+      return ix*iy>Math.min(r.w*r.h,q.w*q.h)*.45;
+    });
+    if(!overlap) dedup.push(r);
+    if(dedup.length>=24) break;
+  }
+  return {sample,regions:dedup};
+}
+
+async function runTextRegionExperiment(worker,sourceCanvas,target){
+  const detected=detectTextLikeRegions(sourceCanvas);
+  const tested=[];
+  const SCALE=2;
+  const started=performance.now();
+  // 密度順の上位だけ局所OCR。診断がiPhoneで暴走しないよう上限を設ける。
+  for(const r of detected.regions.slice(0,16)){
+    const crop=document.createElement('canvas');
+    crop.width=Math.max(1,Math.round(r.w*SCALE));
+    crop.height=Math.max(1,Math.round(r.h*SCALE));
+    const cctx=crop.getContext('2d');
+    cctx.imageSmoothingEnabled=true;
+    cctx.imageSmoothingQuality='high';
+    cctx.drawImage(sourceCanvas,r.x,r.y,r.w,r.h,0,0,crop.width,crop.height);
+    let raw=''; let hit=false; let mode='PSM7';
+    try{
+      const result=await worker.recognize(crop,{tessedit_pageseg_mode:'7'});
+      raw=String(result?.data?.text||'').replace(/\s+/g,' ').trim();
+      const units=[];
+      for(const line of (result?.data?.lines||[])){
+        const us=extractLineUnits(line);
+        const hs=findTargetInUnits(us,target);
+        if(hs.length) hit=true;
+      }
+    }catch(e){ raw=`ERROR: ${e?.message||e}`; }
+    tested.push({...r,raw,hit});
+    crop.width=1;crop.height=1;
+  }
+  return {detected,tested,elapsed:performance.now()-started};
+}
+
 function editDistance(a,b){const A=[...a],B=[...b],d=Array.from({length:A.length+1},()=>Array(B.length+1).fill(0));for(let i=0;i<=A.length;i++)d[i][0]=i;for(let j=0;j<=B.length;j++)d[0][j]=j;for(let i=1;i<=A.length;i++)for(let j=1;j<=B.length;j++)d[i][j]=Math.min(d[i-1][j]+1,d[i][j-1]+1,d[i-1][j-1]+(A[i-1]===B[j-1]?0:1));return d[A.length][B.length];}
 function sequenceSimilarity(a, b) {
   const A = [...a], B = [...b];
@@ -1445,6 +1560,20 @@ async function diagnoseOCR(){
     }
     const verifyElapsed=performance.now()-verifyStarted;
     lines.push(`検証時間：${(verifyElapsed/1000).toFixed(2)}秒 / 修正：${changedCount}件 / 対象：${exactMatches.length}件`);
+
+    // V64実験：文字っぽい領域を画素密度から検出して局所OCRする。
+    lines.push("",`===== 文字領域推定＋局所OCR実験（V64） =====`);
+    const regionStarted=performance.now();
+    const regionResult=await runTextRegionExperiment(worker,canvas,target);
+    lines.push(`検出候補：${regionResult.detected.regions.length}領域 / 局所OCR実行：${regionResult.tested.length}領域 / 走査間隔：${regionResult.detected.sample}px / 局所OCR：2倍・PSM7`);
+    const regionHits=regionResult.tested.filter(r=>r.hit);
+    lines.push(`対象文字HIT：${regionHits.length}領域`);
+    regionResult.tested.forEach((r,i)=>{
+      const shortRaw=r.raw.length>70?r.raw.slice(0,70)+'…':r.raw;
+      lines.push(`  領域${i+1}: (${r.x},${r.y},w${r.w},h${r.h}) / ${r.mode} / ${r.hit?'★対象HIT':'HITなし'} / 「${shortRaw}」`);
+    });
+    lines.push(`局所OCR時間：${(regionResult.elapsed/1000).toFixed(2)}秒`);
+    lines.push(`※ 文字っぽい領域を推定して局所OCRしただけの診断実験です。今回は黒塗りには使用しません。`);
 
     // V63実験：文字列全体ではなく、OCRが拾えた各文字を個別テンプレート化して組み合わせる。
     lines.push("",`===== 文字単体テンプレート照合実験（V63） =====`);
