@@ -627,14 +627,14 @@ function findTargetInUnits(units,target){const text=units.map(u=>u.ch).join(""),
 
 
 
-// V62実験：OCRで1件だけ正しく見つかった文字列の画像パターンをテンプレートにして、
-// 同じ見た目の文字を画像そのものから探す。OCRが文字として読めなかった場所の救出を検証するための実験機能。
+// V63実験：OCRで正しく拾えた「文字単体」をテンプレートにして、
+// 同じ文字形＋文字間隔を画像そのものから探す。まずは診断専用で、黒塗りには使用しない。
 function grayPixel(data, w, x, y) {
   const i = (y * w + x) * 4;
   return data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114;
 }
 
-function makeTemplateSamples(imageData, x, y, w, h, cols=16, rows=8) {
+function makeTemplateSamples(imageData, x, y, w, h, cols=16, rows=16) {
   const out=[];
   for(let ry=0; ry<rows; ry++) for(let rx=0; rx<cols; rx++) {
     const px=Math.min(imageData.width-1, Math.max(0, Math.floor(x+(rx+0.5)*w/cols)));
@@ -646,11 +646,11 @@ function makeTemplateSamples(imageData, x, y, w, h, cols=16, rows=8) {
   return {values:out,mean,norm,cols,rows,w,h};
 }
 
-function samplePatchScore(imageData, template, x, y, cols=16, rows=8) {
+function samplePatchScore(imageData, template, x, y, w=template.w, h=template.h) {
   const vals=[];
-  for(let ry=0; ry<rows; ry++) for(let rx=0; rx<cols; rx++) {
-    const px=Math.min(imageData.width-1, Math.max(0, Math.floor(x+(rx+0.5)*template.w/cols)));
-    const py=Math.min(imageData.height-1, Math.max(0, Math.floor(y+(ry+0.5)*template.h/rows)));
+  for(let ry=0; ry<template.rows; ry++) for(let rx=0; rx<template.cols; rx++) {
+    const px=Math.min(imageData.width-1, Math.max(0, Math.floor(x+(rx+0.5)*w/template.cols)));
+    const py=Math.min(imageData.height-1, Math.max(0, Math.floor(y+(ry+0.5)*h/template.rows)));
     vals.push(grayPixel(imageData.data,imageData.width,px,py));
   }
   const mean=vals.reduce((a,b)=>a+b,0)/vals.length;
@@ -662,40 +662,68 @@ function samplePatchScore(imageData, template, x, y, cols=16, rows=8) {
   return dot/(template.norm*Math.sqrt(norm)||1);
 }
 
-function runTemplateMatch(sourceCanvas, referenceBox, options={}) {
+function runGlyphTemplateMatch(sourceCanvas, referenceMatch) {
   const srcCtx=sourceCanvas.getContext('2d',{willReadFrequently:true});
   const data=srcCtx.getImageData(0,0,sourceCanvas.width,sourceCanvas.height);
-  const rw=Math.max(12,Math.round(referenceBox.w));
-  const rh=Math.max(10,Math.round(referenceBox.h));
-  const rx=Math.max(0,Math.min(sourceCanvas.width-rw,Math.round(referenceBox.x)));
-  const ry=Math.max(0,Math.min(sourceCanvas.height-rh,Math.round(referenceBox.y)));
-  const template=makeTemplateSamples(data,rx,ry,rw,rh,16,8);
-  const candidates=[];
-  const step=4;
-  const scales=[1];
-  for(const sc of scales){
-    const w=Math.max(12,Math.round(rw*sc)), h=Math.max(10,Math.round(rh*sc));
-    if(w>=sourceCanvas.width || h>=sourceCanvas.height) continue;
-    for(let y=0;y<=sourceCanvas.height-h;y+=step){
-      for(let x=0;x<=sourceCanvas.width-w;x+=step){
-        if(Math.abs(x-rx)<w*0.7 && Math.abs(y-ry)<h*0.7) continue;
-        const score=samplePatchScore(data,template,x,y,16,8);
-        if(score>=0.72) candidates.push({x,y,w,h,score});
+  const symbols=(referenceMatch.symbols||[]).slice(0,2);
+  if(symbols.length<2) return {error:'基準HITから2文字のsymbol bboxを取得できません。'};
+
+  const glyphs=symbols.map((u,i)=>{
+    const b=u.bbox;
+    return {
+      ch:u.ch,
+      x:Math.round(b.x0), y:Math.round(b.y0),
+      w:Math.max(6,Math.round(b.x1-b.x0)), h:Math.max(6,Math.round(b.y1-b.y0)),
+      index:i
+    };
+  });
+
+  const step=5;
+  const threshold=.72;
+  const perGlyph=[];
+  for(const g of glyphs){
+    const template=makeTemplateSamples(data,g.x,g.y,g.w,g.h,12,12);
+    const candidates=[];
+    for(let y=0;y<=sourceCanvas.height-g.h;y+=step){
+      for(let x=0;x<=sourceCanvas.width-g.w;x+=step){
+        if(Math.abs(x-g.x)<g.w*1.2 && Math.abs(y-g.y)<g.h*1.2) continue;
+        const score=samplePatchScore(data,template,x,y,g.w,g.h);
+        if(score>=threshold) candidates.push({x,y,w:g.w,h:g.h,score,ch:g.ch});
       }
     }
+    candidates.sort((a,b)=>b.score-a.score);
+    perGlyph.push({glyph:g,template,candidates:candidates.slice(0,80),rawCount:candidates.length});
   }
-  candidates.sort((a,b)=>b.score-a.score);
-  const topCandidates=candidates.slice(0,10);
-  const picked=[];
-  for(const c of candidates){
-    if(picked.some(p=>{
-      const ix=Math.max(p.x,c.x),iy=Math.max(p.y,c.y),ax=Math.min(p.x+p.w,c.x+c.w),ay=Math.min(p.y+p.h,c.y+c.h);
-      return ax>ix&&ay>iy&&((ax-ix)*(ay-iy))/Math.min(p.w*p.h,c.w*c.h)>.35;
-    })) continue;
-    picked.push(c);
-    if(picked.length>=12) break;
+
+  const a=perGlyph[0], b=perGlyph[1];
+  const pairs=[];
+  const expectedDx=glyphs[1].x-glyphs[0].x;
+  const expectedDy=glyphs[1].y-glyphs[0].y;
+  for(const ca of a.candidates){
+    for(const cb of b.candidates){
+      const dx=cb.x-ca.x, dy=cb.y-ca.y;
+      const dxErr=Math.abs(dx-expectedDx);
+      const dyErr=Math.abs(dy-expectedDy);
+      if(dxErr>Math.max(12,expectedDx*.45) || dyErr>Math.max(10,glyphs[0].h*.5)) continue;
+      const positionScore=Math.max(0,1-dxErr/Math.max(12,expectedDx*.45))*0.7 + Math.max(0,1-dyErr/Math.max(10,glyphs[0].h*.5))*0.3;
+      const score=(ca.score+cb.score)/2 + positionScore*.08;
+      pairs.push({x:ca.x,y:ca.y,w:(cb.x+cb.w)-ca.x,h:Math.max(ca.h,cb.h),score,scoreA:ca.score,scoreB:cb.score,dx,dy});
+    }
   }
-  return {reference:{x:rx,y:ry,w:rw,h:rh}, candidates:picked, topCandidates, scannedStep:step, threshold:.72, rawCandidateCount:candidates.length};
+  pairs.sort((a,b)=>b.score-a.score);
+  const dedup=[];
+  for(const p of pairs){
+    if(dedup.some(q=>Math.abs(q.x-p.x)<12 && Math.abs(q.y-p.y)<12)) continue;
+    dedup.push(p);
+    if(dedup.length>=20) break;
+  }
+  return {
+    glyphs,
+    step,threshold,
+    perGlyph:perGlyph.map(x=>({ch:x.glyph.ch,rawCount:x.rawCount,candidates:x.candidates.slice(0,10)})),
+    pairs:dedup,
+    expectedDx,expectedDy
+  };
 }
 
 function editDistance(a,b){const A=[...a],B=[...b],d=Array.from({length:A.length+1},()=>Array(B.length+1).fill(0));for(let i=0;i<=A.length;i++)d[i][0]=i;for(let j=0;j<=B.length;j++)d[0][j]=j;for(let i=1;i<=A.length;i++)for(let j=1;j<=B.length;j++)d[i][j]=Math.min(d[i-1][j]+1,d[i][j-1]+1,d[i-1][j-1]+(A[i-1]===B[j-1]?0:1));return d[A.length][B.length];}
@@ -1269,7 +1297,7 @@ async function run(){
     const {results,scale,ocrCanvas}=await collectOcrResults(worker,target);
     const matches=mergeMatches(results);
 
-    // V62実験：完全一致が1件以上ある場合、その実画像をテンプレートとして全体を探索。
+    // V63実験：完全一致が1件以上ある場合、その実画像をテンプレートとして全体を探索。
     // 誤爆防止のため、候補は診断にも出すが自動黒塗りにはまだ採用しない。
     let templateResult=null;
     if(matches.length){
@@ -1418,29 +1446,30 @@ async function diagnoseOCR(){
     const verifyElapsed=performance.now()-verifyStarted;
     lines.push(`検証時間：${(verifyElapsed/1000).toFixed(2)}秒 / 修正：${changedCount}件 / 対象：${exactMatches.length}件`);
 
-    // V62.1実験：テンプレート照合の候補を診断に必ず出す。閾値未満も含め、上位候補を確認する。
-    lines.push("",`===== テンプレート照合実験（V62.1） =====`);
+    // V63実験：文字列全体ではなく、OCRが拾えた各文字を個別テンプレート化して組み合わせる。
+    lines.push("",`===== 文字単体テンプレート照合実験（V63） =====`);
     if(exactMatches.length){
       const ref=exactMatches[0];
-      const tr=runTemplateMatch(canvas,{x:ref.x0,y:ref.y0,w:ref.x1-ref.x0,h:ref.y1-ref.y0});
-      const rr=tr.reference;
-      lines.push(`基準テンプレート：(${Math.round(rr.x)},${Math.round(rr.y)},w${Math.round(rr.w)},h${Math.round(rr.h)})`);
-      lines.push(`走査間隔：${tr.scannedStep}px / 採用閾値：${tr.threshold.toFixed(2)} / 閾値以上の生候補：${tr.rawCandidateCount}件`);
-      if(tr.topCandidates?.length){
-        lines.push(`上位候補（閾値未満も表示）：`);
-        tr.topCandidates.forEach((c,i)=>lines.push(`  候補${i+1}: score ${c.score.toFixed(3)} / (${c.x},${c.y},w${c.w},h${c.h})${c.score>=tr.threshold?' ★閾値以上':''}`));
+      const gr=runGlyphTemplateMatch(canvas,ref);
+      if(gr.error){
+        lines.push(gr.error);
       }else{
-        lines.push(`上位候補：なし（走査結果がありません）`);
+        lines.push(`基準文字：${gr.glyphs.map(g=>`「${g.ch}」=(${g.x},${g.y},w${g.w},h${g.h})`).join(' / ')}`);
+        lines.push(`走査間隔：${gr.step}px / 採用閾値：${gr.threshold.toFixed(2)} / 想定文字間隔：dx=${gr.expectedDx}, dy=${gr.expectedDy}`);
+        gr.perGlyph.forEach(g=>{
+          lines.push(`文字「${g.ch}」：閾値以上 ${g.rawCount}件`);
+          g.candidates.slice(0,5).forEach((c,i)=>lines.push(`  候補${i+1}: score ${c.score.toFixed(3)} / (${c.x},${c.y},w${c.w},h${c.h})`));
+        });
+        if(gr.pairs.length){
+          lines.push(`2文字セット成立候補：${gr.pairs.length}件`);
+          gr.pairs.slice(0,10).forEach((p,i)=>lines.push(`  セット${i+1}: score ${p.score.toFixed(3)} / ね(${p.x},${p.y}) + る(dx=${p.dx},dy=${p.dy}) / 個別 ${p.scoreA.toFixed(3)}・${p.scoreB.toFixed(3)}`));
+        }else{
+          lines.push(`2文字セット成立候補：0件`);
+        }
+        lines.push(`※ 文字単体の形＋2文字の相対位置だけを見ています。今回は黒塗りには使用しません。`);
       }
-      if(tr.candidates.length){
-        lines.push(`重複整理後の閾値以上候補：${tr.candidates.length}件`);
-        tr.candidates.forEach((c,i)=>lines.push(`  採用候補${i+1}: score ${c.score.toFixed(3)} / (${c.x},${c.y},w${c.w},h${c.h})`));
-      }else{
-        lines.push(`重複整理後の閾値以上候補：0件`);
-      }
-      lines.push(`※ 基準位置そのものは除外しています。候補はまだ黒塗りには使用しません。`);
     }else{
-      lines.push(`完全一致HITがないためテンプレートを作成できません。`);
+      lines.push(`完全一致HITがないため文字テンプレートを作成できません。`);
     }
 
     lines.push("",
