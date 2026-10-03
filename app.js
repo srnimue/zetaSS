@@ -818,8 +818,10 @@ async function recognizeLocalRegionVariant(worker, crop, target, mode) {
   try {
     const result = await worker.recognize(input, {tessedit_pageseg_mode:'7'});
     raw = String(result?.data?.text || '').replace(/\s+/g,' ').trim();
+    const unitLines = [];
     for (const line of (result?.data?.lines || [])) {
       const units = extractLineUnits(line);
+      unitLines.push(units);
       const found = findTargetInUnits(units, target);
       if (found.length) {
         hit = true;
@@ -831,7 +833,7 @@ async function recognizeLocalRegionVariant(worker, crop, target, mode) {
   } finally {
     if (input !== crop) { input.width = 1; input.height = 1; }
   }
-  return {mode, raw, hit, matches};
+  return {mode, raw, hit, matches, unitLines};
 }
 
 // V68実験：V64の「文字っぽい横長領域」の検出を維持し、
@@ -924,6 +926,113 @@ async function collectTextRegionMatches(worker, sourceCanvas, target) {
   }
 
   return {detected, tested, matches, elapsed: performance.now() - started};
+}
+
+// V70実験：完全一致したHITの前後にある「文脈文字」を手掛かりに、
+// 局所OCRでは対象文字そのものを認識できなかった地点を救出する。
+// 例：「ねるちゃん」を1件でも認識できた場合、「ちゃん」が認識できた
+// 別地点について、その直前に対象文字がある可能性を候補にする。
+// 誤爆を抑えるため、文脈は2文字以上、かつ位置関係が自然な場合だけ採用する。
+function collectContextRescueMatches(baseResults, localTested, target) {
+  const contexts = [];
+  const targetChars = [...target];
+  const contextLengths = [3, 2];
+
+  for (const result of baseResults || []) {
+    for (const m of result.matches || []) {
+      const syms = m.symbols || [];
+      const idx = syms.length - targetChars.length;
+      if (idx < 0) continue;
+      // 同じHITに対して、右側・左側の文脈を候補化する。
+      for (const len of contextLengths) {
+        const right = syms.length >= targetChars.length + len
+          ? syms.slice(targetChars.length, targetChars.length + len)
+          : [];
+        const left = syms.length >= targetChars.length + len
+          ? syms.slice(0, len)
+          : [];
+        if (right.length === len) {
+          const text = right.map(u => u.ch).join('');
+          if (text.length === len) contexts.push({side:'right', text, len, ref:m});
+        }
+        if (left.length === len) {
+          const text = left.map(u => u.ch).join('');
+          if (text.length === len) contexts.push({side:'left', text, len, ref:m});
+        }
+      }
+    }
+  }
+
+  // 長い文脈を優先し、重複を除く。
+  const unique = [];
+  for (const c of contexts.sort((a,b)=>b.len-a.len)) {
+    if (!unique.some(u => u.side===c.side && u.text===c.text)) unique.push(c);
+  }
+  if (!unique.length) return {matches:[], candidates:[], contexts:[]};
+
+  const rescued=[];
+  const candidates=[];
+  const targetWidthFromRef = m => Math.max(8, m.x1-m.x0);
+  const targetHeightFromRef = m => Math.max(8, m.y1-m.y0);
+
+  for (const item of localTested || []) {
+    for (const variant of item.variants || []) {
+      for (const units of variant.unitLines || []) {
+        const text = units.map(u=>u.ch).join('');
+        for (const c of unique) {
+          let from=0;
+          while (from <= text.length-c.len) {
+            const at=text.indexOf(c.text,from);
+            if (at<0) break;
+            const ctx=units.slice(at,at+c.len);
+            if (ctx.length===c.len) {
+              const first=ctx[0]?.bbox, last=ctx[ctx.length-1]?.bbox;
+              if (first && last) {
+                const ref=c.ref;
+                const tw=targetWidthFromRef(ref), th=targetHeightFromRef(ref);
+                let x0,y0,x1,y1;
+                if (c.side==='right') {
+                  x1=first.x0;
+                  x0=x1-tw;
+                  y0=Math.min(...ctx.map(u=>u.bbox.y0));
+                  y1=Math.max(...ctx.map(u=>u.bbox.y1));
+                } else {
+                  x0=last.x1;
+                  x1=x0+tw;
+                  y0=Math.min(...ctx.map(u=>u.bbox.y0));
+                  y1=Math.max(...ctx.map(u=>u.bbox.y1));
+                }
+                const contextW=Math.max(1,last.x1-first.x0);
+                const contextH=Math.max(1,y1-y0);
+                const gap = c.side==='right'
+                  ? Math.abs(first.x0-x0)
+                  : Math.abs(x1-last.x1);
+                // 局所OCRの座標は元画像座標へ戻している。
+                // 文脈との距離が大きすぎる候補は誤爆しやすいので捨てる。
+                const maxGap=Math.max(18,tw*0.45);
+                if (gap<=maxGap && contextH<=Math.max(th*1.8,80)) {
+                  const box={x0,y0:y0+(contextH-th)*0.5,x1,y1:y0+(contextH-th)*0.5+th};
+                  candidates.push({box,side:c.side,context:c.text,len:c.len,raw:variant.raw,region:{x:item.x,y:item.y,w:item.w,h:item.h}});
+                }
+              }
+            }
+            from=at+1;
+          }
+        }
+      }
+    }
+  }
+
+  for (const c of candidates) {
+    const dup=rescued.some(o=>{
+      const ix0=Math.max(o.x0,c.box.x0), iy0=Math.max(o.y0,c.box.y0);
+      const ix1=Math.min(o.x1,c.box.x1), iy1=Math.min(o.y1,c.box.y1);
+      if(ix1<=ix0||iy1<=iy0)return false;
+      return (ix1-ix0)*(iy1-iy0) / Math.min((o.x1-o.x0)*(o.y1-o.y0),(c.box.x1-c.box.x0)*(c.box.y1-c.box.y0)) > .45;
+    });
+    if(!dup) rescued.push({...c.box,context:c.context,side:c.side,contextLen:c.len,source:'文脈救出'});
+  }
+  return {matches:rescued,candidates,contexts:unique};
 }
 
 function editDistance(a,b){const A=[...a],B=[...b],d=Array.from({length:A.length+1},()=>Array(B.length+1).fill(0));for(let i=0;i<=A.length;i++)d[i][0]=i;for(let j=0;j<=B.length;j++)d[0][j]=j;for(let i=1;i<=A.length;i++)for(let j=1;j<=B.length;j++)d[i][j]=Math.min(d[i-1][j]+1,d[i][j-1]+1,d[i-1][j-1]+(A[i-1]===B[j-1]?0:1));return d[A.length][B.length];}
@@ -1550,6 +1659,19 @@ async function run(){
       }
     }
 
+    // V70：完全一致HITの前後にある文脈文字を使って、対象文字そのものを
+    // OCRできなかった地点を追加で推定する。まずは診断と同じ局所OCR結果だけを対象にする。
+    const contextRescue = collectContextRescueMatches(results, regionScan.tested, target);
+    for (const c of contextRescue.matches) {
+      const duplicate = paintBoxes.some(o => {
+        const ix0=Math.max(o.x,c.x0), iy0=Math.max(o.y,c.y0);
+        const ix1=Math.min(o.x+o.w,c.x1), iy1=Math.min(o.y+o.h,c.y1);
+        if(ix1<=ix0||iy1<=iy0)return false;
+        return (ix1-ix0)*(iy1-iy0)/Math.min(o.w*o.h,(c.x1-c.x0)*(c.y1-c.y0))>.45;
+      });
+      if(!duplicate) paintBoxes.push({x:c.x0,y:c.y0,w:c.x1-c.x0,h:c.y1-c.y0,symbols:[],source:'文脈救出',rescue:false});
+    }
+
     // OCR黒塗りを編集可能なオブジェクトとして登録する。
     // OCR専用の補正・余白計算はここで一度だけ行い、以後の移動・サイズ変更では
     // その最終黒塗り矩形をそのまま編集する。
@@ -1571,7 +1693,8 @@ async function run(){
     redrawFromBase();
     saveBtn.disabled=false; manualBtn.disabled=false;
     const localAdded = Math.max(0, paintBoxes.length - matches.length);
-    status(`黒塗り完了：${manualStamps.length}箇所\n通常OCR：${matches.length}箇所 / 追加局所OCR：${localAdded}箇所`);
+    const contextAdded = contextRescue.matches.length;
+    status(`黒塗り完了：${manualStamps.length}箇所\n通常OCR：${matches.length}箇所 / 追加局所OCR：${localAdded}箇所 / 文脈救出：${contextAdded}箇所`);
   }catch(error){status("OCRでエラーが発生しました。下のエラー詳細を確認してください。",error);}
 }
 
@@ -1679,6 +1802,15 @@ async function diagnoseOCR(){
     });
     lines.push(`局所OCR時間：${(regionResult.elapsed/1000).toFixed(2)}秒`);
     lines.push(`※ V68の全領域走査方式を診断用にも使用。V69本体では、この局所OCRのHITを追加の黒塗り候補として統合します。`);
+
+    // V70実験：完全一致HITから得た前後の文脈を、局所OCR結果へ照合する。
+    lines.push("",`===== 文脈文字による救出実験（V70） =====`);
+    const contextResult=collectContextRescueMatches(results, regionResult.tested, target);
+    lines.push(`学習文脈：${contextResult.contexts.map(c=>`${c.side==='right'?'後':'前'}「${c.text}」`).join(' / ') || 'なし'}`);
+    lines.push(`文脈候補：${contextResult.candidates.length}件 / 救出候補：${contextResult.matches.length}件`);
+    contextResult.matches.slice(0,20).forEach((c,i)=>{
+      lines.push(`  候補${i+1}: ${c.side==='right'?'後方':'前方'}文脈「${c.context}」 / bbox=(${Math.round(c.x0)},${Math.round(c.y0)},w${Math.round(c.x1-c.x0)},h${Math.round(c.y1-c.y0)}) / 領域=(${c.region.x},${c.region.y},w${c.region.w},h${c.region.h})`);
+    });
 
     // V63実験：文字列全体ではなく、OCRが拾えた各文字を個別テンプレート化して組み合わせる。
     lines.push("",`===== 文字単体テンプレート照合実験（V63） =====`);
