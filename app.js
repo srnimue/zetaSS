@@ -829,20 +829,20 @@ async function recognizeLocalRegionVariant(worker, crop, target, mode) {
   return {mode, raw, hit};
 }
 
-// V67実験：V64の「文字っぽい横長領域」の検出をそのまま維持し、
-// まず通常の局所OCRを実行。通常OCRで対象が見つからなかった領域だけ、
-// 前処理違い（コントラスト強調・二値化・反転）を追加して局所OCRする。
-// V65の横分割は使わない。診断専用で、黒塗りには使用しない。
+// V68実験：V64の「文字っぽい横長領域」の検出を維持し、
+// 上位16領域だけでなく検出された全領域を通常OCRする。
+// まず「未走査領域に3個目が存在するか」を確認するためのカバレッジ実験。
+// 前処理追加はこの版では行わず、OCR回数を必要最小限にする。診断専用。
 async function runTextRegionExperiment(worker,sourceCanvas,target) {
   const detected=detectTextLikeRegions(sourceCanvas);
   const tested=[];
   const started=performance.now();
   const SCALE=2;
-  const EXTRA_MODES=['グレー＋コントラスト','二値化180','反転'];
-  let extraRuns=0;
 
-  // V64と同じ上限・順序。ここを変えず、まずV64の再現性を確保する。
-  for(const r of detected.regions.slice(0,16)) {
+  // V64では上位16領域だけをOCRしていたため、検出された残りの領域に
+  // 目的の文字が存在していても拾えない可能性があった。V68では全領域を
+  // 通常OCRして、まず「走査範囲不足」なのかどうかを切り分ける。
+  for(const r of detected.regions) {
     const crop=document.createElement('canvas');
     crop.width=Math.max(1,Math.round(r.w*SCALE));
     crop.height=Math.max(1,Math.round(r.h*SCALE));
@@ -851,28 +851,14 @@ async function runTextRegionExperiment(worker,sourceCanvas,target) {
     cctx.imageSmoothingQuality='high';
     cctx.drawImage(sourceCanvas,r.x,r.y,r.w,r.h,0,0,crop.width,crop.height);
 
-    const variants=[];
     const normal=await recognizeLocalRegionVariant(worker,crop,target,'通常');
-    variants.push(normal);
-
-    // 通常OCRでHITした領域は追加OCRしない。同じ物理地点を何度も拾うのを防ぎ、
-    // V64の速度感もできるだけ維持する。
-    if(!normal.hit) {
-      for(const mode of EXTRA_MODES) {
-        const result=await recognizeLocalRegionVariant(worker,crop,target,mode);
-        variants.push(result);
-        extraRuns++;
-      }
-    }
-
-    const hitVariants=variants.filter(v=>v.hit);
     tested.push({
       ...r,
-      hit:hitVariants.length>0,
+      hit:normal.hit,
       baseHit:normal.hit,
-      extraHit:hitVariants.some(v=>v.mode!=='通常'),
-      variants,
-      raw:variants.map(v=>`${v.mode}: ${v.raw}`).join(' / ')
+      extraHit:false,
+      variants:[normal],
+      raw:normal.raw
     });
     crop.width=1; crop.height=1;
   }
@@ -880,8 +866,8 @@ async function runTextRegionExperiment(worker,sourceCanvas,target) {
     detected,
     tested,
     elapsed:performance.now()-started,
-    extraRuns,
-    extraModes:EXTRA_MODES
+    extraRuns:0,
+    extraModes:[]
   };
 }
 
@@ -1599,10 +1585,10 @@ async function diagnoseOCR(){
 
     // V67実験：V64の文字領域推定を維持し、通常OCRで見つからなかった領域だけ
     // 前処理違いの局所OCRを追加する。
-    lines.push("",`===== 文字領域推定＋局所前処理OCR実験（V67） =====`);
+    lines.push("",`===== 文字領域全走査＋局所OCR実験（V68） =====`);
     const regionResult=await runTextRegionExperiment(worker,canvas,target);
     lines.push(`検出候補：${regionResult.detected.regions.length}領域 / 局所OCR実行：${regionResult.tested.length}領域 / 走査間隔：${regionResult.detected.sample}px / 通常：2倍・PSM7`);
-    lines.push(`追加前処理：${regionResult.extraModes.join(' / ')} / 追加OCR実行：${regionResult.extraRuns}回`);
+    lines.push(`追加前処理：なし / 追加OCR実行：0回`);
     const regionHits=regionResult.tested.filter(r=>r.hit);
     const baseHits=regionResult.tested.filter(r=>r.baseHit);
     const extraHits=regionResult.tested.filter(r=>r.extraHit);
@@ -1614,7 +1600,7 @@ async function diagnoseOCR(){
       lines.push(`  領域${i+1}: (${r.x},${r.y},w${r.w},h${r.h}) / ${r.mode} / ${display} / ${rawPreview}`);
     });
     lines.push(`局所OCR時間：${(regionResult.elapsed/1000).toFixed(2)}秒`);
-    lines.push(`※ V64の領域検出を維持し、通常OCRで未検出の領域だけ前処理を追加しています。今回は黒塗りには使用しません。`);
+    lines.push(`※ V64の領域検出を維持し、検出された全領域を通常OCRしました。今回は走査範囲の不足を確認する実験で、前処理追加・黒塗りへの使用はありません。`);
 
     // V63実験：文字列全体ではなく、OCRが拾えた各文字を個別テンプレート化して組み合わせる。
     lines.push("",`===== 文字単体テンプレート照合実験（V63） =====`);
