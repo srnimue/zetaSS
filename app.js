@@ -476,8 +476,12 @@ async function getWorker(preferredLang = "jpn") {
         workerLang = null;
     }
 
-    status(`${preferredLang === "jpn" ? "日本語" : "英語"}OCRエンジンを準備中…\n初回は少し時間がかかります。`);
+    status(`${preferredLang === "jpn" ? "日本語" : "英語"}・高精度OCRモデルを準備中…\n初回は大きな学習データの読み込みがあります。`);
     worker = await Tesseract.createWorker(preferredLang, 1, {
+        // V61実験：通常の4.0.0_best_intではなく、元のtessdata_bestを使用。
+        // 既存のOEM 1（LSTM）のまま、モデルだけを高精度版へ切り替える。
+        // app.jsのクエリもV61へ更新して、古いJavaScriptキャッシュを避ける。
+        langPath: "https://cdn.jsdelivr.net/gh/naptha/tessdata@gh-pages/4.0.0_best",
         logger: message => {
             if (message?.progress != null) {
                 status("実行中…");
@@ -779,32 +783,6 @@ function makeSourceCandidateCrop(candidate, scale) {
   return { canvas: c, x0: sx0, y0: sy0 };
 }
 
-async function recognizeRegionVariant(worker, inputCanvas, target, mode, scale, offsetX, offsetY, psm = "6") {
-  const result = await worker.recognize(inputCanvas, {tessedit_pageseg_mode:String(psm)});
-  const data = result?.data || {}, lines = data.lines || [], matches = [];
-  for (const line of lines) {
-    const units = extractLineUnits(line), hits = findTargetInUnits(units, target), lineText = units.map(u => u.ch).join("");
-    for (const hit of hits) {
-      const mapBox = b => b ? {
-        x0:(b.x0 + offsetX) / scale,
-        y0:(b.y0 + offsetY) / scale,
-        x1:(b.x1 + offsetX) / scale,
-        y1:(b.y1 + offsetY) / scale
-      } : null;
-      matches.push({
-        x0:(hit.targetBox.x0 + offsetX) / scale,
-        y0:(hit.targetBox.y0 + offsetY) / scale,
-        x1:(hit.targetBox.x1 + offsetX) / scale,
-        y1:(hit.targetBox.y1 + offsetY) / scale,
-        mode,
-        lineText,
-        symbols:hit.symbols.map(s => ({...s, bbox:mapBox(s.bbox), prevRawBbox:mapBox(s.prevRawBbox)}))
-      });
-    }
-  }
-  return {mode, lines, words:data.words||[], rawText:String(data.text||""), matches, near:findNearCandidates(lines,target)};
-}
-
 async function recognizeVariant(worker,inputCanvas,target,mode,scale){const result=await worker.recognize(inputCanvas,{tessedit_pageseg_mode:"11"});const data=result?.data||{},lines=data.lines||[],matches=[];for(const line of lines){const units=extractLineUnits(line),hits=findTargetInUnits(units,target),lineText=units.map(u=>u.ch).join("");for(const hit of hits){
     // symbols[].bbox は OCR用に拡大したcanvas(scale倍)の座標のまま渡ってくる。
     // x0/y0/x1/y1 はscaleで割って元画像座標に戻しているので、symbolsも同じ座標系に
@@ -900,39 +878,14 @@ function buildOcrCanvas(){
   return {canvas:oc,scale};
 }
 
-async function collectRegionOcrResults(worker, ocrCanvas, target, scale) {
-  const results = [];
-  const h = ocrCanvas.height;
-  const bandH = Math.min(h, Math.max(1, Math.round(h * 0.45)));
-  const step = Math.max(1, Math.round(h * 0.275));
-  const starts = [0, step, Math.max(0, h - bandH)];
-  const uniqueStarts = [...new Set(starts)];
-
-  for (let i = 0; i < uniqueStarts.length; i++) {
-    const y0 = uniqueStarts[i];
-    const y1 = Math.min(h, y0 + bandH);
-    const crop = document.createElement('canvas');
-    crop.width = ocrCanvas.width;
-    crop.height = Math.max(1, y1 - y0);
-    const c = crop.getContext('2d');
-    c.imageSmoothingEnabled = true;
-    c.imageSmoothingQuality = 'high';
-    c.drawImage(ocrCanvas, 0, y0, ocrCanvas.width, crop.height, 0, 0, crop.width, crop.height);
-    status(`領域OCR中…\n${i+1}/${uniqueStarts.length}領域を確認しています。`);
-    try {
-      results.push(await recognizeRegionVariant(worker, crop, target, `領域${i+1} / PSM 6`, scale, 0, y0, 6));
-    } finally {
-      crop.width = 1; crop.height = 1;
-    }
-  }
-  return results;
-}
-
 async function collectOcrResults(worker,target){
   const {canvas:oc,scale}=buildOcrCanvas();
   const results=[];
-  const stats={primaryMs:0,fallbackMs:0,regionMs:0,primaryHitCount:0,fallbackUsed:false,regionUsed:true,primaryName:"グレー＋コントラスト",fallbackNames:["二値化180","二値化220","反転"],regionCount:3};
+  const stats={primaryMs:0,fallbackMs:0,primaryHitCount:0,fallbackUsed:false,primaryName:"グレー＋コントラスト",fallbackNames:["二値化180","二値化220","反転"]};
 
+  // まず今回の実験で最も安定していた「グレー＋コントラスト」だけを実行。
+  // ここで1件でも正確に見つかれば、追加の全体OCRは省略する。
+  // ※診断用の速度実験版。見落としの有無を確認するため、V32は別に保存しておく。
   const primaryStarted=performance.now();
   status("実行中…");
   const primaryVariant=makeOcrVariant(oc,stats.primaryName);
@@ -945,25 +898,19 @@ async function collectOcrResults(worker,target){
     stats.primaryMs=performance.now()-primaryStarted;
   }
 
-  // V60実験：全体OCRで拾えなかった行が「文字認識能力」ではなく
-  // 「ページ全体のレイアウト解析」で落ちている可能性を検証する。
-  // 画像を横方向の重なり付き領域に分け、各領域をPSM 6（単一ブロック）で読む。
-  const regionStarted=performance.now();
-  const regionResults=await collectRegionOcrResults(worker,oc,target,scale);
-  results.push(...regionResults);
-  stats.regionMs=performance.now()-regionStarted;
-
-  // 領域OCRで拾えなかった場合だけ、従来の追加全体OCRを実行する。
-  // V60では診断を優先し、領域OCRそのものの効果が分かるようにしている。
-  const regionHitCount=regionResults.reduce((n,r)=>n+r.matches.length,0);
-  if(stats.primaryHitCount===0 && regionHitCount===0){
+  // グレー＋コントラストで1件も見つからなかった場合だけ、
+  // 補助的な全体OCRを追加する。通常・グレースケールは今回の実験では外す。
+  if(stats.primaryHitCount===0){
     stats.fallbackUsed=true;
     const fallbackStarted=performance.now();
     for(const name of stats.fallbackNames){
       status("実行中…");
       const variant=makeOcrVariant(oc,name);
-      try { results.push(await recognizeVariant(worker,variant,target,name,scale)); }
-      finally { if(variant!==oc){variant.width=1;variant.height=1;} }
+      try {
+        results.push(await recognizeVariant(worker,variant,target,name,scale));
+      } finally {
+        if(variant!==oc){variant.width=1;variant.height=1;}
+      }
     }
     stats.fallbackMs=performance.now()-fallbackStarted;
   }
@@ -1334,7 +1281,7 @@ async function diagnoseOCR(){
     const candidateCount=results.reduce((n,r)=>n+r.near.length,0);
     const lines=[`対象文字：${targetText.value}`,`正規化後：${target}`,""];
     for(const r of results){
-      lines.push(`===== ${r.mode} =====`,`HIT：${r.matches.length}件`);
+      lines.push(`===== ${r.mode} / PSM 11 =====`,`HIT：${r.matches.length}件`);
       for(const m of r.matches){
         const b={x0:m.x0*scale,y0:m.y0*scale,x1:m.x1*scale,y1:m.y1*scale};
         lines.push(`  HIT行：「${m.lineText}」`,`    target bbox=(${b.x0},${b.y0})-(${b.x1},${b.y1})`);
@@ -1398,15 +1345,14 @@ async function diagnoseOCR(){
       `===== 処理時間 =====`,
       `OCR全体：${(ocrElapsed/1000).toFixed(2)}秒`,
       `  第1段階（グレー＋コントラスト）：${(stats.primaryMs/1000).toFixed(2)}秒 / HIT ${stats.primaryHitCount}件`,
-      `  領域OCR：${(stats.regionMs/1000).toFixed(2)}秒 / ${stats.regionCount}領域`,
       `  追加全体OCR：${stats.fallbackUsed ? (stats.fallbackMs/1000).toFixed(2)+"秒 / 実行" : "0.00秒 / 省略"}`,
       `候補再OCR：${(refineElapsed/1000).toFixed(2)}秒`,
       `診断全体：${(totalElapsed/1000).toFixed(2)}秒`,
       `候補地点：${candidateGroups.length} / 近似候補救出：${refine.fastRecovered} / 再OCR実行：${refine.attempted} / 再OCR追加パス：${refine.extraPasses} / 既存HITで省略：${refine.skippedExact}`,
       "",
-      `※ V60実験：全体OCRに加えて、画像を重なり付きの横方向3領域に分け、各領域をPSM 6でOCRします。`,
-      `※ 目的は、Tesseract自体が読めないのか、ページ全体のレイアウト解析で行を落としているのかを切り分けることです。`,
-      `※ 領域OCRは一次HITの有無に関係なく実行します。速度より検証を優先した実験版です。`,
+      `※ 今回は速度実験として、まずグレー＋コントラストだけを全体OCRします。`,
+      `※ 第1段階で1件以上HITした場合、二値化180・220・反転の全体OCRは省略します。`,
+      `※ 第1段階でHITが0件の場合だけ、二値化180・220・反転を追加します。`,
       `※ 候補地点は同じ位置付近の候補をまとめています。`,
       `※ 近似候補は、対象文字と同じ文字数で、3文字以上の対象なら「対象の1文字違い」程度を先に救出します。
 ※ 近似候補の黒塗り範囲は、候補地点全体ではなく採用候補自身のbboxを使います。`,
@@ -1422,7 +1368,7 @@ async function diagnoseOCR(){
       seen.push(m); const box=document.createElement('div'); box.className='ocr-debug-box'; box.style.borderColor='#22aa55'; box.style.left=`${tr.left+m.x0*tr.scaleX}px`; box.style.top=`${tr.top+m.y0*tr.scaleY}px`; box.style.width=`${(m.x1-m.x0)*tr.scaleX}px`; box.style.height=`${(m.y1-m.y0)*tr.scaleY}px`; const label=document.createElement('span'); label.className='ocr-debug-label'; label.textContent=`${r.mode}: ${target}`; box.appendChild(label); ocrDebugLayer.appendChild(box);
     }
     ocrDebugLayer.hidden=ocrDebugLayer.childElementCount===0;
-    status(`OCR診断完了。\n検出：${mergeMatches(results).length}件（重複除外） / 候補地点：${candidateGroups.length}箇所 / 再OCR確認：${refined.length}箇所\n処理時間：${(totalElapsed/1000).toFixed(2)}秒\n下の診断結果を確認してください。`);
+    status(`OCR診断完了。\n検出：${exactCount}件（重複を含む） / 候補地点：${candidateGroups.length}箇所 / 再OCR確認：${refined.length}箇所\n処理時間：${(totalElapsed/1000).toFixed(2)}秒\n下の診断結果を確認してください。`);
   }catch(error){canvas.hidden=false;canvas.style.display='block';status("OCR診断でエラーが発生しました。",error);}
 }
 function getCanvasPoint(event) {
