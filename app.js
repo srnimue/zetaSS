@@ -1762,6 +1762,10 @@ async function diagnoseOCR(){
     const refine=await refineNearCandidates(worker,results,ocrCanvas,target,scale);
     const refineElapsed=performance.now()-refineStarted;
     const {groups:candidateGroups,refined,acceptedNear}=refine;
+    // V70.1: 診断側でも文脈救出結果を必ず初期化する。
+    // 実処理(run)では局所OCR結果も渡すが、診断ではここまでで局所OCRを
+    // 実行していないため、まず全体OCRだけを対象にする。
+    const contextRescue = collectContextRescueCandidates(results, null, target);
     const totalElapsed=performance.now()-totalStarted;
     const exactCount=results.reduce((n,r)=>n+r.matches.length,0);
     const candidateCount=results.reduce((n,r)=>n+r.near.length,0);
