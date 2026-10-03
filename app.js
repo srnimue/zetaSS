@@ -10,6 +10,7 @@ const overlayName = $("overlayName");
 const stampMode = $("stampMode");
 const redactBtn = $("redactBtn");
 const diagnoseBtn = $("diagnoseBtn");
+const colorDiagnoseBtn = $("colorDiagnoseBtn");
 const manualBtn = $("manualBtn");
 const undoBtn = $("undoBtn");
 const resetBtn = $("resetBtn");
@@ -30,6 +31,7 @@ const zoomLabel = $("zoomLabel");
 
 if (!ENABLE_DIAGNOSTIC) {
     diagnoseBtn.hidden = true;
+    colorDiagnoseBtn.hidden = true;
     ocrDiagnostics.hidden = true;
     ocrDebugLayer.hidden = true;
 }
@@ -1741,68 +1743,31 @@ async function run(){
   }catch(error){status("OCRでエラーが発生しました。下のエラー詳細を確認してください。",error);}
 }
 
-async function compareOcrEngines(lang, target, baseOcrCanvas, scale, baseResults) {
-  const engines = [
-    {oem: 1, name: 'LSTM_ONLY', label: 'LSTMのみ'},
-    {oem: 0, name: 'TESSERACT_ONLY', label: 'Legacyのみ'},
-    {oem: 2, name: 'TESSERACT_LSTM_COMBINED', label: 'Legacy＋LSTM'},
-  ];
-  const out = [];
-  const started = performance.now();
-
-  // 現在のV70系ワーカーはOEM=1で作られているので、LSTMは既存結果をそのまま利用。
-  const lstmPrimary = baseResults.find(r => r.mode === 'グレー＋コントラスト') || baseResults[0];
-  if (lstmPrimary) {
-    out.push({
-      ...engines[0],
-      ok: true,
-      hits: lstmPrimary.matches?.length || 0,
-      rawText: lstmPrimary.rawText || '',
-      reused: true,
+async function diagnoseColorOnly(){
+  ocrDiagnostics.hidden=false;
+  ocrDebugLayer.hidden=true;
+  ocrDebugLayer.innerHTML="";
+  canvas.hidden=false; canvas.style.display='block';
+  try{
+    if(!sourceImage)throw new Error("先に画像を選択してください。");
+    const target=normalize(targetText.value);
+    if(!target)throw new Error("黒塗りする文字を入力してください。");
+    const totalStarted=performance.now();
+    const worker=await getWorker(getOcrLanguage(target));
+    status("色抽出診断中…\n文字色の候補領域を探しています。");
+    const result=await runColorTextRegionExperiment(worker,canvas,target);
+    const lines=[`対象文字：${targetText.value}`,`正規化後：${target}`,"",`===== V72 色領域抽出＋局所OCR =====`,
+      `色候補：${result.detected.regions.length}領域 / 局所OCR実行：${result.tested.length}領域 / 走査間隔：${result.detected.sample}px / 通常：2倍・PSM7`];
+    result.detected.stats.forEach(s=>lines.push(`  ${s.name}：サンプル該当率 ${(s.ratio*100).toFixed(2)}%（${s.pixelHits} / ${s.sampledPixels}）`));
+    lines.push(`対象文字HIT：${result.tested.filter(r=>r.hit).length}領域 / 実際のHIT：${result.matches.length}件`);
+    result.tested.forEach((r,i)=>{
+      lines.push(`  色領域${i+1}: ${r.mode} / (${r.x},${r.y},w${r.w},h${r.h}) / 密度${(r.coverage*100).toFixed(1)}% / ${r.hit?'★対象HIT':'HITなし'} / 「${r.raw.length>70?r.raw.slice(0,70)+'…':r.raw}」`);
+      (r.matches||[]).forEach((m,j)=>lines.push(`    → HIT${j+1}: bbox=(${Math.round(m.x0)},${Math.round(m.y0)},w${Math.round(m.x1-m.x0)},h${Math.round(m.y1-m.y0)}) / 「${m.lineText}」`));
     });
-  }
-
-  for (const engine of engines.slice(1)) {
-    let testWorker = null;
-    try {
-      status(`OCRエンジン比較中…\\n${engine.label} を準備しています。`);
-      testWorker = await Tesseract.createWorker(lang, engine.oem, {
-        logger: message => {
-          if (message?.progress != null) status(`OCRエンジン比較中…\\n${engine.label}`);
-        }
-      });
-      const variant = makeOcrVariant(baseOcrCanvas, 'グレー＋コントラスト');
-      const result = await testWorker.recognize(variant, {tessedit_pageseg_mode:'11'});
-      const lines = result?.data?.lines || [];
-      let hitCount = 0;
-      for (const line of lines) {
-        const units = extractLineUnits(line);
-        hitCount += findTargetInUnits(units, target).length;
-      }
-      out.push({
-        ...engine,
-        ok: true,
-        hits: hitCount,
-        rawText: String(result?.data?.text || ''),
-        reused: false,
-      });
-      if (variant !== baseOcrCanvas) { variant.width = 1; variant.height = 1; }
-    } catch (e) {
-      out.push({
-        ...engine,
-        ok: false,
-        hits: 0,
-        rawText: '',
-        error: e?.message || String(e),
-        reused: false,
-      });
-    } finally {
-      if (testWorker) {
-        try { await testWorker.terminate(); } catch (_) {}
-      }
-    }
-  }
-  return {engines: out, elapsed: performance.now() - started};
+    lines.push("",`色領域OCR時間：${(result.elapsed/1000).toFixed(2)}秒`,`診断全体：${((performance.now()-totalStarted)/1000).toFixed(2)}秒`,"","※ V72は色条件で候補領域を絞り、その領域だけPSM7 OCRします。まだ自動黒塗りには使用しません。");
+    ocrDiagnostics.textContent=lines.join("\n");
+    status(`色抽出診断完了。\n対象文字HIT：${result.matches.length}件\n処理時間：${((performance.now()-totalStarted)/1000).toFixed(2)}秒\n下の診断結果を確認してください。`);
+  }catch(error){status("色抽出診断でエラーが発生しました。",error);}
 }
 
 async function diagnoseOCR(){
@@ -1822,12 +1787,6 @@ async function diagnoseOCR(){
     const ocrStarted=performance.now();
     const {results,scale,ocrCanvas,stats}=await collectOcrResults(worker,target);
     const ocrElapsed=performance.now()-ocrStarted;
-
-    // V71実験：同じ「グレー＋コントラスト / PSM11」に対して、
-    // LSTM / Legacy / Legacy＋LSTM の3エンジンを比較する。
-    // 実際の黒塗りには反映せず、診断ログだけで比較する。
-    const engineCompare=await compareOcrEngines(getOcrLanguage(target),target,ocrCanvas,scale,results);
-
     const refineStarted=performance.now();
     const refine=await refineNearCandidates(worker,results,ocrCanvas,target,scale);
     const refineElapsed=performance.now()-refineStarted;
@@ -1850,20 +1809,6 @@ async function diagnoseOCR(){
       if(r.near.length)lines.push(`近似候補：${r.near.map(x=>`「${x.candidate}」${Math.round(x.similarity*100)}%`).join(" / ")}`);
       lines.push(`認識テキスト：${r.rawText.replace(/\n/g," / ")}`,"");
     }
-    lines.push(`===== OCRエンジン比較（V71実験） =====`);
-    lines.push(`同一条件：グレー＋コントラスト / PSM 11 / 実際の黒塗りには未使用`);
-    for (const e of engineCompare.engines) {
-      if (e.ok) {
-        const preview = e.rawText.replace(/\n/g, ' / ');
-        lines.push(`  ${e.label} [OEM=${e.oem}]：HIT ${e.hits}件${e.reused ? '（通常OCR結果を再利用）' : ''}`);
-        lines.push(`    認識テキスト：${preview}`);
-      } else {
-        lines.push(`  ${e.label} [OEM=${e.oem}]：実行失敗`);
-        lines.push(`    エラー：${e.error}`);
-      }
-    }
-    lines.push(`比較時間：${(engineCompare.elapsed/1000).toFixed(2)}秒`);
-
     lines.push(`===== 候補地点の統合 =====`, `候補地点：${candidateGroups.length}箇所 / 個別候補：${candidateCount}件`);
     candidateGroups.forEach((g,i)=>{
       const best=Math.max(...g.candidates.map(c=>c.similarity));
@@ -2374,6 +2319,7 @@ fileInput.addEventListener("change", async () => {
         updateZoomUI();
         redactBtn.disabled = false;
         diagnoseBtn.disabled = !ENABLE_DIAGNOSTIC;
+        colorDiagnoseBtn.disabled = !ENABLE_DIAGNOSTIC;
         manualBtn.disabled = false;
         saveBtn.disabled = false;
         resetBtn.disabled = false;
@@ -2385,7 +2331,10 @@ fileInput.addEventListener("change", async () => {
 });
 
 redactBtn.addEventListener("click", run);
-if (ENABLE_DIAGNOSTIC) diagnoseBtn.addEventListener("click", diagnoseOCR);
+if (ENABLE_DIAGNOSTIC) {
+  diagnoseBtn.addEventListener("click", diagnoseOCR);
+  colorDiagnoseBtn.addEventListener("click", diagnoseColorOnly);
+}
 
 function canvasToBlob() {
     return new Promise((resolve, reject) => {
