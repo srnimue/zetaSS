@@ -814,19 +814,24 @@ async function recognizeLocalRegionVariant(worker, crop, target, mode) {
   const input = mode === '通常' ? crop : makeOcrVariant(crop, mode);
   let raw = '';
   let hit = false;
+  const matches = [];
   try {
     const result = await worker.recognize(input, {tessedit_pageseg_mode:'7'});
     raw = String(result?.data?.text || '').replace(/\s+/g,' ').trim();
     for (const line of (result?.data?.lines || [])) {
       const units = extractLineUnits(line);
-      if (findTargetInUnits(units, target).length) hit = true;
+      const found = findTargetInUnits(units, target);
+      if (found.length) {
+        hit = true;
+        matches.push(...found);
+      }
     }
   } catch (e) {
     raw = `ERROR: ${e?.message || e}`;
   } finally {
     if (input !== crop) { input.width = 1; input.height = 1; }
   }
-  return {mode, raw, hit};
+  return {mode, raw, hit, matches};
 }
 
 // V68実験：V64の「文字っぽい横長領域」の検出を維持し、
@@ -869,6 +874,56 @@ async function runTextRegionExperiment(worker,sourceCanvas,target) {
     extraRuns:0,
     extraModes:[]
   };
+}
+
+// V69本採用用：V68と同じ文字領域検出＋全領域局所OCRを、
+// 実際の自動黒塗り候補として返す。OCRのbboxは2倍拡大した局所画像上の
+// 座標なので、元画像の領域座標へ戻してから既存のmergeMatchesへ渡す。
+async function collectTextRegionMatches(worker, sourceCanvas, target) {
+  const detected = detectTextLikeRegions(sourceCanvas);
+  const SCALE = 2;
+  const matches = [];
+  const tested = [];
+  const started = performance.now();
+
+  for (const r of detected.regions) {
+    const crop = document.createElement('canvas');
+    crop.width = Math.max(1, Math.round(r.w * SCALE));
+    crop.height = Math.max(1, Math.round(r.h * SCALE));
+    const cctx = crop.getContext('2d');
+    cctx.imageSmoothingEnabled = true;
+    cctx.imageSmoothingQuality = 'high';
+    cctx.drawImage(sourceCanvas, r.x, r.y, r.w, r.h, 0, 0, crop.width, crop.height);
+
+    const normal = await recognizeLocalRegionVariant(worker, crop, target, '通常');
+    const regionMatches = [];
+    for (const hit of normal.matches || []) {
+      const b = hit.targetBox;
+      regionMatches.push({
+        x0: r.x + b.x0 / SCALE,
+        y0: r.y + b.y0 / SCALE,
+        x1: r.x + b.x1 / SCALE,
+        y1: r.y + b.y1 / SCALE,
+        symbols: (hit.symbols || []).map(u => ({
+          ...u,
+          bbox: {
+            x0: r.x + u.bbox.x0 / SCALE,
+            y0: r.y + u.bbox.y0 / SCALE,
+            x1: r.x + u.bbox.x1 / SCALE,
+            y1: r.y + u.bbox.y1 / SCALE
+          }
+        })),
+        lineText: normal.raw,
+        source: '局所OCR'
+      });
+    }
+    matches.push(...regionMatches);
+    tested.push({...r, hit:normal.hit, raw:normal.raw, matches:regionMatches});
+    crop.width = 1;
+    crop.height = 1;
+  }
+
+  return {detected, tested, matches, elapsed: performance.now() - started};
 }
 
 function editDistance(a,b){const A=[...a],B=[...b],d=Array.from({length:A.length+1},()=>Array(B.length+1).fill(0));for(let i=0;i<=A.length;i++)d[i][0]=i;for(let j=0;j<=B.length;j++)d[0][j]=j;for(let i=1;i<=A.length;i++)for(let j=1;j<=B.length;j++)d[i][j]=Math.min(d[i-1][j]+1,d[i][j-1]+1,d[i-1][j-1]+(A[i-1]===B[j-1]?0:1));return d[A.length][B.length];}
@@ -1473,6 +1528,28 @@ async function run(){
       if(!duplicate) paintBoxes.push({x:b.x0,y:b.y0,w:b.x1-b.x0,h:b.y1-b.y0,symbols:r.symbols||[],source:r.recovery||"再OCR",rescue:r.recovery==="近似候補救出"});
     }
 
+
+    // V69：V68の「文字領域全走査＋局所OCR」を正式な追加検出ルートとして使用。
+    // 全体OCRで拾えなかった文字も、文字っぽい領域内のPSM7 OCRで拾えた場合は追加する。
+    status("OCR中…\n文字領域を追加走査しています。");
+    const regionScan = await collectTextRegionMatches(worker, canvas, target);
+    for (const b of regionScan.matches) {
+      const duplicate = paintBoxes.some(o => {
+        const ix0 = Math.max(o.x, b.x0), iy0 = Math.max(o.y, b.y0);
+        const ix1 = Math.min(o.x + o.w, b.x1), iy1 = Math.min(o.y + o.h, b.y1);
+        if (ix1 <= ix0 || iy1 <= iy0) return false;
+        const inter = (ix1 - ix0) * (iy1 - iy0);
+        const area = Math.min(o.w * o.h, (b.x1 - b.x0) * (b.y1 - b.y0));
+        return area > 0 && inter / area > .45;
+      });
+      if (!duplicate) {
+        paintBoxes.push({
+          x: b.x0, y: b.y0, w: b.x1 - b.x0, h: b.y1 - b.y0,
+          symbols: b.symbols || [], source: "局所OCR"
+        });
+      }
+    }
+
     // OCR黒塗りを編集可能なオブジェクトとして登録する。
     // OCR専用の補正・余白計算はここで一度だけ行い、以後の移動・サイズ変更では
     // その最終黒塗り矩形をそのまま編集する。
@@ -1493,7 +1570,8 @@ async function run(){
     }
     redrawFromBase();
     saveBtn.disabled=false; manualBtn.disabled=false;
-    status(`黒塗り完了：${manualStamps.length}箇所\n通常OCR：${matches.length}箇所 / 再OCR：${paintBoxes.length-matches.length}箇所`);
+    const localAdded = Math.max(0, paintBoxes.length - matches.length);
+    status(`黒塗り完了：${manualStamps.length}箇所\n通常OCR：${matches.length}箇所 / 追加局所OCR：${localAdded}箇所`);
   }catch(error){status("OCRでエラーが発生しました。下のエラー詳細を確認してください。",error);}
 }
 
@@ -1585,7 +1663,7 @@ async function diagnoseOCR(){
 
     // V67実験：V64の文字領域推定を維持し、通常OCRで見つからなかった領域だけ
     // 前処理違いの局所OCRを追加する。
-    lines.push("",`===== 文字領域全走査＋局所OCR実験（V68） =====`);
+    lines.push("",`===== 文字領域全走査＋局所OCR実験（V69） =====`);
     const regionResult=await runTextRegionExperiment(worker,canvas,target);
     lines.push(`検出候補：${regionResult.detected.regions.length}領域 / 局所OCR実行：${regionResult.tested.length}領域 / 走査間隔：${regionResult.detected.sample}px / 通常：2倍・PSM7`);
     lines.push(`追加前処理：なし / 追加OCR実行：0回`);
@@ -1600,7 +1678,7 @@ async function diagnoseOCR(){
       lines.push(`  領域${i+1}: (${r.x},${r.y},w${r.w},h${r.h}) / ${r.mode} / ${display} / ${rawPreview}`);
     });
     lines.push(`局所OCR時間：${(regionResult.elapsed/1000).toFixed(2)}秒`);
-    lines.push(`※ V64の領域検出を維持し、検出された全領域を通常OCRしました。今回は走査範囲の不足を確認する実験で、前処理追加・黒塗りへの使用はありません。`);
+    lines.push(`※ V68の全領域走査方式を診断用にも使用。V69本体では、この局所OCRのHITを追加の黒塗り候補として統合します。`);
 
     // V63実験：文字列全体ではなく、OCRが拾えた各文字を個別テンプレート化して組み合わせる。
     lines.push("",`===== 文字単体テンプレート照合実験（V63） =====`);
