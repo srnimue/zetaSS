@@ -70,12 +70,3 @@ body { padding: 12px; } h1 { font-size: 21px; } .panel, .canvas-panel { padding:
 #selection .handle-ne { right: -8px; top: -8px; }
 #selection .handle-sw { left: -8px; bottom: -8px; }
 #selection .handle-se { right: -8px; bottom: -8px; }
-
-/* V82: かな誤認識救出候補の診断表示 */
-.ocr-debug-kana-candidate {
-  border-color: #e53935 !important;
-  background: rgba(255, 0, 0, .08);
-}
-.ocr-debug-kana-candidate .ocr-debug-label {
-  background: rgba(180, 0, 0, .88);
-}

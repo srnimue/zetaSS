@@ -506,6 +506,24 @@ function makeInverted(src){
   for(let i=0;i<d.length;i+=4){d[i]=255-d[i];d[i+1]=255-d[i+1];d[i+2]=255-d[i+2];}
   ctx.putImageData(img,0,0); return c;
 }
+function makeColorExtract(src){
+  // 色付き文字を補助的に拾うための簡易色抽出。
+  // 彩度が低い画素は白、彩度が高い画素は元の明度を保持したグレーにする。
+  const c=document.createElement('canvas'); c.width=src.width; c.height=src.height;
+  const ctx=c.getContext('2d'); ctx.drawImage(src,0,0);
+  const img=ctx.getImageData(0,0,c.width,c.height),d=img.data;
+  for(let i=0;i<d.length;i+=4){
+    const r=d[i],g=d[i+1],b=d[i+2];
+    const mx=Math.max(r,g,b),mn=Math.min(r,g,b);
+    const sat=mx-mn;
+    if(sat < 32){ d[i]=d[i+1]=d[i+2]=255; }
+    else {
+      const y=Math.round(r*.299+g*.587+b*.114);
+      d[i]=d[i+1]=d[i+2]=y;
+    }
+  }
+  ctx.putImageData(img,0,0); return c;
+}
 function makeOcrVariant(baseCanvas, name) {
     if (name === "通常") return baseCanvas;
 
@@ -534,6 +552,17 @@ function makeOcrVariant(baseCanvas, name) {
             const y = d[i] * .299 + d[i + 1] * .587 + d[i + 2] * .114;
             const v = y >= threshold ? 255 : 0;
             d[i] = d[i + 1] = d[i + 2] = v;
+        }
+    } else if (name === "色抽出") {
+        for (let i = 0; i < d.length; i += 4) {
+            const r=d[i],g=d[i+1],b=d[i+2];
+            const mx=Math.max(r,g,b),mn=Math.min(r,g,b);
+            const sat=mx-mn;
+            if(sat < 32){ d[i]=d[i+1]=d[i+2]=255; }
+            else {
+                const y=Math.round(r*.299+g*.587+b*.114);
+                d[i]=d[i+1]=d[i+2]=y;
+            }
         }
     } else if (name === "反転") {
         for (let i = 0; i < d.length; i += 4) {
@@ -1417,6 +1446,21 @@ async function collectOcrResults(worker,target){
     stats.fallbackMs=performance.now()-fallbackStarted;
   }
 
+  // V82.1: 過去の色抽出実験でヒットしたケースを退行させないため、
+  // 色抽出OCRは主OCRのHIT数に関係なく1回だけ追加実行する。
+  const colorStarted=performance.now();
+  const colorBase=makeOcrVariant(oc,"色抽出");
+  const colorVariant=makeWhiteBorderCanvas(colorBase,OCR_BORDER_PX*scale);
+  try {
+    const color=await recognizeVariant(worker,colorVariant,target,"色抽出",scale,OCR_BORDER_PX*scale,OCR_BORDER_PX*scale);
+    results.push(color);
+    stats.colorHitCount=color.matches.length;
+  } finally {
+    colorVariant.width=1;colorVariant.height=1;
+    if(colorBase!==oc){colorBase.width=1;colorBase.height=1;}
+  }
+  stats.colorMs=performance.now()-colorStarted;
+
   return {results,scale,ocrCanvas:oc,stats};
 }
 
@@ -2054,9 +2098,10 @@ async function diagnoseOCR(){
       lines.push(`  領域${i+1}: (${r.x},${r.y},w${r.w},h${r.h}) / ${r.mode} / ${display}${robustDisplay} / ${rawPreview}`);
     });
     lines.push(`局所OCR時間：${(regionResult.elapsed/1000).toFixed(2)}秒`);
+    lines.push(`色抽出OCR：${stats.colorHitCount||0}件 / ${(stats.colorMs/1000).toFixed(2)}秒`);
     lines.push(`※ V68の全領域走査方式を診断用にも使用。V70本体では、この局所OCRのHITを追加の黒塗り候補として統合します。`);
 
-    lines.push("",`===== V81 誤認識救出診断（かな） =====`);
+    lines.push("",`===== V82.1 誤認識救出診断（かな）＋候補bbox仮表示 =====`);
     const v81KanaRescue=findV81KanaRescue(results,target,scale);
     const hasKanjiTarget=[...target].some(isV81Kanji);
     if(hasKanjiTarget){
@@ -2070,7 +2115,7 @@ async function diagnoseOCR(){
         lines.push(`  候補${i+1}: OCR「${c.ocr}」→対象「${c.target}」 / 置換${c.substitutions}文字 / bbox=(${Math.round(c.box.x0)},${Math.round(c.box.y0)},w${Math.round(c.box.x1-c.box.x0)},h${Math.round(c.box.y1-c.box.y0)}) / 「${c.lineText}」`);
       });
       if(!v81KanaRescue.length) lines.push(`かな誤認識による新規候補はありません。`);
-      lines.push(`※ V81ではまだ黒塗りに使用しません。`);
+      lines.push(`※ V82.1ではまだ黒塗りに使用しません。候補が出た場合のみ赤枠で仮表示します。`);
     }
 
     lines.push('', `===== V76 局所OCR・順序維持ロバスト一致実験 =====`);
@@ -2147,7 +2192,7 @@ async function diagnoseOCR(){
       `  追加全体OCR：${stats.fallbackUsed ? (stats.fallbackMs/1000).toFixed(2)+"秒 / 実行" : "0.00秒 / 省略"}`,
       `候補再OCR：${(refineElapsed/1000).toFixed(2)}秒`,
       `診断全体：${(totalElapsed/1000).toFixed(2)}秒`,
-      `候補地点：${candidateGroups.length} / 近似候補救出：${refine.fastRecovered} / 再OCR実行：${refine.attempted} / 再OCR追加パス：${refine.extraPasses} / 既存HITで省略：${refine.skippedExact}`,
+      `候補地点：${candidateGroups.length} / 色抽出HIT：${stats.colorHitCount||0} / 近似候補救出：${refine.fastRecovered} / 再OCR実行：${refine.attempted} / 再OCR追加パス：${refine.extraPasses} / 既存HITで省略：${refine.skippedExact}`,
       "",
       `※ 今回は速度実験として、まずグレー＋コントラストだけを全体OCRします。`,
       `※ 第1段階で1件以上HITした場合、二値化180・220・反転の全体OCRは省略します。`,
@@ -2159,7 +2204,6 @@ async function diagnoseOCR(){
       `※ 再OCRは近似候補救出で確定できなかった地点だけ実行します。`,
       `※ 診断で救出した候補は、自動黒塗りにも使用されます。`
     );
-    lines.push(`※ V82では、かな誤認識候補を画像上にも赤枠で表示します。赤枠は診断専用で、黒塗りには使用しません。`);
     ocrDiagnostics.textContent=lines.join("\n");
     canvas.hidden=false; canvas.style.display='block';
     const tr=getCanvasDisplayTransform(),seen=[];
@@ -2167,24 +2211,17 @@ async function diagnoseOCR(){
       if(seen.some(o=>Math.abs(o.x0-m.x0)<3&&Math.abs(o.y0-m.y0)<3&&Math.abs(o.x1-m.x1)<3&&Math.abs(o.y1-m.y1)<3))continue;
       seen.push(m); const box=document.createElement('div'); box.className='ocr-debug-box'; box.style.borderColor='#22aa55'; box.style.left=`${tr.left+m.x0*tr.scaleX}px`; box.style.top=`${tr.top+m.y0*tr.scaleY}px`; box.style.width=`${(m.x1-m.x0)*tr.scaleX}px`; box.style.height=`${(m.y1-m.y0)*tr.scaleY}px`; const label=document.createElement('span'); label.className='ocr-debug-label'; label.textContent=`${r.mode}: ${target}`; box.appendChild(label); ocrDebugLayer.appendChild(box);
     }
-    // V82: V81かな誤認識救出候補を実画像上で仮表示する。
-    // 候補は診断専用で、自動黒塗り処理には一切接続しない。
-    if(v81KanaRescue.length && !hasKanjiTarget && [...target].every(isV81Kana)){
-      v81KanaRescue.slice(0,20).forEach((c,i)=>{
-        const b=c.box;
-        if(!b) return;
-        const box=document.createElement('div');
-        box.className='ocr-debug-box ocr-debug-kana-candidate';
-        box.style.left=`${tr.left+b.x0*tr.scaleX}px`;
-        box.style.top=`${tr.top+b.y0*tr.scaleY}px`;
-        box.style.width=`${Math.max(2,(b.x1-b.x0)*tr.scaleX)}px`;
-        box.style.height=`${Math.max(2,(b.y1-b.y0)*tr.scaleY)}px`;
-        const label=document.createElement('span');
-        label.className='ocr-debug-label';
-        label.textContent=`V82候補${i+1}: ${c.ocr}→${c.target}`;
-        box.appendChild(label);
-        ocrDebugLayer.appendChild(box);
-      });
+    // V82.1: かな誤認識候補は黒塗りせず、画像上に赤枠だけ表示。
+    const kanaCandidates = v81KanaRescue.slice(0,20);
+    for(const c of kanaCandidates){
+      const b=c.box;
+      const box=document.createElement('div');
+      box.className='ocr-debug-box'; box.style.borderColor='#ff3333';
+      box.style.left=`${tr.left+b.x0*tr.scaleX}px`; box.style.top=`${tr.top+b.y0*tr.scaleY}px`;
+      box.style.width=`${(b.x1-b.x0)*tr.scaleX}px`; box.style.height=`${(b.y1-b.y0)*tr.scaleY}px`;
+      const label=document.createElement('span'); label.className='ocr-debug-label';
+      label.textContent=`V82.1候補: ${c.ocr}→${c.target}`; box.appendChild(label);
+      ocrDebugLayer.appendChild(box);
     }
     ocrDebugLayer.hidden=ocrDebugLayer.childElementCount===0;
     status(`OCR診断完了。\n検出：${exactCount}件（重複を含む） / 候補地点：${candidateGroups.length}箇所 / 再OCR確認：${refined.length}箇所\n処理時間：${(totalElapsed/1000).toFixed(2)}秒\n下の診断結果を確認してください。`);
