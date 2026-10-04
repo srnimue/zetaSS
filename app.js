@@ -2115,7 +2115,7 @@ async function diagnoseOCR(){
         lines.push(`  候補${i+1}: OCR「${c.ocr}」→対象「${c.target}」 / 置換${c.substitutions}文字 / bbox=(${Math.round(c.box.x0)},${Math.round(c.box.y0)},w${Math.round(c.box.x1-c.box.x0)},h${Math.round(c.box.y1-c.box.y0)}) / 「${c.lineText}」`);
       });
       if(!v81KanaRescue.length) lines.push(`かな誤認識による新規候補はありません。`);
-      lines.push(`※ V82.2ではまだ黒塗りに使用しません。候補が出た場合のみ赤枠で仮表示します。`);
+      lines.push(`※ V82.3ではまだ黒塗りに使用しません。候補が出た場合は赤枠で直接表示します。`);
     }
 
     lines.push('', `===== V76 局所OCR・順序維持ロバスト一致実験 =====`);
@@ -2211,19 +2211,27 @@ async function diagnoseOCR(){
       if(seen.some(o=>Math.abs(o.x0-m.x0)<3&&Math.abs(o.y0-m.y0)<3&&Math.abs(o.x1-m.x1)<3&&Math.abs(o.y1-m.y1)<3))continue;
       seen.push(m); const box=document.createElement('div'); box.className='ocr-debug-box'; box.style.borderColor='#22aa55'; box.style.left=`${tr.left+m.x0*tr.scaleX}px`; box.style.top=`${tr.top+m.y0*tr.scaleY}px`; box.style.width=`${(m.x1-m.x0)*tr.scaleX}px`; box.style.height=`${(m.y1-m.y0)*tr.scaleY}px`; const label=document.createElement('span'); label.className='ocr-debug-label'; label.textContent=`${r.mode}: ${target}`; box.appendChild(label); ocrDebugLayer.appendChild(box);
     }
-    // V82.1: かな誤認識候補は黒塗りせず、画像上に赤枠だけ表示。
+    // V82.3: かな誤認識候補を、検出直後に確実に表示する。
+    // 黒塗り処理には使用しない。診断表示だけ。
     const kanaCandidates = v81KanaRescue.slice(0,20);
     for(const c of kanaCandidates){
       const b=c.box;
       const box=document.createElement('div');
-      box.className='ocr-debug-box'; box.style.borderColor='#ff3333';
-      box.style.left=`${tr.left+b.x0*tr.scaleX}px`; box.style.top=`${tr.top+b.y0*tr.scaleY}px`;
-      box.style.width=`${(b.x1-b.x0)*tr.scaleX}px`; box.style.height=`${(b.y1-b.y0)*tr.scaleY}px`;
-      const label=document.createElement('span'); label.className='ocr-debug-label';
-      label.textContent=`V82.1候補: ${c.ocr}→${c.target}`; box.appendChild(label);
+      box.className='ocr-debug-box v82-kana-candidate';
+      box.style.cssText += `;position:absolute;z-index:99999;display:block;visibility:visible;opacity:1;box-sizing:border-box;border:4px solid #ff0000;background:rgba(255,0,0,.08);pointer-events:none;`;
+      box.style.left=`${tr.left+b.x0*tr.scaleX}px`;
+      box.style.top=`${tr.top+b.y0*tr.scaleY}px`;
+      box.style.width=`${Math.max(8,(b.x1-b.x0)*tr.scaleX)}px`;
+      box.style.height=`${Math.max(8,(b.y1-b.y0)*tr.scaleY)}px`;
+      const label=document.createElement('span');
+      label.className='ocr-debug-label';
+      label.style.cssText += `;z-index:100000;background:#ff0000;color:#fff;font-weight:bold;`;
+      label.textContent=`V82.3候補: ${c.ocr}→${c.target}`;
+      box.appendChild(label);
       ocrDebugLayer.appendChild(box);
     }
-    ocrDebugLayer.hidden=ocrDebugLayer.childElementCount===0;
+    ocrDebugLayer.hidden=false;
+    ocrDebugLayer.style.cssText += `;display:block!important;visibility:visible!important;opacity:1!important;z-index:99998;`;
     status(`OCR診断完了。\n検出：${exactCount}件（重複を含む） / 候補地点：${candidateGroups.length}箇所 / 再OCR確認：${refined.length}箇所\n処理時間：${(totalElapsed/1000).toFixed(2)}秒\n下の診断結果を確認してください。`);
   }catch(error){canvas.hidden=false;canvas.style.display='block';status("OCR診断でエラーが発生しました。",error);}
 }
@@ -2736,6 +2744,4 @@ function drawV82_2CandidateDebug(c) {
 
 // V82.2: expose a tiny explicit hook for the diagnostic path.
 // Existing code may call window.showV82_2Candidate(c).
-window.showV82_2Candidate = function(c) {
-  return drawV82_2CandidateDebug(c);
-};
+window.showV82_2Candidate = function(c) { return false; };
