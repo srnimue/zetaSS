@@ -5,6 +5,7 @@ const ENABLE_DIAGNOSTIC = true;
 
 const fileInput = $("fileInput");
 const targetText = $("targetText");
+const textColorsInput = $("textColors");
 const overlayText = $("overlayText");
 const overlayName = $("overlayName");
 const stampMode = $("stampMode");
