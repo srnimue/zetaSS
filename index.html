@@ -72,5 +72,26 @@
 <pre id="ocrDiagnostics" class="diagnostics" hidden></pre>
 </main>
 <script src="app.js?v=821"></script>
+
+<script>
+/* V82.2: visual bridge for kana rescue diagnostic.
+   Does not change OCR or blacking. It only watches the diagnostic text and,
+   when a bbox=(x,y,w,h) appears, asks the debug helper to draw it. */
+(function(){
+  function scanV822(){
+    try{
+      if(typeof window.drawV82_2CandidateDebug !== "function") return;
+      const text = document.body ? document.body.innerText : "";
+      const m = text.match(/bbox=\(\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*,\s*(\d+(?:\.\d+)?)\s*,\s*(\d+(?:\.\d+)?)\s*\)/);
+      if(!m) return;
+      const c = {x:+m[1], y:+m[2], w:+m[3], h:+m[4]};
+      window.drawV82_2CandidateDebug(c);
+    }catch(e){}
+  }
+  setInterval(scanV822, 700);
+  window.addEventListener("load", function(){ setTimeout(scanV822, 500); });
+})();
+</script>
+
 </body>
 </html>

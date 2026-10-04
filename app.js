@@ -2101,7 +2101,7 @@ async function diagnoseOCR(){
     lines.push(`色抽出OCR：${stats.colorHitCount||0}件 / ${(stats.colorMs/1000).toFixed(2)}秒`);
     lines.push(`※ V68の全領域走査方式を診断用にも使用。V70本体では、この局所OCRのHITを追加の黒塗り候補として統合します。`);
 
-    lines.push("",`===== V82.1 誤認識救出診断（かな）＋候補bbox仮表示 =====`);
+    lines.push("",`===== V82.2 誤認識救出診断（かな）＋候補bbox仮表示 =====`);
     const v81KanaRescue=findV81KanaRescue(results,target,scale);
     const hasKanjiTarget=[...target].some(isV81Kanji);
     if(hasKanjiTarget){
@@ -2115,7 +2115,7 @@ async function diagnoseOCR(){
         lines.push(`  候補${i+1}: OCR「${c.ocr}」→対象「${c.target}」 / 置換${c.substitutions}文字 / bbox=(${Math.round(c.box.x0)},${Math.round(c.box.y0)},w${Math.round(c.box.x1-c.box.x0)},h${Math.round(c.box.y1-c.box.y0)}) / 「${c.lineText}」`);
       });
       if(!v81KanaRescue.length) lines.push(`かな誤認識による新規候補はありません。`);
-      lines.push(`※ V82.1ではまだ黒塗りに使用しません。候補が出た場合のみ赤枠で仮表示します。`);
+      lines.push(`※ V82.2ではまだ黒塗りに使用しません。候補が出た場合のみ赤枠で仮表示します。`);
     }
 
     lines.push('', `===== V76 局所OCR・順序維持ロバスト一致実験 =====`);
@@ -2655,3 +2655,87 @@ async function saveImage() {
 saveBtn.addEventListener("click", saveImage);
 
 window.addEventListener("beforeunload", () => worker?.terminate());
+
+
+// ===== V82.2 bbox visual debug helper =====
+function drawV82_2CandidateDebug(c) {
+  try {
+    if (!c || !Number.isFinite(c.x) || !Number.isFinite(c.y) ||
+        !Number.isFinite(c.w) || !Number.isFinite(c.h)) return false;
+    const x = c.x, y = c.y, w = c.w, h = c.h;
+
+    // Try common overlay/canvas names first.
+    const canvases = Array.from(document.querySelectorAll("canvas"));
+    let target = canvases.find(cv =>
+      /overlay|result|preview|canvas/i.test(cv.id || "") ||
+      /overlay|result|preview|canvas/i.test(cv.className || "")
+    ) || canvases[canvases.length - 1];
+
+    if (target) {
+      const ctx = target.getContext("2d");
+      if (ctx) {
+        const sx = target.width / (target.clientWidth || target.width);
+        const sy = target.height / (target.clientHeight || target.height);
+        ctx.save();
+        ctx.strokeStyle = "#ff0000";
+        ctx.lineWidth = Math.max(4, 4 * Math.min(sx, sy));
+        ctx.setLineDash([]);
+        ctx.strokeRect(x * sx, y * sy, w * sx, h * sy);
+        ctx.fillStyle = "#ff0000";
+        ctx.font = `${Math.max(18, 18 * Math.min(sx, sy))}px sans-serif`;
+        ctx.fillText("V82.2候補", x * sx, Math.max(22, y * sy - 6));
+        ctx.restore();
+      }
+    }
+
+    // DOM fallback, positioned against the page viewport.
+    const old = document.getElementById("v82_2_bbox_debug");
+    if (old) old.remove();
+    const box = document.createElement("div");
+    box.id = "v82_2_bbox_debug";
+    box.style.cssText = [
+      "position:fixed",
+      "left:12px",
+      "top:12px",
+      "width:calc(100vw - 24px)",
+      "height:calc(100vh - 24px)",
+      "pointer-events:none",
+      "z-index:2147483647",
+      "box-sizing:border-box"
+    ].join(";");
+
+    const note = document.createElement("div");
+    note.textContent = `V82.2 候補 bbox: x=${x}, y=${y}, w=${w}, h=${h}`;
+    note.style.cssText = "position:absolute;left:8px;top:8px;background:#ff0000;color:#fff;padding:4px 7px;font:14px sans-serif;";
+    box.appendChild(note);
+
+    // If a visible image/canvas has a matching coordinate space, place a
+    // second marker using normalized coordinates as a diagnostic fallback.
+    const vw = Math.max(1, document.documentElement.clientWidth);
+    const vh = Math.max(1, document.documentElement.clientHeight);
+    const marker = document.createElement("div");
+    marker.style.cssText = [
+      "position:absolute",
+      `left:${Math.max(0, Math.min(vw - 20, x))}px`,
+      `top:${Math.max(0, Math.min(vh - 20, y))}px`,
+      `width:${Math.max(10, Math.min(vw - x, w))}px`,
+      `height:${Math.max(10, Math.min(vh - y, h))}px`,
+      "border:4px solid #ff0000",
+      "box-sizing:border-box"
+    ].join(";");
+    box.appendChild(marker);
+    document.body.appendChild(box);
+    return true;
+  } catch (e) {
+    console.warn("V82.2 bbox debug draw failed", e);
+    return false;
+  }
+}
+// ===== /V82.2 bbox visual debug helper =====
+
+
+// V82.2: expose a tiny explicit hook for the diagnostic path.
+// Existing code may call window.showV82_2Candidate(c).
+window.showV82_2Candidate = function(c) {
+  return drawV82_2CandidateDebug(c);
+};
