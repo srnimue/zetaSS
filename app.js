@@ -652,7 +652,7 @@ function findTargetInUnits(units,target){
   return hits;
 }
 
-// V76実験：OCRが対象文字の間に余計なunitを挟んだり、文字を細かく分割しても、
+// V79実験：OCRが対象文字の間に余計なunitを挟んだり、文字を細かく分割しても、
 // 「対象文字がこの順番で出現しているか」を見る。完全一致とは別の診断用ルート。
 // 近似文字そのものへの置換は行わず、対象文字が実際にunits内に存在する場合だけ拾う。
 function findTargetInUnitsRobust(units,target,options={}){
@@ -1266,37 +1266,7 @@ function makeWhiteBorderCanvas(src,pad){
   return c;
 }
 
-// V78: OCR入力だけに1pxの軽い膨張をかける。
-// 黒文字を1pxだけ周囲へ広げ、細い文字の線切れを補う実験。
-// 元画像・表示用canvas・黒塗り座標は変更しない。
-function dilateBlackPixels(src){
-  const c=document.createElement("canvas");
-  c.width=src.width; c.height=src.height;
-  const g=c.getContext("2d", {willReadFrequently:true});
-  g.drawImage(src,0,0);
-  const img=g.getImageData(0,0,c.width,c.height);
-  const d=img.data;
-  const out=new Uint8ClampedArray(d);
-  const w=c.width, h=c.height;
-  for(let y=1;y<h-1;y++){
-    for(let x=1;x<w-1;x++){
-      const p=(y*w+x)*4;
-      let dark=false;
-      for(let dy=-1;dy<=1 && !dark;dy++){
-        for(let dx=-1;dx<=1;dx++){
-          const q=((y+dy)*w+(x+dx))*4;
-          const lum=d[q]*.299+d[q+1]*.587+d[q+2]*.114;
-          if(lum<150){ dark=true; break; }
-        }
-      }
-      if(dark) out[p]=out[p+1]=out[p+2]=Math.min(out[p],out[p+1],out[p+2],80);
-    }
-  }
-  g.putImageData(new ImageData(out,w,h),0,0);
-  return c;
-}
-
-function buildOcrCanvas(){
+\n// V79: OCR入力だけに1pxの軽い収縮をかける。\n// 黒文字の細い突起やノイズを1pxだけ削り、文字同士の接触を軽く分離する実験。\n// 元画像・表示用canvas・黒塗り座標は変更しない。\nfunction erodeBlackPixels(src){\n  const c=document.createElement("canvas");\n  c.width=src.width; c.height=src.height;\n  const g=c.getContext("2d", {willReadFrequently:true});\n  g.drawImage(src,0,0);\n  const img=g.getImageData(0,0,c.width,c.height);\n  const d=img.data;\n  const out=new Uint8ClampedArray(d);\n  const w=c.width, h=c.height;\n  for(let y=1;y<h-1;y++){\n    for(let x=1;x<w-1;x++){\n      const p=(y*w+x)*4;\n      const lum=d[p]*.299+d[p+1]*.587+d[p+2]*.114;\n      if(lum<150){\n        let allDark=true;\n        for(let dy=-1;dy<=1 && allDark;dy++){\n          for(let dx=-1;dx<=1;dx++){\n            const q=((y+dy)*w+(x+dx))*4;\n            const qLum=d[q]*.299+d[q+1]*.587+d[q+2]*.114;\n            if(qLum>=150){ allDark=false; break; }\n          }\n        }\n        if(!allDark) out[p]=out[p+1]=out[p+2]=255;\n      }\n    }\n  }\n  g.putImageData(new ImageData(out,w,h),0,0);\n  return c;\n}\n\nfunction buildOcrCanvas(){
   // OCR用キャンバス本体は従来の座標系のまま保持し、実際にTesseractへ渡す
   // キャンバスだけに白い10px境界線を追加する。表示用canvasは変更しない。
   const scale=2.5;
@@ -1321,15 +1291,13 @@ async function collectOcrResults(worker,target){
   const primaryStarted=performance.now();
   status("実行中…");
   const primaryBase=makeOcrVariant(oc,stats.primaryName);
-  const primaryBordered=makeWhiteBorderCanvas(primaryBase,OCR_BORDER_PX*scale);
-  const primaryVariant=dilateBlackPixels(primaryBordered);
+  const primaryVariant=makeWhiteBorderCanvas(primaryBase,OCR_BORDER_PX*scale);
   try {
-    const primary=await recognizeVariant(worker,primaryVariant,target,stats.primaryName+"＋膨張1px",scale,OCR_BORDER_PX*scale,OCR_BORDER_PX*scale);
+    const primary=await recognizeVariant(worker,primaryVariant,target,stats.primaryName,scale,OCR_BORDER_PX*scale,OCR_BORDER_PX*scale);
     results.push(primary);
     stats.primaryHitCount=primary.matches.length;
   } finally {
     primaryVariant.width=1;primaryVariant.height=1;
-    primaryBordered.width=1;primaryBordered.height=1;
     if(primaryBase!==oc){primaryBase.width=1;primaryBase.height=1;}
     stats.primaryMs=performance.now()-primaryStarted;
   }
@@ -1908,7 +1876,7 @@ async function diagnoseOCR(){
     const totalElapsed=performance.now()-totalStarted;
     const exactCount=results.reduce((n,r)=>n+r.matches.length,0);
     const candidateCount=results.reduce((n,r)=>n+r.near.length,0);
-    const lines=[`対象文字：${targetText.value}`,`正規化後：${target}`,`OCR境界線：${OCR_BORDER_PX}px（白）`,`V78膨張：1px（黒文字を軽く太くする診断）`,""];
+    const lines=[`対象文字：${targetText.value}`,`正規化後：${target}`,`OCR境界線：${OCR_BORDER_PX}px（白）`,""];
     for(const r of results){
       lines.push(`===== ${r.mode} / PSM 11 =====`,`HIT：${r.matches.length}件`);
       for(const m of r.matches){
@@ -1992,7 +1960,7 @@ async function diagnoseOCR(){
     lines.push(`局所OCR時間：${(regionResult.elapsed/1000).toFixed(2)}秒`);
     lines.push(`※ V68の全領域走査方式を診断用にも使用。V70本体では、この局所OCRのHITを追加の黒塗り候補として統合します。`);
 
-    lines.push('', `===== V78 局所OCR・順序維持ロバスト一致実験 =====`);
+    lines.push('', `===== V79 局所OCR・順序維持ロバスト一致実験 =====`);
     const localRobust=[];
     for(const r of regionResult.tested){
       for(const v of (r.variants||[])){
