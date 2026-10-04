@@ -11,7 +11,6 @@ const overlayName = $("overlayName");
 const stampMode = $("stampMode");
 const redactBtn = $("redactBtn");
 const diagnoseBtn = $("diagnoseBtn");
-const colorDiagnoseBtn = $("colorDiagnoseBtn");
 const manualBtn = $("manualBtn");
 const undoBtn = $("undoBtn");
 const resetBtn = $("resetBtn");
@@ -32,7 +31,6 @@ const zoomLabel = $("zoomLabel");
 
 if (!ENABLE_DIAGNOSTIC) {
     diagnoseBtn.hidden = true;
-    colorDiagnoseBtn.hidden = true;
     ocrDiagnostics.hidden = true;
     ocrDebugLayer.hidden = true;
 }
@@ -47,10 +45,6 @@ let isDragging = false;
 let dragStart = null;
 let ocrBaseCanvas = null;
 const manualStamps = [];
-const manualHistory = [];
-let selectedManualIndex = -1;
-let editMode = null; // { type: "move" | "resize", handle: string|null, startPoint, original }
-const MIN_MANUAL_SIZE = 4;
 
 let zoom = 1;
 const MIN_ZOOM = 1;
@@ -58,9 +52,6 @@ const MAX_ZOOM = 4;
 const pointers = new Map();
 let pinchStartDistance = 0;
 let pinchStartZoom = 1;
-let panLastCenter = null;
-const TOUCH_X_OFFSET = -30;
-const TOUCH_Y_OFFSET = -40;
 
 function status(message, error = null) {
     statusEl.textContent = message;
@@ -184,7 +175,7 @@ function getOcrPaintBox(box, symbols = []) {
     return out;
 }
 
-function getOcrVisualRect(box, symbols = [], rescue = false) {
+function paintOcr(box, text = "", symbols = [], rescue = false) {
     box = getOcrPaintBox(box, symbols);
     // 近似候補救出（例：「めーざー」→「ゆーざー」）は、1文字目の誤認で
     // 位置がずれやすいので、左右均等に余白を足す。
@@ -207,22 +198,16 @@ function getOcrVisualRect(box, symbols = [], rescue = false) {
     const top = Math.max(0, box.y - padding);
     const height = box.h + padding * 2;
 
-    return { x: left, y: top, w: width, h: height };
-}
-
-function paintOcr(box, text = "", symbols = [], rescue = false) {
-    const rect = getOcrVisualRect(box, symbols, rescue);
     ctx.fillStyle = "#000";
-    ctx.fillRect(rect.x, rect.y, rect.w, rect.h);
+    ctx.fillRect(left, top, width, height);
 
     if (text) {
         ctx.fillStyle = "#fff";
         ctx.font = `bold ${Math.max(12, Math.round(box.h * 0.8))}px sans-serif`;
         ctx.textAlign = "center";
         ctx.textBaseline = "middle";
-        ctx.fillText(text, rect.x + rect.w / 2, rect.y + rect.h / 2);
+        ctx.fillText(text, left + width / 2, top + height / 2);
     }
-    return rect;
 }
 
 function paintManual(box, text = "") {
@@ -243,22 +228,6 @@ function paintManual(box, text = "") {
         ctx.textBaseline = "middle";
         ctx.fillText(text, left + width / 2, top + height / 2);
     }
-}
-
-function paintStamp(stamp) {
-    if (stamp.kind === "ocr") {
-        ctx.fillStyle = "#000";
-        ctx.fillRect(stamp.x, stamp.y, stamp.w, stamp.h);
-        if (stamp.text) {
-            ctx.fillStyle = "#fff";
-            ctx.font = `bold ${Math.max(12, Math.round(stamp.h * 0.8))}px sans-serif`;
-            ctx.textAlign = "center";
-            ctx.textBaseline = "middle";
-            ctx.fillText(stamp.text, stamp.x + stamp.w / 2, stamp.y + stamp.h / 2);
-        }
-        return;
-    }
-    paintManual(stamp, stamp.text);
 }
 
 function getBaseDisplaySize() {
@@ -306,132 +275,14 @@ function getPointerDistance() {
     return Math.hypot(values[0].x - values[1].x, values[0].y - values[1].y);
 }
 
-function getLastManualStamp() {
-    for (let i = manualStamps.length - 1; i >= 0; i--) {
-        if (manualStamps[i].kind !== "ocr") return manualStamps[i];
-    }
-    return null;
-}
-
 function updateUndoButton() {
-    undoBtn.disabled = manualHistory.length === 0;
-    const lastManual = getLastManualStamp();
-    stampMode.disabled = !lastManual;
-    if (!lastManual) stampMode.checked = false;
-}
-
-function snapshotManualStamps() {
-    return manualStamps.map(stamp => ({ ...stamp }));
-}
-
-function pushManualHistory() {
-    manualHistory.push(snapshotManualStamps());
-    if (manualHistory.length > 50) manualHistory.shift();
-}
-
-function restoreManualSnapshot(snapshot) {
-    manualStamps.length = 0;
-    for (const stamp of snapshot) manualStamps.push({ ...stamp });
-    selectedManualIndex = -1;
-    editMode = null;
-    selection.hidden = true;
-    redrawFromBase();
-}
-
-function getManualVisualRect(stamp) {
-    const padding = Math.max(4, Math.round(Math.min(stamp.w, stamp.h) * 0.12));
-    const verticalPadding = padding + 2;
-    return {
-        x: Math.max(0, stamp.x - padding - 6),
-        y: Math.max(0, stamp.y - verticalPadding),
-        w: stamp.w + padding,
-        h: stamp.h + verticalPadding * 2
-    };
-}
-
-function renderManualSelection() {
-    if (selectedManualIndex < 0 || !manualStamps[selectedManualIndex]) {
-        selection.hidden = true;
-        selection.innerHTML = "";
-        return;
-    }
-    const stamp = manualStamps[selectedManualIndex];
-    const transform = getCanvasDisplayTransform();
-    selection.hidden = false;
-    selection.style.left = `${transform.left + stamp.x * transform.scaleX}px`;
-    selection.style.top = `${transform.top + stamp.y * transform.scaleY}px`;
-    selection.style.width = `${stamp.w * transform.scaleX}px`;
-    selection.style.height = `${stamp.h * transform.scaleY}px`;
-    selection.innerHTML = "";
-    for (const handle of ["nw", "ne", "sw", "se"]) {
-        const el = document.createElement("span");
-        el.className = `edit-handle handle-${handle}`;
-        el.dataset.handle = handle;
-        selection.appendChild(el);
-    }
-}
-
-function hitTestManual(point) {
-    for (let i = manualStamps.length - 1; i >= 0; i--) {
-        const b = manualStamps[i];
-        const padX = Math.max(8, b.w * 0.08);
-        const padY = Math.max(8, b.h * 0.08);
-        if (point.x >= b.x - padX && point.x <= b.x + b.w + padX &&
-            point.y >= b.y - padY && point.y <= b.y + b.h + padY) return i;
-    }
-    return -1;
-}
-
-function getResizeHandle(point, stamp) {
-    const transform = getCanvasDisplayTransform();
-    const size = 22 / Math.max(transform.scaleX, transform.scaleY);
-    const handles = {
-        nw: [stamp.x, stamp.y],
-        ne: [stamp.x + stamp.w, stamp.y],
-        sw: [stamp.x, stamp.y + stamp.h],
-        se: [stamp.x + stamp.w, stamp.y + stamp.h]
-    };
-    for (const [name, [x, y]] of Object.entries(handles)) {
-        if (Math.hypot(point.x - x, point.y - y) <= size) return name;
-    }
-    return null;
-}
-
-function applyMoveEdit(current) {
-    const b = manualStamps[selectedManualIndex];
-    const dx = current.x - editMode.startPoint.x;
-    const dy = current.y - editMode.startPoint.y;
-    b.x = Math.max(0, Math.min(canvas.width - b.w, editMode.original.x + dx));
-    b.y = Math.max(0, Math.min(canvas.height - b.h, editMode.original.y + dy));
-}
-
-function applyResizeEdit(current) {
-    const b = manualStamps[selectedManualIndex];
-    const o = editMode.original;
-    let x = o.x, y = o.y, w = o.w, h = o.h;
-    const dx = current.x - editMode.startPoint.x;
-    const dy = current.y - editMode.startPoint.y;
-    const handle = editMode.handle;
-    if (handle.includes("e")) w = o.w + dx;
-    if (handle.includes("s")) h = o.h + dy;
-    if (handle.includes("w")) { x = o.x + dx; w = o.w - dx; }
-    if (handle.includes("n")) { y = o.y + dy; h = o.h - dy; }
-    if (w < MIN_MANUAL_SIZE) { if (handle.includes("w")) x = o.x + o.w - MIN_MANUAL_SIZE; w = MIN_MANUAL_SIZE; }
-    if (h < MIN_MANUAL_SIZE) { if (handle.includes("n")) y = o.y + o.h - MIN_MANUAL_SIZE; h = MIN_MANUAL_SIZE; }
-    x = Math.max(0, Math.min(canvas.width - w, x));
-    y = Math.max(0, Math.min(canvas.height - h, y));
-    b.x = x; b.y = y; b.w = w; b.h = h;
+    undoBtn.disabled = manualStamps.length === 0;
+    stampMode.disabled = manualStamps.length === 0;
+    if (manualStamps.length === 0) stampMode.checked = false;
 }
 
 function redrawFromBase() {
     if (!sourceImage) return;
-
-    // 編集中にcanvasを描き直しても、現在のズーム率とスクロール位置を
-    // 変えない。canvas.width/heightを書き換えるとブラウザがスクロール位置を
-    // 戻してしまうことがあるため、編集前の表示位置を保存して復元する。
-    const keepZoom = zoom;
-    const keepScrollLeft = canvasWrap.scrollLeft;
-    const keepScrollTop = canvasWrap.scrollTop;
 
     if (ocrBaseCanvas) {
         canvas.width = ocrBaseCanvas.width;
@@ -446,24 +297,27 @@ function redrawFromBase() {
     }
 
     for (const stamp of manualStamps) {
-        paintStamp(stamp);
+        paintManual(stamp, stamp.text);
     }
     updateUndoButton();
-    renderManualSelection();
+}
 
-    if (ocrBaseCanvas && keepZoom > 1.001) {
-        zoom = keepZoom;
-        canvasWrap.classList.add("zoomed");
-        const base = getBaseDisplaySize();
-        canvas.style.width = `${base.width * zoom}px`;
-        canvas.style.height = `${base.height * zoom}px`;
-        zoomLabel.textContent = `${Math.round(zoom * 100)}%`;
-        requestAnimationFrame(() => {
-            canvasWrap.scrollLeft = keepScrollLeft;
-            canvasWrap.scrollTop = keepScrollTop;
-            renderManualSelection();
-        });
-    }
+// 日本語は「高精度(best)」系の言語データを優先して試し、読み込めなければ
+// 順に次の候補、最後は標準データにフォールバックする。
+// ※ ブラウザ側のキャッシュはlang名(jpn)単位のキーなので、標準データと
+//   混ざらないよう候補ごとにcachePathを分けている。
+const JPN_MODEL_CANDIDATES = [
+    { label: "jpn 高精度(best_int)", langPath: "https://cdn.jsdelivr.net/npm/@tesseract.js-data/jpn/4.0.0_best_int", cachePath: "jpn-best-int" },
+    { label: "jpn 高精度(best)", langPath: "https://cdn.jsdelivr.net/gh/tesseract-ocr/tessdata_best@main", gzip: false, cachePath: "jpn-best" },
+    { label: "jpn 標準", langPath: null, cachePath: null }
+];
+const MODEL_LOAD_TIMEOUT_MS = 90000;
+let workerModelLabel = "";
+
+function withTimeout(promise, ms, message) {
+    let timer;
+    const timeout = new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(message)), ms); });
+    return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
 }
 
 async function getWorker(preferredLang = "jpn") {
@@ -480,15 +334,37 @@ async function getWorker(preferredLang = "jpn") {
     }
 
     status(`${preferredLang === "jpn" ? "日本語" : "英語"}OCRエンジンを準備中…\n初回は少し時間がかかります。`);
-    worker = await Tesseract.createWorker(preferredLang, 1, {
-        logger: message => {
-            if (message?.progress != null) {
-                status("実行中…");
-            }
+    const logger = message => {
+        if (message?.progress != null) {
+            status("実行中…");
         }
-    });
-    workerLang = preferredLang;
-    return worker;
+    };
+
+    const candidates = preferredLang === "jpn"
+        ? JPN_MODEL_CANDIDATES
+        : [{ label: `${preferredLang} 標準`, langPath: null, cachePath: null }];
+
+    let lastError = null;
+    for (const c of candidates) {
+        const options = { logger };
+        if (c.langPath) options.langPath = c.langPath;
+        if (c.gzip === false) options.gzip = false;
+        if (c.cachePath) options.cachePath = c.cachePath;
+        try {
+            worker = await withTimeout(
+                Tesseract.createWorker(preferredLang, 1, options),
+                MODEL_LOAD_TIMEOUT_MS,
+                `${c.label} の読み込みがタイムアウトしました。`
+            );
+            workerModelLabel = c.label;
+            workerLang = preferredLang;
+            return worker;
+        } catch (error) {
+            lastError = error;
+            console.warn(`OCRモデル読み込み失敗: ${c.label}`, error);
+        }
+    }
+    throw lastError || new Error("OCRエンジンを準備できませんでした。");
 }
 
 function getOcrLanguage(target) {
@@ -509,6 +385,91 @@ function makeInverted(src){
   for(let i=0;i<d.length;i+=4){d[i]=255-d[i];d[i+1]=255-d[i+1];d[i+2]=255-d[i+2];}
   ctx.putImageData(img,0,0); return c;
 }
+// Otsu法：グレースケールのヒストグラムから、白と黒の2グループの
+// クラス間分散が最大になる閾値を自動で求める。固定値(180/220)と違い、
+// 画像ごと(局所クロップなら切り出し範囲ごと)に最適な閾値が決まる。
+function computeOtsuThreshold(d) {
+    const hist = new Uint32Array(256);
+    let total = 0;
+    for (let i = 0; i < d.length; i += 4) {
+        const y = Math.round(d[i] * .299 + d[i + 1] * .587 + d[i + 2] * .114);
+        hist[y]++;
+        total++;
+    }
+    if (!total) return 128;
+
+    let sumAll = 0;
+    for (let t = 0; t < 256; t++) sumAll += t * hist[t];
+
+    let sumB = 0, wB = 0, best = 0, threshold = 128;
+    for (let t = 0; t < 256; t++) {
+        wB += hist[t];
+        if (!wB) continue;
+        const wF = total - wB;
+        if (!wF) break;
+        sumB += t * hist[t];
+        const mB = sumB / wB;
+        const mF = (sumAll - sumB) / wF;
+        const between = wB * wF * (mB - mF) * (mB - mF);
+        if (between > best) {
+            best = between;
+            threshold = t;
+        }
+    }
+    return threshold;
+}
+
+function parseHexColor(hex) {
+    const m = String(hex || "").trim().match(/^#?([0-9a-fA-F]{6}|[0-9a-fA-F]{3})$/);
+    if (!m) return null;
+    let h = m[1];
+    if (h.length === 3) h = [...h].map(c => c + c).join("");
+    return {
+        r: parseInt(h.slice(0, 2), 16),
+        g: parseInt(h.slice(2, 4), 16),
+        b: parseInt(h.slice(4, 6), 16)
+    };
+}
+
+// カンマ区切りの文字色入力("#1a1a1a, #c7c7c7")を、重複やパース失敗を除いて
+// 解析する。入力が空・全部不正なら空配列を返す(その場合は色抽出パスを使わない)。
+function parseTextColors(input) {
+    const seen = new Set(), out = [];
+    for (const part of String(input || "").split(",")) {
+        const hex = part.trim();
+        if (!hex) continue;
+        const rgb = parseHexColor(hex);
+        if (!rgb) continue;
+        const key = `${rgb.r},${rgb.g},${rgb.b}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        out.push({ hex, rgb });
+    }
+    return out;
+}
+
+// 指定した色に近い画素だけを黒、それ以外を白にする。
+// 文字が背景より明るいか暗いかに関係なく、常に「黒文字・白背景」という
+// 統一フォーマットで出力されるのが、通常の二値化(明るさ基準)との違い。
+const COLOR_EXTRACT_TOLERANCE = 60; // RGB空間でのユークリッド距離の許容値
+
+function makeColorExtractVariant(baseCanvas, rgb) {
+    const c = document.createElement("canvas");
+    c.width = baseCanvas.width; c.height = baseCanvas.height;
+    const ctx2 = c.getContext("2d");
+    ctx2.drawImage(baseCanvas, 0, 0);
+    const img = ctx2.getImageData(0, 0, c.width, c.height), d = img.data;
+    const tol2 = COLOR_EXTRACT_TOLERANCE * COLOR_EXTRACT_TOLERANCE;
+    for (let i = 0; i < d.length; i += 4) {
+        const dr = d[i] - rgb.r, dg = d[i + 1] - rgb.g, db = d[i + 2] - rgb.b;
+        const dist2 = dr * dr + dg * dg + db * db;
+        const v = dist2 <= tol2 ? 0 : 255;
+        d[i] = d[i + 1] = d[i + 2] = v;
+    }
+    ctx2.putImageData(img, 0, 0);
+    return c;
+}
+
 function makeOcrVariant(baseCanvas, name) {
     if (name === "通常") return baseCanvas;
 
@@ -529,6 +490,13 @@ function makeOcrVariant(baseCanvas, name) {
         for (let i = 0; i < d.length; i += 4) {
             const y = d[i] * .299 + d[i + 1] * .587 + d[i + 2] * .114;
             const v = Math.max(0, Math.min(255, Math.round((y - 128) * 1.65 + 128)));
+            d[i] = d[i + 1] = d[i + 2] = v;
+        }
+    } else if (name === "二値化Otsu") {
+        const threshold = computeOtsuThreshold(d);
+        for (let i = 0; i < d.length; i += 4) {
+            const y = d[i] * .299 + d[i + 1] * .587 + d[i + 2] * .114;
+            const v = y > threshold ? 255 : 0;
             d[i] = d[i + 1] = d[i + 2] = v;
         }
     } else if (name === "二値化180" || name === "二値化220") {
@@ -627,309 +595,6 @@ function extractLineUnits(line){
 }
 
 function findTargetInUnits(units,target){const text=units.map(u=>u.ch).join(""),hits=[];let from=0;while(from<=text.length-target.length){const i=text.indexOf(target,from);if(i<0)break;const selected=units.slice(i,i+target.length);if(selected.length===target.length)hits.push({targetBox:{x0:Math.min(...selected.map(u=>u.bbox.x0)),y0:Math.min(...selected.map(u=>u.bbox.y0)),x1:Math.max(...selected.map(u=>u.bbox.x1)),y1:Math.max(...selected.map(u=>u.bbox.y1))},symbols:selected});from=i+Math.max(1,target.length);}return hits;}
-
-
-
-// V63実験：OCRで正しく拾えた「文字単体」をテンプレートにして、
-// 同じ文字形＋文字間隔を画像そのものから探す。まずは診断専用で、黒塗りには使用しない。
-function grayPixel(data, w, x, y) {
-  const i = (y * w + x) * 4;
-  return data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114;
-}
-
-function makeTemplateSamples(imageData, x, y, w, h, cols=16, rows=16) {
-  const out=[];
-  for(let ry=0; ry<rows; ry++) for(let rx=0; rx<cols; rx++) {
-    const px=Math.min(imageData.width-1, Math.max(0, Math.floor(x+(rx+0.5)*w/cols)));
-    const py=Math.min(imageData.height-1, Math.max(0, Math.floor(y+(ry+0.5)*h/rows)));
-    out.push(grayPixel(imageData.data,imageData.width,px,py));
-  }
-  const mean=out.reduce((a,b)=>a+b,0)/out.length;
-  const norm=Math.sqrt(out.reduce((a,v)=>a+(v-mean)*(v-mean),0))||1;
-  return {values:out,mean,norm,cols,rows,w,h};
-}
-
-function samplePatchScore(imageData, template, x, y, w=template.w, h=template.h) {
-  const vals=[];
-  for(let ry=0; ry<template.rows; ry++) for(let rx=0; rx<template.cols; rx++) {
-    const px=Math.min(imageData.width-1, Math.max(0, Math.floor(x+(rx+0.5)*w/template.cols)));
-    const py=Math.min(imageData.height-1, Math.max(0, Math.floor(y+(ry+0.5)*h/template.rows)));
-    vals.push(grayPixel(imageData.data,imageData.width,px,py));
-  }
-  const mean=vals.reduce((a,b)=>a+b,0)/vals.length;
-  let dot=0, norm=0;
-  for(let i=0;i<vals.length;i++) {
-    const a=template.values[i]-template.mean, b=vals[i]-mean;
-    dot+=a*b; norm+=b*b;
-  }
-  return dot/(template.norm*Math.sqrt(norm)||1);
-}
-
-function runGlyphTemplateMatch(sourceCanvas, referenceMatch) {
-  const srcCtx=sourceCanvas.getContext('2d',{willReadFrequently:true});
-  const data=srcCtx.getImageData(0,0,sourceCanvas.width,sourceCanvas.height);
-  const symbols=(referenceMatch.symbols||[]).slice(0,2);
-  if(symbols.length<2) return {error:'基準HITから2文字のsymbol bboxを取得できません。'};
-
-  const glyphs=symbols.map((u,i)=>{
-    const b=u.bbox;
-    return {
-      ch:u.ch,
-      x:Math.round(b.x0), y:Math.round(b.y0),
-      w:Math.max(6,Math.round(b.x1-b.x0)), h:Math.max(6,Math.round(b.y1-b.y0)),
-      index:i
-    };
-  });
-
-  const step=5;
-  const threshold=.72;
-  const perGlyph=[];
-  for(const g of glyphs){
-    const template=makeTemplateSamples(data,g.x,g.y,g.w,g.h,12,12);
-    const candidates=[];
-    for(let y=0;y<=sourceCanvas.height-g.h;y+=step){
-      for(let x=0;x<=sourceCanvas.width-g.w;x+=step){
-        if(Math.abs(x-g.x)<g.w*1.2 && Math.abs(y-g.y)<g.h*1.2) continue;
-        const score=samplePatchScore(data,template,x,y,g.w,g.h);
-        if(score>=threshold) candidates.push({x,y,w:g.w,h:g.h,score,ch:g.ch});
-      }
-    }
-    candidates.sort((a,b)=>b.score-a.score);
-    perGlyph.push({glyph:g,template,candidates:candidates.slice(0,80),rawCount:candidates.length});
-  }
-
-  const a=perGlyph[0], b=perGlyph[1];
-  const pairs=[];
-  const expectedDx=glyphs[1].x-glyphs[0].x;
-  const expectedDy=glyphs[1].y-glyphs[0].y;
-  for(const ca of a.candidates){
-    for(const cb of b.candidates){
-      const dx=cb.x-ca.x, dy=cb.y-ca.y;
-      const dxErr=Math.abs(dx-expectedDx);
-      const dyErr=Math.abs(dy-expectedDy);
-      if(dxErr>Math.max(12,expectedDx*.45) || dyErr>Math.max(10,glyphs[0].h*.5)) continue;
-      const positionScore=Math.max(0,1-dxErr/Math.max(12,expectedDx*.45))*0.7 + Math.max(0,1-dyErr/Math.max(10,glyphs[0].h*.5))*0.3;
-      const score=(ca.score+cb.score)/2 + positionScore*.08;
-      pairs.push({x:ca.x,y:ca.y,w:(cb.x+cb.w)-ca.x,h:Math.max(ca.h,cb.h),score,scoreA:ca.score,scoreB:cb.score,dx,dy});
-    }
-  }
-  pairs.sort((a,b)=>b.score-a.score);
-  const dedup=[];
-  for(const p of pairs){
-    if(dedup.some(q=>Math.abs(q.x-p.x)<12 && Math.abs(q.y-p.y)<12)) continue;
-    dedup.push(p);
-    if(dedup.length>=20) break;
-  }
-  return {
-    glyphs,
-    step,threshold,
-    perGlyph:perGlyph.map(x=>({ch:x.glyph.ch,rawCount:x.rawCount,candidates:x.candidates.slice(0,10)})),
-    pairs:dedup,
-    expectedDx,expectedDy
-  };
-}
-
-
-// V64実験：画像を機械的に分割するのではなく、画素の密度から
-// 「文字がありそうな横長の領域」を推定し、その領域だけを局所OCRする。
-// 診断専用。黒塗りには使用しない。
-function detectTextLikeRegions(sourceCanvas) {
-  const ctx=sourceCanvas.getContext('2d',{willReadFrequently:true});
-  const img=ctx.getImageData(0,0,sourceCanvas.width,sourceCanvas.height);
-  const d=img.data, w=img.width, h=img.height;
-  const sample=2;
-  const sw=Math.ceil(w/sample), sh=Math.ceil(h/sample);
-  const regions=[];
-
-  // 黒文字・白文字の両方を軽く見る。スクショの吹き出しや背景を
-  // 完全には判別せず、「文字候補を拾う」ことを目的にする。
-  for(const mode of ['dark','light']){
-    const rows=new Uint16Array(sh);
-    const rowXs=Array.from({length:sh},()=>[w,h,0,0]);
-    for(let sy=0;sy<sh;sy++){
-      const y=Math.min(h-1,sy*sample);
-      for(let sx=0;sx<sw;sx++){
-        const x=Math.min(w-1,sx*sample);
-        const i=(y*w+x)*4;
-        const g=d[i]*.299+d[i+1]*.587+d[i+2]*.114;
-        const hit=mode==='dark'?g<185:g>225;
-        if(!hit) continue;
-        rows[sy]++;
-        const r=rowXs[sy];
-        if(x<r[0])r[0]=x; if(y<r[1])r[1]=y;
-        if(x>r[2])r[2]=x; if(y>r[3])r[3]=y;
-      }
-    }
-    const minHits=Math.max(3,Math.round(sw*.0015));
-    let start=-1,last=-1;
-    for(let sy=0;sy<sh;sy++){
-      if(rows[sy]>=minHits){
-        if(start<0)start=sy;
-        last=sy;
-      }else if(start>=0 && sy-last>3){
-        const y0=Math.max(0,start*sample-10), y1=Math.min(h,(last+1)*sample+10);
-        let x0=w,x1=0,total=0;
-        for(let q=start;q<=last;q++){
-          if(rows[q]){
-            x0=Math.min(x0,rowXs[q][0]);
-            x1=Math.max(x1,rowXs[q][2]);
-            total+=rows[q];
-          }
-        }
-        if(x1>x0){
-          x0=Math.max(0,x0-14); x1=Math.min(w,x1+14);
-          const rw=x1-x0,rh=y1-y0;
-          if(rh>=14&&rh<=110&&rw>=35&&rw<=Math.min(w,1400)){
-            regions.push({x:x0,y:y0,w:rw,h:rh,mode,density:total/Math.max(1,rw*rh/(sample*sample))});
-          }
-        }
-        start=-1; last=-1;
-      }
-    }
-    if(start>=0){
-      const y0=Math.max(0,start*sample-10), y1=Math.min(h,(last+1)*sample+10);
-      let x0=w,x1=0,total=0;
-      for(let q=start;q<=last;q++) if(rows[q]){x0=Math.min(x0,rowXs[q][0]);x1=Math.max(x1,rowXs[q][2]);total+=rows[q];}
-      if(x1>x0){
-        x0=Math.max(0,x0-14);x1=Math.min(w,x1+14);
-        const rw=x1-x0,rh=y1-y0;
-        if(rh>=14&&rh<=110&&rw>=35&&rw<=Math.min(w,1400)) regions.push({x:x0,y:y0,w:rw,h:rh,mode,density:total/Math.max(1,rw*rh/(sample*sample))});
-      }
-    }
-  }
-
-  // 重なったdark/light候補や同じ行の候補をまとめる。
-  regions.sort((a,b)=>b.density-a.density);
-  const dedup=[];
-  for(const r of regions){
-    const overlap=dedup.some(q=>{
-      const ix=Math.max(0,Math.min(r.x+r.w,q.x+q.w)-Math.max(r.x,q.x));
-      const iy=Math.max(0,Math.min(r.y+r.h,q.y+q.h)-Math.max(r.y,q.y));
-      return ix*iy>Math.min(r.w*r.h,q.w*q.h)*.45;
-    });
-    if(!overlap) dedup.push(r);
-    if(dedup.length>=24) break;
-  }
-  return {sample,regions:dedup};
-}
-
-async function recognizeLocalRegionVariant(worker, crop, target, mode) {
-  const input = mode === '通常' ? crop : makeOcrVariant(crop, mode);
-  let raw = '';
-  let hit = false;
-  const matches = [];
-  const lineData = [];
-  try {
-    const result = await worker.recognize(input, {tessedit_pageseg_mode:'7'});
-    raw = String(result?.data?.text || '').replace(/\s+/g,' ').trim();
-    for (const line of (result?.data?.lines || [])) {
-      const units = extractLineUnits(line);
-      const found = findTargetInUnits(units, target);
-      lineData.push({units, text: units.map(u => u.ch).join('')});
-      if (found.length) {
-        hit = true;
-        matches.push(...found);
-      }
-    }
-  } catch (e) {
-    raw = `ERROR: ${e?.message || e}`;
-  } finally {
-    if (input !== crop) { input.width = 1; input.height = 1; }
-  }
-  return {mode, raw, hit, matches, lineData};
-}
-
-// V68実験：V64の「文字っぽい横長領域」の検出を維持し、
-// 上位16領域だけでなく検出された全領域を通常OCRする。
-// まず「未走査領域に3個目が存在するか」を確認するためのカバレッジ実験。
-// 前処理追加はこの版では行わず、OCR回数を必要最小限にする。診断専用。
-async function runTextRegionExperiment(worker,sourceCanvas,target) {
-  const detected=detectTextLikeRegions(sourceCanvas);
-  const tested=[];
-  const started=performance.now();
-  const SCALE=2;
-
-  // V64では上位16領域だけをOCRしていたため、検出された残りの領域に
-  // 目的の文字が存在していても拾えない可能性があった。V68では全領域を
-  // 通常OCRして、まず「走査範囲不足」なのかどうかを切り分ける。
-  for(const r of detected.regions) {
-    const crop=document.createElement('canvas');
-    crop.width=Math.max(1,Math.round(r.w*SCALE));
-    crop.height=Math.max(1,Math.round(r.h*SCALE));
-    const cctx=crop.getContext('2d');
-    cctx.imageSmoothingEnabled=true;
-    cctx.imageSmoothingQuality='high';
-    cctx.drawImage(sourceCanvas,r.x,r.y,r.w,r.h,0,0,crop.width,crop.height);
-
-    const normal=await recognizeLocalRegionVariant(worker,crop,target,'通常');
-    tested.push({
-      ...r,
-      hit:normal.hit,
-      baseHit:normal.hit,
-      extraHit:false,
-      variants:[normal],
-      raw:normal.raw
-    });
-    crop.width=1; crop.height=1;
-  }
-  return {
-    detected,
-    tested,
-    elapsed:performance.now()-started,
-    extraRuns:0,
-    extraModes:[]
-  };
-}
-
-// V70本採用用：V68と同じ文字領域検出＋全領域局所OCRを、
-// 実際の自動黒塗り候補として返す。OCRのbboxは2倍拡大した局所画像上の
-// 座標なので、元画像の領域座標へ戻してから既存のmergeMatchesへ渡す。
-async function collectTextRegionMatches(worker, sourceCanvas, target) {
-  const detected = detectTextLikeRegions(sourceCanvas);
-  const SCALE = 2;
-  const matches = [];
-  const tested = [];
-  const started = performance.now();
-
-  for (const r of detected.regions) {
-    const crop = document.createElement('canvas');
-    crop.width = Math.max(1, Math.round(r.w * SCALE));
-    crop.height = Math.max(1, Math.round(r.h * SCALE));
-    const cctx = crop.getContext('2d');
-    cctx.imageSmoothingEnabled = true;
-    cctx.imageSmoothingQuality = 'high';
-    cctx.drawImage(sourceCanvas, r.x, r.y, r.w, r.h, 0, 0, crop.width, crop.height);
-
-    const normal = await recognizeLocalRegionVariant(worker, crop, target, '通常');
-    const regionMatches = [];
-    for (const hit of normal.matches || []) {
-      const b = hit.targetBox;
-      regionMatches.push({
-        x0: r.x + b.x0 / SCALE,
-        y0: r.y + b.y0 / SCALE,
-        x1: r.x + b.x1 / SCALE,
-        y1: r.y + b.y1 / SCALE,
-        symbols: (hit.symbols || []).map(u => ({
-          ...u,
-          bbox: {
-            x0: r.x + u.bbox.x0 / SCALE,
-            y0: r.y + u.bbox.y0 / SCALE,
-            x1: r.x + u.bbox.x1 / SCALE,
-            y1: r.y + u.bbox.y1 / SCALE
-          }
-        })),
-        lineText: normal.raw,
-        source: '局所OCR'
-      });
-    }
-    matches.push(...regionMatches);
-    tested.push({...r, hit:normal.hit, raw:normal.raw, matches:regionMatches, lineData:normal.lineData || []});
-    crop.width = 1;
-    crop.height = 1;
-  }
-
-  return {detected, tested, matches, elapsed: performance.now() - started};
-}
 
 function editDistance(a,b){const A=[...a],B=[...b],d=Array.from({length:A.length+1},()=>Array(B.length+1).fill(0));for(let i=0;i<=A.length;i++)d[i][0]=i;for(let j=0;j<=B.length;j++)d[0][j]=j;for(let i=1;i<=A.length;i++)for(let j=1;j<=B.length;j++)d[i][j]=Math.min(d[i-1][j]+1,d[i][j-1]+1,d[i-1][j-1]+(A[i-1]===B[j-1]?0:1));return d[A.length][B.length];}
 function sequenceSimilarity(a, b) {
@@ -1180,10 +845,14 @@ function buildOcrCanvas(){
   return {canvas:oc,scale};
 }
 
+// 二値化Otsuを第1段階のHIT数に関わらず常に追加実行するか。
+// 前回の検証ではヒット数が増えず処理時間だけ約2倍になったため、既定はオフ。
+const ALWAYS_RUN_OTSU = false;
+
 async function collectOcrResults(worker,target){
   const {canvas:oc,scale}=buildOcrCanvas();
   const results=[];
-  const stats={primaryMs:0,fallbackMs:0,primaryHitCount:0,fallbackUsed:false,primaryName:"グレー＋コントラスト",fallbackNames:["二値化180","二値化220","反転"]};
+  const stats={primaryMs:0,fallbackMs:0,primaryHitCount:0,fallbackUsed:false,primaryName:"グレー＋コントラスト",fallbackNames:["二値化Otsu","二値化180","二値化220","反転"]};
 
   // まず今回の実験で最も安定していた「グレー＋コントラスト」だけを実行。
   // ここで1件でも正確に見つかれば、追加の全体OCRは省略する。
@@ -1200,12 +869,46 @@ async function collectOcrResults(worker,target){
     stats.primaryMs=performance.now()-primaryStarted;
   }
 
+  // 文字色が分かっている場合、その色に近い画素だけを抽出した版でも
+  // 常に追加で1回ずつ実行する(色ごとに1パス)。ユーザーが明示的に色を
+  // 指定した時だけ動く＝デフォルトの速度には影響しない。
+  const textColors=parseTextColors(textColorsInput ? textColorsInput.value : "");
+  stats.colorNames=textColors.map(c=>`色抽出:${c.hex}`);
+  for(const {hex,rgb} of textColors){
+    const name=`色抽出:${hex}`;
+    stats.fallbackUsed=true;
+    status("実行中…");
+    const variant=makeColorExtractVariant(oc,rgb);
+    try {
+      results.push(await recognizeVariant(worker,variant,target,name,scale));
+    } finally {
+      if(variant!==oc){variant.width=1;variant.height=1;}
+    }
+  }
+
+  // 第2段階：「二値化Otsu」は、第1段階のHIT数に関わらず常に追加で1回実行する。
+  // 第1段階で数件ヒットしていても、同じ画像内の別の箇所が取りこぼされる
+  // ことがあるため。重複するHITはmergeMatches()で1つにまとめられ、
+  // 第1段階の結果が優先される。
+  const fallbackStarted=performance.now();
+  const secondPass="二値化Otsu";
+  if(ALWAYS_RUN_OTSU){
+    stats.fallbackUsed=true;
+    status("実行中…");
+    const variant=makeOcrVariant(oc,secondPass);
+    try {
+      results.push(await recognizeVariant(worker,variant,target,secondPass,scale));
+    } finally {
+      if(variant!==oc){variant.width=1;variant.height=1;}
+    }
+  }
+
   // グレー＋コントラストで1件も見つからなかった場合だけ、
-  // 補助的な全体OCRを追加する。通常・グレースケールは今回の実験では外す。
+  // さらに残りの補助的な全体OCR(Otsu以外)を追加する。
   if(stats.primaryHitCount===0){
     stats.fallbackUsed=true;
-    const fallbackStarted=performance.now();
     for(const name of stats.fallbackNames){
+      if(ALWAYS_RUN_OTSU && name===secondPass) continue;
       status("実行中…");
       const variant=makeOcrVariant(oc,name);
       try {
@@ -1214,8 +917,8 @@ async function collectOcrResults(worker,target){
         if(variant!==oc){variant.width=1;variant.height=1;}
       }
     }
-    stats.fallbackMs=performance.now()-fallbackStarted;
   }
+  stats.fallbackMs=performance.now()-fallbackStarted;
 
   return {results,scale,ocrCanvas:oc,stats};
 }
@@ -1441,11 +1144,24 @@ async function refineNearCandidates(worker, results, ocrCanvas, target, scale) {
     // 絞って試す。全体OCRでこれらを毎回回すと画像全体分の時間がかかるが、
     // 候補地点（最大8箇所）だけなら低コストで済む。
     if (!ok && sourceCrop) {
-      for (const variantName of ['二値化180', '二値化220', '反転']) {
+      for (const variantName of ['二値化Otsu', '二値化180', '二値化220', '反転']) {
         if (ok) break;
         extraPasses++;
         const variantCanvas = makeOcrVariant(sourceCrop.canvas, variantName);
         ok = await runLocalCrop({canvas: variantCanvas, x0: sourceCrop.x0, y0: sourceCrop.y0}, variantName, 7);
+        if (variantCanvas !== sourceCrop.canvas) { variantCanvas.width = 1; variantCanvas.height = 1; }
+      }
+    }
+
+    // 指定された文字色でも、この候補地点に絞って試す。
+    if (!ok && sourceCrop) {
+      const textColorsLocal = parseTextColors(textColorsInput ? textColorsInput.value : "");
+      for (const {hex, rgb} of textColorsLocal) {
+        if (ok) break;
+        extraPasses++;
+        const name = `色抽出:${hex}`;
+        const variantCanvas = makeColorExtractVariant(sourceCrop.canvas, rgb);
+        ok = await runLocalCrop({canvas: variantCanvas, x0: sourceCrop.x0, y0: sourceCrop.y0}, name, 7);
         if (variantCanvas !== sourceCrop.canvas) { variantCanvas.width = 1; variantCanvas.height = 1; }
       }
     }
@@ -1485,147 +1201,6 @@ async function refineNearCandidates(worker, results, ocrCanvas, target, scale) {
   };
 }
 
-
-// V70：周囲の文字を手掛かりに、対象文字そのものをOCRできなかった地点を救出する。
-// 例：「ねるちゃん」を1件でも認識できたら「ちゃん」を文脈として学習し、
-// 別の局所OCRで「ちゃん」だけ認識された場合、その直前に対象文字があると推定する。
-// 推定矩形は既知の完全一致HITから得た対象文字の平均サイズと、
-// 対象→文脈の実測間隔を使う。診断にも使えるよう候補情報を返す。
-function collectContextRescueCandidates(results, regionScan, target) {
-  const contexts = [];
-  const exactHits = [];
-  const tlen = [...target].length;
-
-  function addContext(contextText, targetBox, contextBox, source) {
-    if (!contextText || contextText.length < 2 || contextText.length > 4) return;
-    const key = contextText;
-    const gap = contextBox.x0 - targetBox.x1;
-    const width = targetBox.x1 - targetBox.x0;
-    const height = targetBox.y1 - targetBox.y0;
-    if (!(width > 2 && height > 2)) return;
-    const old = contexts.find(x => x.text === key);
-    const sample = {width, height, gap, source};
-    if (old) old.samples.push(sample);
-    else contexts.push({text:key, samples:[sample]});
-  }
-
-  // 全体OCRの完全一致から文脈を学習。
-  for (const r of results || []) {
-    for (const line of r.lines || []) {
-      const units = extractLineUnits(line);
-      const text = units.map(u => u.ch).join('');
-      if (!text) continue;
-      let from = 0;
-      while (from <= text.length - tlen) {
-        const idx = text.indexOf(target, from);
-        if (idx < 0) break;
-        const selected = units.slice(idx, idx + tlen);
-        if (selected.length === tlen) {
-          const tb = {
-            x0: Math.min(...selected.map(u => u.bbox.x0)) / 1,
-            y0: Math.min(...selected.map(u => u.bbox.y0)) / 1,
-            x1: Math.max(...selected.map(u => u.bbox.x1)) / 1,
-            y1: Math.max(...selected.map(u => u.bbox.y1)) / 1
-          };
-          // targetの直後2～4文字を候補にする。最長を優先して学習する。
-          for (const n of [4,3,2]) {
-            const after = units.slice(idx + tlen, idx + tlen + n);
-            if (after.length >= 2) {
-              const ct = after.map(u => u.ch).join('');
-              const cb = {
-                x0: after[0].bbox.x0,
-                y0: Math.min(...after.map(u => u.bbox.y0)),
-                x1: Math.max(...after.map(u => u.bbox.x1)),
-                y1: Math.max(...after.map(u => u.bbox.y1))
-              };
-              addContext(ct, tb, cb, r.mode || '全体OCR');
-            }
-          }
-          exactHits.push({text, targetBox:tb});
-        }
-        from = idx + Math.max(1, tlen);
-      }
-    }
-  }
-
-  // 長い文脈を優先。単独の「ちゃん」より「ちゃん元気」のような文脈が
-  // 得られた場合はそちらを先に使う。
-  contexts.sort((a,b) => b.text.length - a.text.length);
-
-  const stats = contexts.map(c => {
-    const widths = c.samples.map(x=>x.width);
-    const heights = c.samples.map(x=>x.height);
-    const gaps = c.samples.map(x=>x.gap);
-    return {
-      text:c.text,
-      width:widths.reduce((a,b)=>a+b,0)/widths.length,
-      height:heights.reduce((a,b)=>a+b,0)/heights.length,
-      gap:gaps.reduce((a,b)=>a+b,0)/gaps.length,
-      samples:c.samples.length
-    };
-  });
-
-  const candidates = [];
-  const scanLines = [];
-  for (const r of results || []) {
-    for (const line of r.lines || []) {
-      scanLines.push({units:extractLineUnits(line), scale:1, ox:0, oy:0, source:r.mode || '全体OCR'});
-    }
-  }
-  for (const r of (regionScan?.tested || [])) {
-    for (const ld of r.lineData || []) {
-      scanLines.push({units:ld.units || [], scale:2, ox:r.x, oy:r.y, source:'局所OCR'});
-    }
-  }
-
-  for (const c of stats) {
-    for (const line of scanLines) {
-      const units=line.units || [];
-      const text=units.map(u=>u.ch).join('');
-      if (!text || text.includes(target)) continue;
-      let from=0;
-      while (from <= text.length-c.text.length) {
-        const idx=text.indexOf(c.text,from);
-        if (idx<0) break;
-        const contextUnits=units.slice(idx,idx+[...c.text].length);
-        if (contextUnits.length === [...c.text].length) {
-          const first=contextUnits[0].bbox;
-          const last=contextUnits[contextUnits.length-1].bbox;
-          const cx0=line.ox + first.x0/line.scale;
-          const cy0=line.oy + Math.min(...contextUnits.map(u=>u.bbox.y0))/line.scale;
-          const cx1=line.ox + last.x1/line.scale;
-          const cy1=line.oy + Math.max(...contextUnits.map(u=>u.bbox.y1))/line.scale;
-          const targetW=c.width/line.scale;
-          const targetH=c.height/line.scale;
-          const gap=Math.max(0,c.gap/line.scale);
-          const x1=cx0-gap;
-          const x0=x1-targetW;
-          const y0=((cy0+cy1)/2)-targetH/2;
-          const box={x0,y0,x1,y1:y0+targetH};
-          // 同一行に対象文字の完全一致が実際に存在する場合は救出しない。
-          const nearExact=exactHits.some(h=>Math.abs(((h.targetBox.x0+h.targetBox.x1)/2)-((box.x0+box.x1)/2))<Math.max(30,targetW*.9) && Math.abs(((h.targetBox.y0+h.targetBox.y1)/2)-((box.y0+box.y1)/2))<Math.max(25,targetH));
-          if (!nearExact) candidates.push({context:c.text,box,source:line.source,samples:c.samples,confidence:c.samples>=2?'文脈学習2件以上':'文脈学習1件'});
-        }
-        from=idx+1;
-      }
-    }
-  }
-
-  // 同じ地点に複数の文脈が重なった場合は1件にまとめる。
-  const dedup=[];
-  for(const c of candidates){
-    const dup=dedup.some(o=>{
-      const ix0=Math.max(o.box.x0,c.box.x0),iy0=Math.max(o.box.y0,c.box.y0);
-      const ix1=Math.min(o.box.x1,c.box.x1),iy1=Math.min(o.box.y1,c.box.y1);
-      if(ix1<=ix0||iy1<=iy0)return false;
-      const inter=(ix1-ix0)*(iy1-iy0),area=Math.min((o.box.x1-o.box.x0)*(o.box.y1-o.box.y0),(c.box.x1-c.box.x0)*(c.box.y1-c.box.y0));
-      return area>0&&inter/area>.45;
-    });
-    if(!dup)dedup.push(c);
-  }
-  return {contexts:stats,candidates:dedup};
-}
-
 function mergeMatches(results){const all=results.flatMap(r=>r.matches),final=[];for(const box of all){const dup=final.some(o=>{const ix0=Math.max(box.x0,o.x0),iy0=Math.max(box.y0,o.y0),ix1=Math.min(box.x1,o.x1),iy1=Math.min(box.y1,o.y1);if(ix1<=ix0||iy1<=iy0)return false;const inter=(ix1-ix0)*(iy1-iy0),area=Math.min((box.x1-box.x0)*(box.y1-box.y0),(o.x1-o.x0)*(o.y1-o.y0));return area>0&&inter/area>.45;});if(!dup)final.push(box);}return final;}
 
 async function run(){
@@ -1635,7 +1210,7 @@ async function run(){
     const target=normalize(targetText.value);
     if(!target) throw new Error("黒塗りする文字を入力してください。");
 
-    manualStamps.length=0; manualHistory.length=0; selectedManualIndex=-1; editMode=null; ocrBaseCanvas=null; redrawFromBase();
+    manualStamps.length=0; ocrBaseCanvas=null; redrawFromBase();
     const worker=await getWorker(getOcrLanguage(target));
     status("OCR中…\n対象文字を探しています。");
 
@@ -1643,8 +1218,7 @@ async function run(){
     const {results,scale,ocrCanvas}=await collectOcrResults(worker,target);
     const matches=mergeMatches(results);
 
-    // 通常OCRで見つかった対象文字を黒塗り候補として登録。
-    // 実際の描画は最後にまとめて行い、OCR結果も手動黒塗りと同じ編集対象にする。
+    // 通常OCRで見つかった対象文字を黒塗り。
     const paintBoxes=matches.map(b=>({
       x:b.x0, y:b.y0, w:b.x1-b.x0, h:b.y1-b.y0, symbols:b.symbols||[], source:"OCR"
     }));
@@ -1674,303 +1248,16 @@ async function run(){
       if(!duplicate) paintBoxes.push({x:b.x0,y:b.y0,w:b.x1-b.x0,h:b.y1-b.y0,symbols:r.symbols||[],source:r.recovery||"再OCR",rescue:r.recovery==="近似候補救出"});
     }
 
-
-    // V70：V68の「文字領域全走査＋局所OCR」を正式な追加検出ルートとして使用。
-    // 全体OCRで拾えなかった文字も、文字っぽい領域内のPSM7 OCRで拾えた場合は追加する。
-    status("OCR中…\n文字領域を追加走査しています。");
-    const regionScan = await collectTextRegionMatches(worker, canvas, target);
-    for (const b of regionScan.matches) {
-      const duplicate = paintBoxes.some(o => {
-        const ix0 = Math.max(o.x, b.x0), iy0 = Math.max(o.y, b.y0);
-        const ix1 = Math.min(o.x + o.w, b.x1), iy1 = Math.min(o.y + o.h, b.y1);
-        if (ix1 <= ix0 || iy1 <= iy0) return false;
-        const inter = (ix1 - ix0) * (iy1 - iy0);
-        const area = Math.min(o.w * o.h, (b.x1 - b.x0) * (b.y1 - b.y0));
-        return area > 0 && inter / area > .45;
-      });
-      if (!duplicate) {
-        paintBoxes.push({
-          x: b.x0, y: b.y0, w: b.x1 - b.x0, h: b.y1 - b.y0,
-          symbols: b.symbols || [], source: "局所OCR"
-        });
-      }
+    for(const b of paintBoxes){
+      paintOcr({x:b.x,y:b.y,w:b.w,h:b.h},overlayName.checked?overlayText.value:"",b.symbols||[],b.rescue===true);
     }
 
-    // V70：周囲の文字を手掛かりにした追加救出。
-    // まず今回のOCR結果から「対象文字の直後に出やすい文脈」を学習し、
-    // 局所OCRで文脈だけ拾えた地点を対象文字の推定位置として追加する。
-    status("OCR中…\n周囲の文字から見落としを確認しています。");
-    const contextRescue = collectContextRescueCandidates(results, regionScan, target);
-    for (const c of contextRescue.candidates) {
-      const b = c.box;
-      const duplicate = paintBoxes.some(o => {
-        const ix0 = Math.max(o.x, b.x0), iy0 = Math.max(o.y, b.y0);
-        const ix1 = Math.min(o.x + o.w, b.x1), iy1 = Math.min(o.y + o.h, b.y1);
-        if (ix1 <= ix0 || iy1 <= iy0) return false;
-        const inter = (ix1 - ix0) * (iy1 - iy0);
-        const area = Math.min(o.w * o.h, (b.x1 - b.x0) * (b.y1 - b.y0));
-        return area > 0 && inter / area > .45;
-      });
-      if (!duplicate) {
-        paintBoxes.push({
-          x:b.x0, y:b.y0, w:b.x1-b.x0, h:b.y1-b.y0,
-          symbols:[], source:"文脈救出", rescue:true, context:c.context
-        });
-      }
-    }
-
-    // OCR黒塗りを編集可能なオブジェクトとして登録する。
-    // OCR専用の補正・余白計算はここで一度だけ行い、以後の移動・サイズ変更では
-    // その最終黒塗り矩形をそのまま編集する。
     ocrBaseCanvas=document.createElement("canvas");
     ocrBaseCanvas.width=canvas.width; ocrBaseCanvas.height=canvas.height;
-    const baseCtx=ocrBaseCanvas.getContext("2d");
-    baseCtx.drawImage(sourceImage,0,0);
-
-    pushManualHistory();
-    for(const b of paintBoxes){
-      const rect=getOcrVisualRect({x:b.x,y:b.y,w:b.w,h:b.h},b.symbols||[],b.rescue===true);
-      if(rect.w < 1 || rect.h < 1) continue;
-      manualStamps.push({
-        x:rect.x, y:rect.y, w:rect.w, h:rect.h,
-        text:overlayName.checked?overlayText.value:"",
-        kind:"ocr"
-      });
-    }
-    redrawFromBase();
+    ocrBaseCanvas.getContext("2d").drawImage(canvas,0,0);
     saveBtn.disabled=false; manualBtn.disabled=false;
-    const localAdded = Math.max(0, paintBoxes.length - matches.length);
-    status(`黒塗り完了：${manualStamps.length}箇所\n通常OCR：${matches.length}箇所 / 追加局所OCR：${localAdded}箇所`);
+    status(`黒塗り完了：${paintBoxes.length}箇所\n通常OCR：${matches.length}箇所 / 再OCR：${paintBoxes.length-matches.length}箇所`);
   }catch(error){status("OCRでエラーが発生しました。下のエラー詳細を確認してください。",error);}
-}
-
-
-// V73：Claude版の「指定色に近い画素を黒、それ以外を白」にする方式を、
-// V72の色領域＋局所OCRへ追加する実験。元画像や既存OCRは変更しない。
-const COLOR_EXTRACT_TOLERANCE = 60;
-
-function parseTextColors(text) {
-  const out=[];
-  for(const token of String(text||'').split(/[,\\n\\s]+/)){
-    const m=token.trim().match(/^#?([0-9a-fA-F]{6})$/);
-    if(!m) continue;
-    const hex=m[1];
-    out.push({hex:'#'+hex.toUpperCase(),rgb:{r:parseInt(hex.slice(0,2),16),g:parseInt(hex.slice(2,4),16),b:parseInt(hex.slice(4,6),16)}});
-  }
-  return out;
-}
-
-function makeColorExtractVariant(baseCanvas, rgb) {
-  const c=document.createElement('canvas');
-  c.width=baseCanvas.width; c.height=baseCanvas.height;
-  const cctx=c.getContext('2d');
-  cctx.drawImage(baseCanvas,0,0);
-  const img=cctx.getImageData(0,0,c.width,c.height),d=img.data;
-  const tol2=COLOR_EXTRACT_TOLERANCE*COLOR_EXTRACT_TOLERANCE;
-  for(let i=0;i<d.length;i+=4){
-    const dr=d[i]-rgb.r,dg=d[i+1]-rgb.g,db=d[i+2]-rgb.b;
-    const dist2=dr*dr+dg*dg+db*db;
-    const v=dist2<=tol2?0:255;
-    d[i]=d[i+1]=d[i+2]=v;
-  }
-  cctx.putImageData(img,0,0);
-  return c;
-}
-
-async function runColorExtractOCR(worker, sourceCanvas, target, colors, detectedRegions) {
-  const started=performance.now();
-  const matches=[];
-  const tested=[];
-  const seen=[];
-  const SCALE=2;
-  for(const color of colors){
-    for(const r of detectedRegions){
-      const crop=document.createElement('canvas');
-      crop.width=Math.max(1,Math.round(r.w*SCALE));
-      crop.height=Math.max(1,Math.round(r.h*SCALE));
-      const cc=crop.getContext('2d');
-      cc.imageSmoothingEnabled=true;
-      cc.imageSmoothingQuality='high';
-      cc.drawImage(sourceCanvas,r.x,r.y,r.w,r.h,0,0,crop.width,crop.height);
-      const variant=makeColorExtractVariant(crop,color.rgb);
-      const normal=await recognizeLocalRegionVariant(worker,variant,target,`色抽出 ${color.hex}`);
-      const regionMatches=[];
-      for(const hit of normal.matches||[]){
-        const b=hit.targetBox;
-        const mapped={
-          x0:r.x+b.x0/SCALE,y0:r.y+b.y0/SCALE,
-          x1:r.x+b.x1/SCALE,y1:r.y+b.y1/SCALE,
-          symbols:(hit.symbols||[]).map(u=>({...u,bbox:{
-            x0:r.x+u.bbox.x0/SCALE,y0:r.y+u.bbox.y0/SCALE,
-            x1:r.x+u.bbox.x1/SCALE,y1:r.y+u.bbox.y1/SCALE
-          }})),
-          lineText:normal.raw,source:'指定色抽出OCR',color:color.hex
-        };
-        const dup=seen.some(m=>Math.abs(m.x0-mapped.x0)<5&&Math.abs(m.y0-mapped.y0)<5&&Math.abs(m.x1-mapped.x1)<5&&Math.abs(m.y1-mapped.y1)<5);
-        if(!dup){seen.push(mapped);matches.push(mapped);regionMatches.push(mapped);}
-      }
-      tested.push({color:color.hex,region:r,hit:regionMatches.length>0,raw:normal.raw,matches:regionMatches});
-      variant.width=1;variant.height=1;crop.width=1;crop.height=1;
-    }
-  }
-  return {matches,tested,elapsed:performance.now()-started};
-}
-
-// V72：zetaの表示テーマに合わせた「文字色候補領域」抽出の診断。
-// まだ黒塗りには使わず、色のまとまりからOCR対象を絞れるかだけを見る。
-function detectColorTextRegions(sourceCanvas) {
-  const ctx=sourceCanvas.getContext('2d',{willReadFrequently:true});
-  const img=ctx.getImageData(0,0,sourceCanvas.width,sourceCanvas.height);
-  const d=img.data, w=img.width, h=img.height;
-  const sample=3;
-  const sw=Math.ceil(w/sample), sh=Math.ceil(h/sample);
-  const modes=[
-    {name:'白文字', test:(r,g,b)=>{
-      const mx=Math.max(r,g,b), mn=Math.min(r,g,b), lum=.299*r+.587*g+.114*b;
-      return lum>=220 && mx-mn<=28;
-    }},
-    {name:'グレー文字', test:(r,g,b)=>{
-      const mx=Math.max(r,g,b), mn=Math.min(r,g,b), lum=.299*r+.587*g+.114*b;
-      return lum>=105 && lum<220 && mx-mn<=30;
-    }},
-    {name:'暗色文字', test:(r,g,b)=>{
-      const mx=Math.max(r,g,b), mn=Math.min(r,g,b), lum=.299*r+.587*g+.114*b;
-      return lum<105 && mx-mn<=35;
-    }}
-  ];
-  const all=[];
-  const stats=[];
-  for(const mode of modes){
-    const rows=new Uint16Array(sh);
-    const rowXs=Array.from({length:sh},()=>[w,h,0,0]);
-    let hits=0, sampled=0;
-    for(let sy=0;sy<sh;sy++){
-      const y=Math.min(h-1,sy*sample);
-      for(let sx=0;sx<sw;sx++){
-        const x=Math.min(w-1,sx*sample);
-        const i=(y*w+x)*4;
-        sampled++;
-        if(!mode.test(d[i],d[i+1],d[i+2])) continue;
-        hits++; rows[sy]++;
-        const rr=rowXs[sy];
-        if(x<rr[0])rr[0]=x;
-        if(y<rr[1])rr[1]=y;
-        if(x>rr[2])rr[2]=x;
-        if(y>rr[3])rr[3]=y;
-      }
-    }
-    stats.push({name:mode.name,pixelHits:hits,sampledPixels:sampled,ratio:hits/Math.max(1,sampled)});
-    let start=-1,last=-1;
-    const finish=(a,b)=>{
-      if(a<0||b<a)return;
-      let x0=w,x1=0,total=0;
-      for(let q=a;q<=b;q++) if(rows[q]){
-        x0=Math.min(x0,rowXs[q][0]);
-        x1=Math.max(x1,rowXs[q][2]);
-        total+=rows[q];
-      }
-      if(x1<=x0)return;
-      const y0=Math.max(0,a*sample-10), y1=Math.min(h,(b+1)*sample+10);
-      x0=Math.max(0,x0-14); x1=Math.min(w,x1+14);
-      const rw=x1-x0, rh=y1-y0;
-      if(rh<14||rh>110||rw<35||rw>Math.min(w,1400))return;
-      const coverage=total/Math.max(1,(rw*rh)/(sample*sample));
-      if(coverage<0.004)return;
-      all.push({x:x0,y:y0,w:rw,h:rh,mode:mode.name,density:coverage});
-    };
-    for(let sy=0;sy<sh;sy++){
-      if(rows[sy]>=Math.max(2,Math.round(sw*.0009))){
-        if(start<0)start=sy;
-        last=sy;
-      }else if(start>=0 && sy-last>2){
-        finish(start,last); start=-1; last=-1;
-      }
-    }
-    if(start>=0)finish(start,last);
-  }
-  all.sort((a,b)=>b.density-a.density);
-  const regions=[];
-  for(const r of all){
-    const overlap=regions.some(q=>{
-      const ix=Math.max(0,Math.min(r.x+r.w,q.x+q.w)-Math.max(r.x,q.x));
-      const iy=Math.max(0,Math.min(r.y+r.h,q.y+q.h)-Math.max(r.y,q.y));
-      return ix*iy>Math.min(r.w*r.h,q.w*q.h)*.45;
-    });
-    if(!overlap)regions.push(r);
-    if(regions.length>=24)break;
-  }
-  return {sample,regions,stats};
-}
-
-async function runColorTextRegionExperiment(worker, sourceCanvas, target) {
-  const detected=detectColorTextRegions(sourceCanvas);
-  const tested=[];
-  const matches=[];
-  const started=performance.now();
-  const SCALE=2;
-  for(const r of detected.regions){
-    const crop=document.createElement('canvas');
-    crop.width=Math.max(1,Math.round(r.w*SCALE));
-    crop.height=Math.max(1,Math.round(r.h*SCALE));
-    const cctx=crop.getContext('2d');
-    cctx.imageSmoothingEnabled=true;
-    cctx.imageSmoothingQuality='high';
-    cctx.drawImage(sourceCanvas,r.x,r.y,r.w,r.h,0,0,crop.width,crop.height);
-    const normal=await recognizeLocalRegionVariant(worker,crop,target,'通常');
-    const regionMatches=[];
-    for(const hit of normal.matches||[]){
-      const b=hit.targetBox;
-      const mapped={
-        x0:r.x+b.x0/SCALE, y0:r.y+b.y0/SCALE,
-        x1:r.x+b.x1/SCALE, y1:r.y+b.y1/SCALE,
-        symbols:(hit.symbols||[]).map(u=>({...u,bbox:{
-          x0:r.x+u.bbox.x0/SCALE,y0:r.y+u.bbox.y0/SCALE,
-          x1:r.x+u.bbox.x1/SCALE,y1:r.y+u.bbox.y1/SCALE
-        }})),
-        lineText:normal.raw, source:'色抽出局所OCR'
-      };
-      regionMatches.push(mapped);
-      matches.push(mapped);
-    }
-    tested.push({...r,hit:normal.hit,raw:normal.raw,matches:regionMatches,lineData:normal.lineData||[],coverage:r.density});
-    crop.width=1; crop.height=1;
-  }
-  return {detected,tested,matches,elapsed:performance.now()-started};
-}
-
-async function diagnoseColorOnly(){
-  ocrDiagnostics.hidden=false;
-  ocrDebugLayer.hidden=true;
-  ocrDebugLayer.innerHTML="";
-  canvas.hidden=false; canvas.style.display='block';
-  try{
-    if(!sourceImage)throw new Error("先に画像を選択してください。");
-    const target=normalize(targetText.value);
-    if(!target)throw new Error("黒塗りする文字を入力してください。");
-    const colors=parseTextColors(textColorsInput.value);
-    if(!colors.length)throw new Error("文字色を1色以上、#RRGGBB形式で入力してください。");
-    const totalStarted=performance.now();
-    const worker=await getWorker(getOcrLanguage(target));
-    status("色抽出診断中…\n指定色を黒文字・それ以外を白に統一してOCRしています。");
-    const detected=detectColorTextRegions(canvas);
-    const result=await runColorExtractOCR(worker,canvas,target,colors,detected.regions);
-    const lines=[`対象文字：${targetText.value}`,`正規化後：${target}`,`指定色：${colors.map(c=>c.hex).join(' / ')}`,"",
-      `===== V73 指定色抽出＋V72色領域局所OCR =====`,
-      `候補領域：${detected.regions.length}領域 / 色抽出OCR：${result.tested.length}回 / 走査間隔：${detected.sample}px / 2倍・PSM7`,
-      `色抽出許容差：RGB距離 ${COLOR_EXTRACT_TOLERANCE}`];
-    lines.push(`対象文字HIT：${result.matches.length}件`);
-    result.tested.forEach((t,i)=>{
-      const r=t.region;
-      lines.push(`  ${i+1}: ${t.color} / 色領域${detected.regions.indexOf(r)+1} / (${r.x},${r.y},w${r.w},h${r.h}) / ${t.hit?'★対象HIT':'HITなし'} / 「${t.raw.length>70?t.raw.slice(0,70)+'…':t.raw}」`);
-      (t.matches||[]).forEach((m,j)=>lines.push(`    → HIT${j+1}: bbox=(${Math.round(m.x0)},${Math.round(m.y0)},w${Math.round(m.x1-m.x0)},h${Math.round(m.y1-m.y0)}) / 「${m.lineText}」`));
-    });
-    lines.push("",`指定色抽出OCR時間：${(result.elapsed/1000).toFixed(2)}秒`,`診断全体：${((performance.now()-totalStarted)/1000).toFixed(2)}秒`,"",
-      `※ 指定色に近い画素だけを黒、それ以外を白に変換してからOCRしています。`,
-      `※ まだ自動黒塗りには使用しません。`,
-      `※ 色抽出の許容差はRGB空間のユークリッド距離です。`);
-    ocrDiagnostics.textContent=lines.join("\n");
-    status(`指定色抽出診断完了。\n対象文字HIT：${result.matches.length}件\n処理時間：${((performance.now()-totalStarted)/1000).toFixed(2)}秒\n下の診断結果を確認してください。`);
-  }catch(error){status("色抽出診断でエラーが発生しました。",error);}
 }
 
 async function diagnoseOCR(){
@@ -1994,14 +1281,10 @@ async function diagnoseOCR(){
     const refine=await refineNearCandidates(worker,results,ocrCanvas,target,scale);
     const refineElapsed=performance.now()-refineStarted;
     const {groups:candidateGroups,refined,acceptedNear}=refine;
-    // V70.1: 診断側でも文脈救出結果を必ず初期化する。
-    // 実処理(run)では局所OCR結果も渡すが、診断ではここまでで局所OCRを
-    // 実行していないため、まず全体OCRだけを対象にする。
-    const contextRescue = collectContextRescueCandidates(results, null, target);
     const totalElapsed=performance.now()-totalStarted;
     const exactCount=results.reduce((n,r)=>n+r.matches.length,0);
     const candidateCount=results.reduce((n,r)=>n+r.near.length,0);
-    const lines=[`対象文字：${targetText.value}`,`正規化後：${target}`,""];
+    const lines=[`対象文字：${targetText.value}`,`正規化後：${target}`,`使用モデル：${workerModelLabel||"不明"}`,""];
     for(const r of results){
       lines.push(`===== ${r.mode} / PSM 11 =====`,`HIT：${r.matches.length}件`);
       for(const m of r.matches){
@@ -2063,65 +1346,8 @@ async function diagnoseOCR(){
     const verifyElapsed=performance.now()-verifyStarted;
     lines.push(`検証時間：${(verifyElapsed/1000).toFixed(2)}秒 / 修正：${changedCount}件 / 対象：${exactMatches.length}件`);
 
-    // V67実験：V64の文字領域推定を維持し、通常OCRで見つからなかった領域だけ
-    // 前処理違いの局所OCRを追加する。
-    lines.push("",`===== 文字領域全走査＋局所OCR実験（V70） =====`);
-    const regionResult=await runTextRegionExperiment(worker,canvas,target);
-    lines.push(`検出候補：${regionResult.detected.regions.length}領域 / 局所OCR実行：${regionResult.tested.length}領域 / 走査間隔：${regionResult.detected.sample}px / 通常：2倍・PSM7`);
-    lines.push(`追加前処理：なし / 追加OCR実行：0回`);
-    const regionHits=regionResult.tested.filter(r=>r.hit);
-    const baseHits=regionResult.tested.filter(r=>r.baseHit);
-    const extraHits=regionResult.tested.filter(r=>r.extraHit);
-    lines.push(`対象文字HIT：${regionHits.length}領域（通常OCR：${baseHits.length} / 前処理追加：${extraHits.length}）`);
-    regionResult.tested.forEach((r,i)=>{
-      const hitModes=r.variants.filter(v=>v.hit).map(v=>v.mode);
-      const display=hitModes.length?`★対象HIT [${hitModes.join('・')}]`:'HITなし';
-      const rawPreview=r.variants.map(v=>`${v.mode}「${v.raw.length>55?v.raw.slice(0,55)+'…':v.raw}」`).join(' / ');
-      lines.push(`  領域${i+1}: (${r.x},${r.y},w${r.w},h${r.h}) / ${r.mode} / ${display} / ${rawPreview}`);
-    });
-    lines.push(`局所OCR時間：${(regionResult.elapsed/1000).toFixed(2)}秒`);
-    lines.push(`※ V68の全領域走査方式を診断用にも使用。V70本体では、この局所OCRのHITを追加の黒塗り候補として統合します。`);
-
-    // V63実験：文字列全体ではなく、OCRが拾えた各文字を個別テンプレート化して組み合わせる。
-    lines.push("",`===== 文字単体テンプレート照合実験（V63） =====`);
-    if(exactMatches.length){
-      const ref=exactMatches[0];
-      const gr=runGlyphTemplateMatch(canvas,ref);
-      if(gr.error){
-        lines.push(gr.error);
-      }else{
-        lines.push(`基準文字：${gr.glyphs.map(g=>`「${g.ch}」=(${g.x},${g.y},w${g.w},h${g.h})`).join(' / ')}`);
-        lines.push(`走査間隔：${gr.step}px / 採用閾値：${gr.threshold.toFixed(2)} / 想定文字間隔：dx=${gr.expectedDx}, dy=${gr.expectedDy}`);
-        gr.perGlyph.forEach(g=>{
-          lines.push(`文字「${g.ch}」：閾値以上 ${g.rawCount}件`);
-          g.candidates.slice(0,5).forEach((c,i)=>lines.push(`  候補${i+1}: score ${c.score.toFixed(3)} / (${c.x},${c.y},w${c.w},h${c.h})`));
-        });
-        if(gr.pairs.length){
-          lines.push(`2文字セット成立候補：${gr.pairs.length}件`);
-          gr.pairs.slice(0,10).forEach((p,i)=>lines.push(`  セット${i+1}: score ${p.score.toFixed(3)} / ね(${p.x},${p.y}) + る(dx=${p.dx},dy=${p.dy}) / 個別 ${p.scoreA.toFixed(3)}・${p.scoreB.toFixed(3)}`));
-        }else{
-          lines.push(`2文字セット成立候補：0件`);
-        }
-        lines.push(`※ 文字単体の形＋2文字の相対位置だけを見ています。今回は黒塗りには使用しません。`);
-      }
-    }else{
-      lines.push(`完全一致HITがないため文字テンプレートを作成できません。`);
-    }
-
-    lines.push("",`===== V70 文脈救出 =====`);
-    if(contextRescue.contexts.length){
-      lines.push(`学習文脈：${contextRescue.contexts.map(c=>`「${c.text}」(${c.samples}件)`).join(' / ')}`);
-    }else{
-      lines.push(`学習文脈：なし`);
-    }
-    lines.push(`文脈候補：${contextRescue.candidates.length}件 / 救出候補：${contextRescue.candidates.length}件`);
-    contextRescue.candidates.slice(0,20).forEach((c,i)=>{
-      lines.push(`  候補${i+1}: 文脈「${c.context}」 / (${Math.round(c.box.x0)},${Math.round(c.box.y0)},w${Math.round(c.box.x1-c.box.x0)},h${Math.round(c.box.y1-c.box.y0)}) / ${c.source} / ${c.confidence}`);
-    });
-    lines.push(`※ V70では、完全一致HITから対象文字の直後の2～4文字を文脈として学習します。`);
-    lines.push(`※ 文脈だけが認識された地点では、既知の対象文字サイズと対象→文脈の間隔から位置を推定します。`);
-
-    lines.push("",`===== 処理時間 =====`,
+    lines.push("",
+      `===== 処理時間 =====`,
       `OCR全体：${(ocrElapsed/1000).toFixed(2)}秒`,
       `  第1段階（グレー＋コントラスト）：${(stats.primaryMs/1000).toFixed(2)}秒 / HIT ${stats.primaryHitCount}件`,
       `  追加全体OCR：${stats.fallbackUsed ? (stats.fallbackMs/1000).toFixed(2)+"秒 / 実行" : "0.00秒 / 省略"}`,
@@ -2130,8 +1356,9 @@ async function diagnoseOCR(){
       `候補地点：${candidateGroups.length} / 近似候補救出：${refine.fastRecovered} / 再OCR実行：${refine.attempted} / 再OCR追加パス：${refine.extraPasses} / 既存HITで省略：${refine.skippedExact}`,
       "",
       `※ 今回は速度実験として、まずグレー＋コントラストだけを全体OCRします。`,
-      `※ 第1段階で1件以上HITした場合、二値化180・220・反転の全体OCRは省略します。`,
-      `※ 第1段階でHITが0件の場合だけ、二値化180・220・反転を追加します。`,
+      `※ 第1段階で1件以上HITした場合、二値化Otsu・180・220・反転の追加OCRは省略します。`,
+      `※ 第1段階でHITが0件の場合だけ、二値化Otsu・180・220・反転を追加します。`,
+      `※ 文字色の指定がある場合、色抽出パスはHIT数に関わらず常に追加実行します。`,
       `※ 候補地点は同じ位置付近の候補をまとめています。`,
       `※ 近似候補は、対象文字と同じ文字数で、3文字以上の対象なら「対象の1文字違い」程度を先に救出します。
 ※ 近似候補の黒塗り範囲は、候補地点全体ではなく採用候補自身のbboxを使います。`,
@@ -2213,21 +1440,18 @@ function stopManualMode() {
 function placeStampAt(point) {
     if (!manualStamps.length) return;
 
-    const last = getLastManualStamp();
-    if (!last) return;
+    const last = manualStamps[manualStamps.length - 1];
     const stamp = {
         x: point.x - last.w / 2,
         y: point.y - last.h / 2,
         w: last.w,
         h: last.h,
-        text: overlayName.checked ? overlayText.value : "",
-        kind: "manual"
+        text: overlayName.checked ? overlayText.value : ""
     };
 
     stamp.x = Math.max(0, Math.min(canvas.width - stamp.w, stamp.x));
     stamp.y = Math.max(0, Math.min(canvas.height - stamp.h, stamp.y));
 
-    pushManualHistory();
     manualStamps.push(stamp);
     paintManual(stamp, stamp.text);
     updateUndoButton();
@@ -2248,39 +1472,13 @@ function finishStamp(point) {
         return;
     }
 
-    const stamp = { x, y, w, h, text: overlayName.checked ? overlayText.value : "", kind: "manual" };
-    pushManualHistory();
+    const stamp = { x, y, w, h, text: overlayName.checked ? overlayText.value : "" };
     manualStamps.push(stamp);
     paintManual(stamp, stamp.text);
     updateUndoButton();
     saveBtn.disabled = false;
     status(`手動黒塗りを追加しました。\n追加済み：${manualStamps.length}箇所`);
     dragStart = null;
-}
-
-function getRawManualPoint(event) {
-    return getCanvasPoint(event);
-}
-
-// 新規黒塗りを作るときだけ、指から少し左上へ操作位置をずらす。
-// 既存黒塗りの編集（移動・サイズ変更）では指の位置をそのまま使う。
-function getManualPoint(event, applyOffset = true) {
-    if (applyOffset && event.pointerType === "touch") {
-        return getCanvasPoint({
-            clientX: event.clientX + TOUCH_X_OFFSET,
-            clientY: event.clientY + TOUCH_Y_OFFSET
-        });
-    }
-    return getRawManualPoint(event);
-}
-
-function getPointerCenter() {
-    const values = [...pointers.values()];
-    if (!values.length) return null;
-    return {
-        x: values.reduce((sum, p) => sum + p.x, 0) / values.length,
-        y: values.reduce((sum, p) => sum + p.y, 0) / values.length
-    };
 }
 
 canvasWrap.addEventListener("pointerdown", event => {
@@ -2294,50 +1492,18 @@ canvasWrap.addEventListener("pointerdown", event => {
         selection.hidden = true;
         pinchStartDistance = getPointerDistance();
         pinchStartZoom = zoom;
-        panLastCenter = getPointerCenter();
         event.preventDefault();
         return;
     }
 
-    panLastCenter = null;
-
     if (!manualMode) return;
     event.preventDefault();
-    const rawPoint = getRawManualPoint(event);
+    dragStart = getCanvasPoint(event);
 
-    // 既存の手動黒塗りをタップすると編集対象にする。
-    // 編集時はオフセットを使わず、指の位置をそのまま操作位置にする。
-    // スタンプモード中でも、まず既存黒塗りの編集を優先する。
-    const hitIndex = hitTestManual(rawPoint);
-    if (hitIndex >= 0) {
-        dragStart = rawPoint;
-        selectedManualIndex = hitIndex;
-        const hitStamp = manualStamps[hitIndex];
-        const handle = getResizeHandle(rawPoint, hitStamp);
-        editMode = {
-            type: handle ? "resize" : "move",
-            handle,
-            startPoint: { ...dragStart },
-            original: { ...hitStamp },
-            historyPushed: false
-        };
-        isDragging = true;
-        renderManualSelection();
-        status("黒塗りを選択中です。\n中央をドラッグ：移動 / 四隅をドラッグ：サイズ変更");
-        return;
-    }
-
-    selectedManualIndex = -1;
-    editMode = null;
-    renderManualSelection();
-
-    // 新規黒塗りは指から左上へオフセットした位置を使う。
-    dragStart = getManualPoint(event, true);
-
-    if (stampMode.checked && getLastManualStamp()) {
+    if (stampMode.checked && manualStamps.length) {
         stampTapStart = { x: event.clientX, y: event.clientY };
         isDragging = false;
-        const last = getLastManualStamp();
+        const last = manualStamps[manualStamps.length - 1];
         updateSelection(
             { x: dragStart.x - last.w / 2, y: dragStart.y - last.h / 2 },
             { x: dragStart.x + last.w / 2, y: dragStart.y + last.h / 2 }
@@ -2356,15 +1522,9 @@ canvasWrap.addEventListener("pointermove", event => {
 
     if (pointers.size >= 2) {
         const distance = getPointerDistance();
-        const center = getPointerCenter();
         if (pinchStartDistance > 0 && distance > 0) {
             setZoom(pinchStartZoom * distance / pinchStartDistance);
         }
-        if (center && panLastCenter) {
-            canvasWrap.scrollLeft -= center.x - panLastCenter.x;
-            canvasWrap.scrollTop -= center.y - panLastCenter.y;
-        }
-        panLastCenter = center;
         event.preventDefault();
         return;
     }
@@ -2372,21 +1532,9 @@ canvasWrap.addEventListener("pointermove", event => {
     if (!manualMode) return;
     event.preventDefault();
 
-    if (editMode && selectedManualIndex >= 0 && isDragging) {
-        const point = getManualPoint(event, false);
-        if (!editMode.historyPushed) {
-            pushManualHistory();
-            editMode.historyPushed = true;
-        }
-        if (editMode.type === "move") applyMoveEdit(point);
-        else applyResizeEdit(point);
-        redrawFromBase();
-        return;
-    }
-
-    if (stampMode.checked && stampTapStart && getLastManualStamp()) {
-        const point = getManualPoint(event, true);
-        const last = getLastManualStamp();
+    if (stampMode.checked && stampTapStart && manualStamps.length) {
+        const point = getCanvasPoint(event);
+        const last = manualStamps[manualStamps.length - 1];
         updateSelection(
             { x: point.x - last.w / 2, y: point.y - last.h / 2 },
             { x: point.x + last.w / 2, y: point.y + last.h / 2 }
@@ -2395,7 +1543,7 @@ canvasWrap.addEventListener("pointermove", event => {
     }
 
     if (!isDragging || !dragStart) return;
-    updateSelection(dragStart, getManualPoint(event, true));
+    updateSelection(dragStart, getCanvasPoint(event));
 });
 
 function endPointer(event) {
@@ -2405,30 +1553,15 @@ function endPointer(event) {
         isDragging = false;
         dragStart = null;
         selection.hidden = true;
-        panLastCenter = getPointerCenter();
         return;
     }
-
-    panLastCenter = null;
 
     if (!manualMode) return;
     event.preventDefault();
 
-    if (editMode && selectedManualIndex >= 0 && isDragging) {
-        const point = getManualPoint(event, false);
-        if (!editMode.historyPushed) {
-            pushManualHistory();
-            editMode.historyPushed = true;
-        }
-        if (editMode.type === "move") applyMoveEdit(point);
-        else applyResizeEdit(point);
-        redrawFromBase();
-        return;
-    }
-
-    if (stampMode.checked && stampTapStart && getLastManualStamp()) {
+    if (stampMode.checked && stampTapStart && manualStamps.length) {
         const moved = Math.hypot(event.clientX - stampTapStart.x, event.clientY - stampTapStart.y);
-        const point = getManualPoint(event);
+        const point = getCanvasPoint(event);
         stampTapStart = null;
         selection.hidden = true;
         dragStart = null;
@@ -2439,26 +1572,12 @@ function endPointer(event) {
 
     if (!isDragging || !dragStart) return;
     isDragging = false;
-    finishStamp(getManualPoint(event));
+    finishStamp(getCanvasPoint(event));
 }
 
 canvasWrap.addEventListener("pointerup", endPointer);
-canvasWrap.addEventListener("dblclick", event => {
-    if (!manualMode || selectedManualIndex < 0 || !manualStamps[selectedManualIndex]) return;
-    const point = getRawManualPoint(event);
-    if (hitTestManual(point) !== selectedManualIndex) return;
-    pushManualHistory();
-    manualStamps.splice(selectedManualIndex, 1);
-    selectedManualIndex = -1;
-    editMode = null;
-    redrawFromBase();
-    saveBtn.disabled = false;
-    status(`選択した黒塗りを削除しました。\n残り：${manualStamps.length}箇所`);
-});
-
 canvasWrap.addEventListener("pointercancel", event => {
     pointers.delete(event.pointerId);
-    panLastCenter = pointers.size ? getPointerCenter() : null;
     isDragging = false;
     dragStart = null;
     stampTapStart = null;
@@ -2478,19 +1597,16 @@ zoomOutBtn.addEventListener("click", () => setZoom(zoom - 0.25));
 zoomInBtn.addEventListener("click", () => setZoom(zoom + 0.25));
 
 undoBtn.addEventListener("click", () => {
-    if (!manualHistory.length) return;
-    const previous = manualHistory.pop();
-    restoreManualSnapshot(previous);
-    status(`直前の操作を取り消しました。\n残り：${manualStamps.length}箇所`);
+    if (!manualStamps.length) return;
+    manualStamps.pop();
+    redrawFromBase();
+    status(`直前の手動黒塗りを取り消しました。\n残り：${manualStamps.length}箇所`);
 });
 
 resetBtn.addEventListener("click", () => {
     if (!sourceImage) return;
     // 自動(OCR)・手動を問わず、黒塗りを全て取り消して元画像の状態に戻す。
     manualStamps.length = 0;
-    manualHistory.length = 0;
-    selectedManualIndex = -1;
-    editMode = null;
     ocrBaseCanvas = null;
     redrawFromBase();
     status("黒塗りをすべてリセットしました。");
@@ -2511,9 +1627,6 @@ fileInput.addEventListener("change", async () => {
         sourceImage = await loadImage(file);
         fileName = (file.name.replace(/\.[^.]+$/, "") || "redacted") + "_redacted.png";
         manualStamps.length = 0;
-        manualHistory.length = 0;
-        selectedManualIndex = -1;
-        editMode = null;
         ocrBaseCanvas = null;
         canvas.width = sourceImage.naturalWidth;
         canvas.height = sourceImage.naturalHeight;
@@ -2522,7 +1635,6 @@ fileInput.addEventListener("change", async () => {
         updateZoomUI();
         redactBtn.disabled = false;
         diagnoseBtn.disabled = !ENABLE_DIAGNOSTIC;
-        colorDiagnoseBtn.disabled = !ENABLE_DIAGNOSTIC;
         manualBtn.disabled = false;
         saveBtn.disabled = false;
         resetBtn.disabled = false;
@@ -2534,10 +1646,7 @@ fileInput.addEventListener("change", async () => {
 });
 
 redactBtn.addEventListener("click", run);
-if (ENABLE_DIAGNOSTIC) {
-  diagnoseBtn.addEventListener("click", diagnoseOCR);
-  colorDiagnoseBtn.addEventListener("click", diagnoseColorOnly);
-}
+if (ENABLE_DIAGNOSTIC) diagnoseBtn.addEventListener("click", diagnoseOCR);
 
 function canvasToBlob() {
     return new Promise((resolve, reject) => {
@@ -2557,7 +1666,7 @@ async function saveImage() {
         const file = new File([blob], fileName, { type: "image/png" });
 
         if (navigator.share && navigator.canShare && navigator.canShare({ files: [file] })) {
-            await navigator.share({ files: [file] });
+            await navigator.share({ files: [file], title: "Zetaスクショ" });
             status("画像を共有シートに渡しました。\n必要な場所へ保存してください。");
             return;
         }

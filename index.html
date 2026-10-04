@@ -3,13 +3,13 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>スクショ黒塗りツール V73</title>
-<link rel="stylesheet" href="style.css?v=31">
+<title>Zetaスクショ黒塗りツール V41 OCR黒塗りbbox補正</title>
+<link rel="stylesheet" href="style.css?v=62">
 <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
 </head>
 <body>
 <main class="container">
-<h1>スクショ黒塗りツール</h1>
+<h1>Zetaスクショ黒塗りツール</h1>
 <p class="description">OCRで名前を自動で黒塗りしたあと、手動で追加の黒塗りができます。</p>
 
 <section class="panel">
@@ -19,9 +19,8 @@
 <label for="targetText">黒塗りする文字</label>
 <input id="targetText" type="text" placeholder="例：ゆーざー" autocomplete="off">
 
-<label for="textColors">文字色（カラー抽出テスト）</label>
-<input id="textColors" type="text" value="#FFFFFF, #A1A1A3" autocomplete="off">
-<small>例：#FFFFFF, #A1A1A3　※今回のテストでは色抽出診断だけに使用</small>
+<label for="textColors">文字色（任意・分かる場合のみ、カンマ区切りで複数可）</label>
+<input id="textColors" type="text" placeholder="例：#1a1a1a, #c7c7c7" autocomplete="off">
 
 <label for="overlayText">置き換え文字</label>
 <input id="overlayText" type="text" value="{{user}}" autocomplete="off">
@@ -36,20 +35,19 @@
 スタンプモード（直前の手動黒塗りと同じサイズ）
 </label>
 
-<div class="button-row main-actions">
-<button id="redactBtn" type="button" disabled>✨ 自動検出</button>
-<button id="manualBtn" type="button" disabled>🖊 手動</button>
-<button id="undoBtn" type="button" disabled>↩️ 戻す</button>
-<button id="resetBtn" class="secondary reset-button" type="button" disabled>🗑</button>
+<div class="button-row">
+<button id="redactBtn" type="button" disabled>OCRして黒塗り</button>
+<button id="diagnoseBtn" type="button" disabled>OCR診断</button>
+<button id="manualBtn" type="button" disabled>手動黒塗り</button>
+<button id="undoBtn" type="button" disabled>直前の黒塗りを取り消す</button>
 </div>
 
-<div class="button-row-left diagnostic-row">
-<button id="diagnoseBtn" type="button" disabled>OCR診断</button>
-<button id="colorDiagnoseBtn" type="button" disabled>🎨 色抽出診断</button>
+<div class="button-row-right">
+<button id="resetBtn" class="secondary" type="button" disabled>黒塗りリセット</button>
 </div>
 
 <p class="manual-help" id="manualHelp" hidden>
-手動黒塗り中：画像の上を指やマウスでドラッグして黒塗りを追加できます。既存の黒塗りはドラッグで移動、四隅でサイズ変更できます。ダブルタップ／ダブルクリックで削除できます。
+手動黒塗り中：画像の上を指やマウスでドラッグして、隠したい範囲を選択してください。何個でも追加できます。
 </p>
 <button id="manualDoneBtn" class="secondary" type="button" hidden>手動黒塗り終了</button>
 </section>
@@ -76,6 +74,6 @@
 <pre id="errorDetails" class="error" hidden></pre>
 <pre id="ocrDiagnostics" class="diagnostics" hidden></pre>
 </main>
-<script src="app.js?v=731"></script>
+<script src="app.js?v=62"></script>
 </body>
 </html>
