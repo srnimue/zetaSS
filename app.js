@@ -623,26 +623,78 @@ function extractLineUnits(line){
   return units;
 }
 
-function findTargetInUnits(units,target){const text=units.map(u=>u.ch).join(""),hits=[];let from=0;while(from<=text.length-target.length){const i=text.indexOf(target,from);if(i<0)break;const selected=units.slice(i,i+target.length);if(selected.length===target.length)hits.push({targetBox:{x0:Math.min(...selected.map(u=>u.bbox.x0)),y0:Math.min(...selected.map(u=>u.bbox.y0)),x1:Math.max(...selected.map(u=>u.bbox.x1)),y1:Math.max(...selected.map(u=>u.bbox.y1))},symbols:selected});from=i+Math.max(1,target.length);}return hits;}
+function makeTargetHit(selected, kind="exact", skipped=[]) {
+  return {
+    targetBox:{
+      x0:Math.min(...selected.map(u=>u.bbox.x0)),
+      y0:Math.min(...selected.map(u=>u.bbox.y0)),
+      x1:Math.max(...selected.map(u=>u.bbox.x1)),
+      y1:Math.max(...selected.map(u=>u.bbox.y1))
+    },
+    symbols:selected,
+    kind,
+    skipped
+  };
+}
 
-// V74実験：局所OCRの「完全一致」だけでなく、同じ文字数で1文字だけ
-// 誤認した候補も調べる。候補地点全体ではなく、該当する文字単位のbboxだけを返す。
-// まだ自動黒塗りには使わず、まず検出力だけを確認する。
-function findLocalNearTargetInUnits(units,target){
+function findTargetInUnits(units,target){
+  const chars=[...target], hits=[];
+  if(!chars.length) return hits;
+  const text=units.map(u=>u.ch).join('');
+  let from=0;
+  while(from<=text.length-chars.length){
+    const i=text.indexOf(target,from);
+    if(i<0) break;
+    const selected=units.slice(i,i+chars.length);
+    if(selected.length===chars.length) hits.push(makeTargetHit(selected,'exact'));
+    from=i+Math.max(1,chars.length);
+  }
+  return hits;
+}
+
+// V75実験：OCRが対象文字の間に余計なunitを挟んだり、文字を細かく分割しても、
+// 「対象文字がこの順番で出現しているか」を見る。完全一致とは別の診断用ルート。
+// 近似文字そのものへの置換は行わず、対象文字が実際にunits内に存在する場合だけ拾う。
+function findTargetInUnitsRobust(units,target,options={}){
   const chars=[...target];
   if(!chars.length) return [];
+  const maxSkip=Math.max(0, options.maxSkip ?? 2);
+  const maxGapFactor=Math.max(1, options.maxGapFactor ?? 3.2);
   const out=[];
-  for(let i=0;i<=units.length-chars.length;i++){
-    const selected=units.slice(i,i+chars.length);
-    const candidate=selected.map(u=>u.ch).join('');
-    if(candidate===target) continue;
-    const diffs=[];
-    for(let j=0;j<chars.length;j++) if(chars[j]!==selected[j].ch) diffs.push(j);
-    // 文字数は同じ、誤認は1文字だけ。挿入・脱落を伴う候補は除外。
-    if(diffs.length!==1) continue;
-    const exactCount=chars.length-1;
-    const box={x0:Math.min(...selected.map(u=>u.bbox.x0)),y0:Math.min(...selected.map(u=>u.bbox.y0)),x1:Math.max(...selected.map(u=>u.bbox.x1)),y1:Math.max(...selected.map(u=>u.bbox.y1))};
-    out.push({candidate,target,similarity:exactCount/chars.length,distance:1,targetBox:box,symbols:selected,changedIndex:diffs[0]});
+
+  for(let start=0; start<units.length; start++){
+    if(units[start]?.ch!==chars[0]) continue;
+    const selected=[units[start]];
+    const skipped=[];
+    let cursor=start;
+    let ok=true;
+
+    for(let ti=1; ti<chars.length; ti++){
+      let foundIndex=-1;
+      const first=selected[selected.length-1];
+      const firstW=Math.max(1, first.bbox.x1-first.bbox.x0);
+      const firstH=Math.max(1, first.bbox.y1-first.bbox.y0);
+      for(let j=cursor+1; j<=Math.min(units.length-1,cursor+maxSkip+1); j++){
+        const u=units[j];
+        if(u.ch!==chars[ti]) continue;
+        const dx=u.bbox.x0-first.bbox.x1;
+        const dy=Math.abs(((u.bbox.y0+u.bbox.y1)/2)-((first.bbox.y0+first.bbox.y1)/2));
+        const h=Math.max(1,u.bbox.y1-u.bbox.y0);
+        const maxDx=Math.max(45, Math.max(firstW,h)*maxGapFactor);
+        const maxDy=Math.max(18, Math.max(firstH,h)*0.9);
+        if(dx>=-Math.max(6,firstW*0.25) && dx<=maxDx && dy<=maxDy){
+          foundIndex=j;
+          break;
+        }
+      }
+      if(foundIndex<0){ ok=false; break; }
+      for(let j=cursor+1;j<foundIndex;j++) skipped.push(units[j]);
+      selected.push(units[foundIndex]);
+      cursor=foundIndex;
+    }
+    if(ok && selected.length===chars.length && skipped.length>0){
+      out.push(makeTargetHit(selected,'robust',skipped));
+    }
   }
   return out;
 }
@@ -837,6 +889,7 @@ async function recognizeLocalRegionVariant(worker, crop, target, mode) {
   let raw = '';
   let hit = false;
   const matches = [];
+  const robustMatches = [];
   const nearMatches = [];
   const lineData = [];
   try {
@@ -845,20 +898,21 @@ async function recognizeLocalRegionVariant(worker, crop, target, mode) {
     for (const line of (result?.data?.lines || [])) {
       const units = extractLineUnits(line);
       const found = findTargetInUnits(units, target);
-      const near = findLocalNearTargetInUnits(units, target);
-      lineData.push({units, text: units.map(u => u.ch).join(''), near});
+      const robust = findTargetInUnitsRobust(units, target);
+      lineData.push({units, text: units.map(u => u.ch).join(''), robust});
       if (found.length) {
         hit = true;
         matches.push(...found);
       }
-      nearMatches.push(...near);
+      robustMatches.push(...robust);
+      nearMatches.push(...robust);
     }
   } catch (e) {
     raw = `ERROR: ${e?.message || e}`;
   } finally {
     if (input !== crop) { input.width = 1; input.height = 1; }
   }
-  return {mode, raw, hit, matches, nearMatches, lineData};
+  return {mode, raw, hit, matches, robustMatches, nearMatches, lineData};
 }
 
 // V68実験：V64の「文字っぽい横長領域」の検出を維持し、
@@ -1865,28 +1919,31 @@ async function diagnoseOCR(){
     const regionHits=regionResult.tested.filter(r=>r.hit);
     const baseHits=regionResult.tested.filter(r=>r.baseHit);
     const extraHits=regionResult.tested.filter(r=>r.extraHit);
-    lines.push(`対象文字HIT：${regionHits.length}領域（通常OCR：${baseHits.length} / 前処理追加：${extraHits.length}）`);
+    const robustRegionHits=regionResult.tested.filter(r=>(r.variants||[]).some(v=>(v.robustMatches||[]).length));
+    lines.push(`対象文字HIT：${regionHits.length}領域（通常OCR：${baseHits.length} / 前処理追加：${extraHits.length} / Robust追加：${robustRegionHits.length}）`);
     regionResult.tested.forEach((r,i)=>{
       const hitModes=r.variants.filter(v=>v.hit).map(v=>v.mode);
+      const robustModes=r.variants.filter(v=>(v.robustMatches||[]).length).map(v=>v.mode);
       const display=hitModes.length?`★対象HIT [${hitModes.join('・')}]`:'HITなし';
+      const robustDisplay=robustModes.length?` / ☆Robust [${robustModes.join('・')}]`:'';
       const rawPreview=r.variants.map(v=>`${v.mode}「${v.raw.length>55?v.raw.slice(0,55)+'…':v.raw}」`).join(' / ');
-      lines.push(`  領域${i+1}: (${r.x},${r.y},w${r.w},h${r.h}) / ${r.mode} / ${display} / ${rawPreview}`);
+      lines.push(`  領域${i+1}: (${r.x},${r.y},w${r.w},h${r.h}) / ${r.mode} / ${display}${robustDisplay} / ${rawPreview}`);
     });
     lines.push(`局所OCR時間：${(regionResult.elapsed/1000).toFixed(2)}秒`);
     lines.push(`※ V68の全領域走査方式を診断用にも使用。V70本体では、この局所OCRのHITを追加の黒塗り候補として統合します。`);
 
-    lines.push('', `===== V74 局所OCR・1文字誤認候補実験 =====`);
-    const localNear=[];
+    lines.push('', `===== V75 局所OCR・順序維持ロバスト一致実験 =====`);
+    const localRobust=[];
     for(const r of regionResult.tested){
       for(const v of (r.variants||[])){
         for(const n of (v.nearMatches||[])){
-          localNear.push({...n, region:r, mode:v.mode, raw:v.raw});
+          localRobust.push({...n, region:r, mode:v.mode, raw:v.raw});
         }
       }
     }
-    const nearUnique=[];
-    for(const n of localNear){
-      const duplicate=nearUnique.some(q=>{
+    const robustUnique=[];
+    for(const n of localRobust){
+      const duplicate=robustUnique.some(q=>{
         const a=n.targetBox,b=q.targetBox;
         const ix0=Math.max(a.x0,b.x0),iy0=Math.max(a.y0,b.y0),ix1=Math.min(a.x1,b.x1),iy1=Math.min(a.y1,b.y1);
         if(ix1<=ix0||iy1<=iy0)return false;
@@ -1894,14 +1951,15 @@ async function diagnoseOCR(){
         const area=Math.min((a.x1-a.x0)*(a.y1-a.y0),(b.x1-b.x0)*(b.y1-b.y0));
         return area>0&&inter/area>.5;
       });
-      if(!duplicate)nearUnique.push(n);
+      if(!duplicate)robustUnique.push(n);
     }
-    lines.push(`1文字誤認候補：${localNear.length}件 / 位置重複除外後：${nearUnique.length}件`);
-    nearUnique.slice(0,30).forEach((n,i)=>{
+    lines.push(`Robust一致：${localRobust.length}件 / 位置重複除外後：${robustUnique.length}件`);
+    robustUnique.slice(0,30).forEach((n,i)=>{
       const b=n.targetBox;
-      lines.push(`  候補${i+1}: OCR「${n.candidate}」→対象「${target}」 / 類似度${Math.round(n.similarity*100)}% / (${Math.round(b.x0)},${Math.round(b.y0)},w${Math.round(b.x1-b.x0)},h${Math.round(b.y1-b.y0)}) / ${n.region.mode} / ${n.region.x},${n.region.y}`);
+      const skippedText=(n.skipped||[]).map(u=>u.ch).join('');
+      lines.push(`  候補${i+1}: 対象「${target}」 / スキップ${(n.skipped||[]).length}unit${skippedText?`「${skippedText}」`:''} / (${Math.round(b.x0)},${Math.round(b.y0)},w${Math.round(b.x1-b.x0)},h${Math.round(b.y1-b.y0)}) / ${n.region.mode} / ${n.region.x},${n.region.y}`);
     });
-    lines.push(`※ 同じ文字数で1文字だけ異なる局所OCR結果を対象にしています。完全一致は除外。まだ黒塗りには使用しません。`);
+    lines.push(`※ 文字の誤認置換はせず、対象文字が指定順で実際に認識された場合だけ対象とします。完全一致は別枠です。`);
 
     // V63実験：文字列全体ではなく、OCRが拾えた各文字を個別テンプレート化して組み合わせる。
     lines.push("",`===== 文字単体テンプレート照合実験（V63） =====`);
