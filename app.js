@@ -652,7 +652,7 @@ function findTargetInUnits(units,target){
   return hits;
 }
 
-// V79実験：OCRが対象文字の間に余計なunitを挟んだり、文字を細かく分割しても、
+// V76実験：OCRが対象文字の間に余計なunitを挟んだり、文字を細かく分割しても、
 // 「対象文字がこの順番で出現しているか」を見る。完全一致とは別の診断用ルート。
 // 近似文字そのものへの置換は行わず、対象文字が実際にunits内に存在する場合だけ拾う。
 function findTargetInUnitsRobust(units,target,options={}){
@@ -1266,39 +1266,6 @@ function makeWhiteBorderCanvas(src,pad){
   return c;
 }
 
-// V79: OCR入力だけに1pxの軽い収縮をかける。
-// 黒文字の細い突起やノイズを1pxだけ削り、文字同士の接触を軽く分離する実験。
-// 元画像・表示用canvas・黒塗り座標は変更しない。
-function erodeBlackPixels(src){
-  const c=document.createElement("canvas");
-  c.width=src.width; c.height=src.height;
-  const g=c.getContext("2d", {willReadFrequently:true});
-  g.drawImage(src,0,0);
-  const img=g.getImageData(0,0,c.width,c.height);
-  const d=img.data;
-  const out=new Uint8ClampedArray(d);
-  const w=c.width, h=c.height;
-  for(let y=1;y<h-1;y++){
-    for(let x=1;x<w-1;x++){
-      const p=(y*w+x)*4;
-      const lum=d[p]*.299+d[p+1]*.587+d[p+2]*.114;
-      if(lum<150){
-        let allDark=true;
-        for(let dy=-1;dy<=1 && allDark;dy++){
-          for(let dx=-1;dx<=1;dx++){
-            const q=((y+dy)*w+(x+dx))*4;
-            const qLum=d[q]*.299+d[q+1]*.587+d[q+2]*.114;
-            if(qLum>=150){ allDark=false; break; }
-          }
-        }
-        if(!allDark) out[p]=out[p+1]=out[p+2]=255;
-      }
-    }
-  }
-  g.putImageData(new ImageData(out,w,h),0,0);
-  return c;
-}
-
 function buildOcrCanvas(){
   // OCR用キャンバス本体は従来の座標系のまま保持し、実際にTesseractへ渡す
   // キャンバスだけに白い10px境界線を追加する。表示用canvasは変更しない。
@@ -1324,15 +1291,13 @@ async function collectOcrResults(worker,target){
   const primaryStarted=performance.now();
   status("実行中…");
   const primaryBase=makeOcrVariant(oc,stats.primaryName);
-  const primaryEroded=erodeBlackPixels(primaryBase);
-  const primaryVariant=makeWhiteBorderCanvas(primaryEroded,OCR_BORDER_PX*scale);
+  const primaryVariant=makeWhiteBorderCanvas(primaryBase,OCR_BORDER_PX*scale);
   try {
     const primary=await recognizeVariant(worker,primaryVariant,target,stats.primaryName,scale,OCR_BORDER_PX*scale,OCR_BORDER_PX*scale);
     results.push(primary);
     stats.primaryHitCount=primary.matches.length;
   } finally {
     primaryVariant.width=1;primaryVariant.height=1;
-    primaryEroded.width=1;primaryEroded.height=1;
     if(primaryBase!==oc){primaryBase.width=1;primaryBase.height=1;}
     stats.primaryMs=performance.now()-primaryStarted;
   }
@@ -1345,13 +1310,11 @@ async function collectOcrResults(worker,target){
     for(const name of stats.fallbackNames){
       status("実行中…");
       const baseVariant=makeOcrVariant(oc,name);
-      const erodedVariant=erodeBlackPixels(baseVariant);
-      const variant=makeWhiteBorderCanvas(erodedVariant,OCR_BORDER_PX*scale);
+      const variant=makeWhiteBorderCanvas(baseVariant,OCR_BORDER_PX*scale);
       try {
         results.push(await recognizeVariant(worker,variant,target,name,scale,OCR_BORDER_PX*scale,OCR_BORDER_PX*scale));
       } finally {
         variant.width=1;variant.height=1;
-        erodedVariant.width=1;erodedVariant.height=1;
         if(baseVariant!==oc){baseVariant.width=1;baseVariant.height=1;}
       }
     }
@@ -1885,6 +1848,45 @@ async function run(){
   }catch(error){status("OCRでエラーが発生しました。下のエラー詳細を確認してください。",error);}
 }
 
+
+// V80実験：OCRのword.textには対象文字が含まれているのに、
+// extractLineUnits()側でsymbol分割が崩れて完全一致HITにならない場合を救出する。
+// word全体のbboxを文字数比で分割し、対象文字部分の位置を診断するだけ。
+function findTargetInsideWords(results,target,scale){
+  const out=[];
+  const chars=[...target];
+  if(!chars.length) return out;
+  for(const r of results){
+    for(const word of (r.words||[])){
+      const raw=String(word?.text||'');
+      const norm=normalize(raw);
+      if(!norm) continue;
+      let from=0;
+      while(from<=norm.length-chars.length){
+        const i=norm.indexOf(target,from);
+        if(i<0) break;
+        const b=word?.bbox;
+        if(b){
+          const w=Math.max(1,b.x1-b.x0), h=Math.max(1,b.y1-b.y0);
+          const x0=b.x0+w*(i/norm.length);
+          const x1=b.x0+w*((i+chars.length)/norm.length);
+          out.push({
+            mode:r.mode,
+            raw,
+            normalized:norm,
+            targetIndex:i,
+            targetBox:{x0:x0/scale,y0:b.y0/scale,x1:x1/scale,y1:b.y1/scale},
+            wordBox:{x0:b.x0/scale,y0:b.y0/scale,x1:b.x1/scale,y1:b.y1/scale},
+            exactNearby:(r.matches||[]).some(m=>Math.abs((m.x0+x1/scale)/2-(x0/scale+m.x1)/2)<Math.max(30,w/scale*1.5)&&Math.abs((m.y0+m.y1)/2-(b.y0+b.y1)/(2*scale))<Math.max(25,h/scale))
+          });
+        }
+        from=i+Math.max(1,chars.length);
+      }
+    }
+  }
+  return out;
+}
+
 async function diagnoseOCR(){
   ocrDiagnostics.hidden=false;
   ocrDebugLayer.hidden=true;
@@ -1975,6 +1977,32 @@ async function diagnoseOCR(){
     const verifyElapsed=performance.now()-verifyStarted;
     lines.push(`検証時間：${(verifyElapsed/1000).toFixed(2)}秒 / 修正：${changedCount}件 / 対象：${exactMatches.length}件`);
 
+    lines.push("",`===== V80 複合word内の対象文字位置推定 =====`);
+    const wordCandidates=findTargetInsideWords(results,target,scale);
+    const uniqueWordCandidates=[];
+    for(const c of wordCandidates){
+      const duplicate=uniqueWordCandidates.some(q=>{
+        const a=c.targetBox,b=q.targetBox;
+        const ix0=Math.max(a.x0,b.x0),iy0=Math.max(a.y0,b.y0),ix1=Math.min(a.x1,b.x1),iy1=Math.min(a.y1,b.y1);
+        if(ix1<=ix0||iy1<=iy0)return false;
+        const inter=(ix1-ix0)*(iy1-iy0);
+        const area=Math.min((a.x1-a.x0)*(a.y1-a.y0),(b.x1-b.x0)*(b.y1-b.y0));
+        return area>0&&inter/area>.5;
+      });
+      if(!duplicate)uniqueWordCandidates.push(c);
+    }
+    const newWordCandidates=uniqueWordCandidates.filter(c=>!c.exactNearby);
+    lines.push(`word内対象候補：${wordCandidates.length}件 / 位置重複除外後：${uniqueWordCandidates.length}件 / 新規候補：${newWordCandidates.length}件`);
+    if(uniqueWordCandidates.length){
+      uniqueWordCandidates.slice(0,30).forEach((c,i)=>{
+        const b=c.targetBox,w=c.wordBox;
+        lines.push(`  候補${i+1}: word「${c.raw}」 / 正規化「${c.normalized}」 / target位置=${c.targetIndex} / (${Math.round(b.x0)},${Math.round(b.y0)},w${Math.round(b.x1-b.x0)},h${Math.round(b.y1-b.y0)}) / wordBBox=(${Math.round(w.x0)},${Math.round(w.y0)},w${Math.round(w.x1-w.x0)},h${Math.round(w.y1-w.y0)}) / ${c.exactNearby?'既存HIT付近':'新規地点'}`);
+      });
+    }else{
+      lines.push(`対象文字を含むword候補はありません。`);
+    }
+    lines.push(`※ word全体のbboxを文字数比で分割した診断です。まだ黒塗りには使用しません。`);
+
     // V67実験：V64の文字領域推定を維持し、通常OCRで見つからなかった領域だけ
     // 前処理違いの局所OCRを追加する。
     lines.push("",`===== 文字領域全走査＋局所OCR実験（V70） =====`);
@@ -1997,7 +2025,7 @@ async function diagnoseOCR(){
     lines.push(`局所OCR時間：${(regionResult.elapsed/1000).toFixed(2)}秒`);
     lines.push(`※ V68の全領域走査方式を診断用にも使用。V70本体では、この局所OCRのHITを追加の黒塗り候補として統合します。`);
 
-    lines.push('', `===== V79 局所OCR・順序維持ロバスト一致実験 =====`);
+    lines.push('', `===== V76 局所OCR・順序維持ロバスト一致実験 =====`);
     const localRobust=[];
     for(const r of regionResult.tested){
       for(const v of (r.variants||[])){
