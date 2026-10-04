@@ -546,6 +546,48 @@ function makeOcrVariant(baseCanvas, name) {
     g.putImageData(img, 0, 0);
     return c;
 }
+function makeMorphologyVariant(baseCanvas, mode) {
+    // 3x3の軽量Canvas形態学処理。白黒を二値化せず、輝度の最大/最小を
+    // 近傍から取ることで「細線を太く」「太線を細く」の効果だけを試す。
+    const c = document.createElement("canvas");
+    c.width = baseCanvas.width;
+    c.height = baseCanvas.height;
+    const g = c.getContext("2d", { willReadFrequently: true });
+    g.drawImage(baseCanvas, 0, 0);
+    const img = g.getImageData(0, 0, c.width, c.height);
+    const src = img.data;
+    const out = new Uint8ClampedArray(src.length);
+    out.set(src);
+    const w = c.width, h = c.height;
+    const isDilation = mode === "膨張";
+    for (let y = 1; y < h - 1; y++) {
+        for (let x = 1; x < w - 1; x++) {
+            const p = (y * w + x) * 4;
+            let v = isDilation ? 255 : 0;
+            for (let dy = -1; dy <= 1; dy++) {
+                for (let dx = -1; dx <= 1; dx++) {
+                    const q = ((y + dy) * w + (x + dx)) * 4;
+                    const lum = Math.round(src[q] * .299 + src[q + 1] * .587 + src[q + 2] * .114);
+                    v = isDilation ? Math.min(v, lum) : Math.max(v, lum);
+                }
+            }
+            out[p] = out[p + 1] = out[p + 2] = v;
+            out[p + 3] = src[p + 3];
+        }
+    }
+    img.data.set(out);
+    g.putImageData(img, 0, 0);
+    return c;
+}
+
+function makeMorphologyBoth(baseCanvas) {
+    // 膨張→収縮。細線をいったん太らせてから元の太さへ戻す。
+    const dilated = makeMorphologyVariant(baseCanvas, "膨張");
+    const result = makeMorphologyVariant(dilated, "収縮");
+    dilated.width = 1; dilated.height = 1;
+    return result;
+}
+
 
 // Tesseractは稀に、単語内の1文字だけbboxの位置を誤検出することがある
 // （例：「ネ」の実際の描画位置より1文字分右にずれた座標を報告する等）。
@@ -652,7 +694,7 @@ function findTargetInUnits(units,target){
   return hits;
 }
 
-// V76実験：OCRが対象文字の間に余計なunitを挟んだり、文字を細かく分割しても、
+// V77実験：OCRが対象文字の間に余計なunitを挟んだり、文字を細かく分割しても、
 // 「対象文字がこの順番で出現しているか」を見る。完全一致とは別の診断用ルート。
 // 近似文字そのものへの置換は行わず、対象文字が実際にunits内に存在する場合だけ拾う。
 function findTargetInUnitsRobust(units,target,options={}){
@@ -1280,7 +1322,7 @@ function buildOcrCanvas(){
   return {canvas:oc,scale};
 }
 
-async function collectOcrResults(worker,target){
+async function collectOcrResults(worker,target,runMorphologyExperiment=false){
   const {canvas:oc,scale}=buildOcrCanvas();
   const results=[];
   const stats={primaryMs:0,fallbackMs:0,primaryHitCount:0,fallbackUsed:false,primaryName:"グレー＋コントラスト",fallbackNames:["二値化180","二値化220","反転"]};
@@ -1296,6 +1338,36 @@ async function collectOcrResults(worker,target){
     const primary=await recognizeVariant(worker,primaryVariant,target,stats.primaryName,scale,OCR_BORDER_PX*scale,OCR_BORDER_PX*scale);
     results.push(primary);
     stats.primaryHitCount=primary.matches.length;
+
+    // V77実験：同じ「グレー＋コントラスト＋10px白枠」に、
+    // 膨張・収縮・膨張→収縮を追加して比較する。
+    if (runMorphologyExperiment) {
+      for (const morphName of ["膨張", "収縮", "膨張→収縮"]) {
+        const morphStarted = performance.now();
+        status(`実行中…${morphName}`);
+        const morphBase = morphName === "膨張→収縮"
+          ? makeMorphologyBoth(primaryBase)
+          : makeMorphologyVariant(primaryBase, morphName);
+        const morphVariant = makeWhiteBorderCanvas(morphBase, OCR_BORDER_PX * scale);
+        try {
+          const morph = await recognizeVariant(
+            worker,
+            morphVariant,
+            target,
+            `V77 ${morphName}`,
+            scale,
+            OCR_BORDER_PX * scale,
+            OCR_BORDER_PX * scale
+          );
+          results.push(morph);
+          stats[`${morphName}Ms`] = performance.now() - morphStarted;
+          stats[`${morphName}HitCount`] = morph.matches.length;
+        } finally {
+          morphVariant.width = 1; morphVariant.height = 1;
+          if (morphBase !== primaryBase) { morphBase.width = 1; morphBase.height = 1; }
+        }
+      }
+    }
   } finally {
     primaryVariant.width=1;primaryVariant.height=1;
     if(primaryBase!==oc){primaryBase.width=1;primaryBase.height=1;}
@@ -1744,7 +1816,7 @@ async function run(){
     status("OCR中…\n対象文字を探しています。");
 
     // V33の高速OCRをそのまま使用。通常HITはV19の黒塗り処理へ接続する。
-    const {results,scale,ocrCanvas}=await collectOcrResults(worker,target);
+    const {results,scale,ocrCanvas}=await collectOcrResults(worker,target,false);
     const matches=mergeMatches(results);
 
     // 通常OCRで見つかった対象文字を黒塗り候補として登録。
@@ -1863,7 +1935,7 @@ async function diagnoseOCR(){
     canvas.hidden=false; canvas.style.display="block";
     status("OCR診断中…\n認識条件を比較しています。画像表示は維持します。");
     const ocrStarted=performance.now();
-    const {results,scale,ocrCanvas,stats}=await collectOcrResults(worker,target);
+    const {results,scale,ocrCanvas,stats}=await collectOcrResults(worker,target,true);
     const ocrElapsed=performance.now()-ocrStarted;
     const refineStarted=performance.now();
     const refine=await refineNearCandidates(worker,results,ocrCanvas,target,scale);
@@ -1960,7 +2032,7 @@ async function diagnoseOCR(){
     lines.push(`局所OCR時間：${(regionResult.elapsed/1000).toFixed(2)}秒`);
     lines.push(`※ V68の全領域走査方式を診断用にも使用。V70本体では、この局所OCRのHITを追加の黒塗り候補として統合します。`);
 
-    lines.push('', `===== V76 局所OCR・順序維持ロバスト一致実験 =====`);
+    lines.push('', `===== V77 局所OCR・順序維持ロバスト一致実験 =====`);
     const localRobust=[];
     for(const r of regionResult.tested){
       for(const v of (r.variants||[])){
