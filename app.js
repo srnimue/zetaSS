@@ -1007,6 +1007,102 @@ async function collectTextRegionMatches(worker, sourceCanvas, target) {
   return {detected, tested, matches, elapsed: performance.now() - started};
 }
 
+// V81: かな限定の誤認識救出。V74の「1文字違いなら何でも候補」より
+// かなり厳しく、対象文字ごとに限定した置換だけを許容する。
+// 漢字はここでは扱わない。
+const V81_KANA_PAIRS = new Map([
+  ['ネ', new Set(['デ','ね'])], ['ね', new Set(['ネ'])],
+  ['ル', new Set(['る','レ'])], ['る', new Set(['ル'])],
+  ['レ', new Set(['ル'])],
+  ['ナ', new Set(['な'])], ['な', new Set(['ナ'])],
+  ['ニ', new Set(['二','に'])], ['に', new Set(['ニ'])],
+  ['二', new Set(['ニ'])],
+  ['カ', new Set(['力','か'])], ['か', new Set(['カ'])],
+  ['キ', new Set(['き'])], ['き', new Set(['キ'])],
+  ['ク', new Set(['く'])], ['く', new Set(['ク'])],
+  ['ケ', new Set(['け'])], ['け', new Set(['ケ'])],
+  ['コ', new Set(['こ'])], ['こ', new Set(['コ'])],
+  ['サ', new Set(['さ'])], ['さ', new Set(['サ'])],
+  ['シ', new Set(['し'])], ['し', new Set(['シ'])],
+  ['ス', new Set(['す'])], ['す', new Set(['ス'])],
+  ['セ', new Set(['せ'])], ['せ', new Set(['セ'])],
+  ['ソ', new Set(['そ'])], ['そ', new Set(['ソ'])],
+  ['タ', new Set(['た'])], ['た', new Set(['タ'])],
+  ['チ', new Set(['ち'])], ['ち', new Set(['チ'])],
+  ['ツ', new Set(['つ'])], ['つ', new Set(['ツ'])],
+  ['テ', new Set(['て'])], ['て', new Set(['テ'])],
+  ['ト', new Set(['と'])], ['と', new Set(['ト'])],
+  ['ハ', new Set(['は'])], ['は', new Set(['ハ'])],
+  ['ヒ', new Set(['ひ'])], ['ひ', new Set(['ヒ'])],
+  ['フ', new Set(['ふ'])], ['ふ', new Set(['フ'])],
+  ['ヘ', new Set(['へ'])], ['へ', new Set(['ヘ'])],
+  ['ホ', new Set(['ほ'])], ['ほ', new Set(['ホ'])],
+  ['マ', new Set(['ま'])], ['ま', new Set(['マ'])],
+  ['ミ', new Set(['み'])], ['み', new Set(['ミ'])],
+  ['ム', new Set(['む'])], ['む', new Set(['ム'])],
+  ['メ', new Set(['め'])], ['め', new Set(['メ'])],
+  ['モ', new Set(['も'])], ['も', new Set(['モ'])],
+  ['ヤ', new Set(['や'])], ['や', new Set(['ヤ'])],
+  ['ユ', new Set(['ゆ'])], ['ゆ', new Set(['ユ'])],
+  ['ヨ', new Set(['よ'])], ['よ', new Set(['ヨ'])],
+  ['ラ', new Set(['ら'])], ['ら', new Set(['ラ'])],
+  ['リ', new Set(['り'])], ['り', new Set(['リ'])],
+  ['ロ', new Set(['ろ'])], ['ろ', new Set(['ロ'])],
+  ['ワ', new Set(['わ'])], ['わ', new Set(['ワ'])]
+]);
+function isV81Kana(ch){ return /[ぁ-ゖァ-ヺー]/u.test(ch); }
+function isV81Kanji(ch){ return /\p{Script=Han}/u.test(ch); }
+function v81KanaEquivalent(targetCh, ocrCh){
+  if(targetCh===ocrCh) return true;
+  return V81_KANA_PAIRS.get(targetCh)?.has(ocrCh) || false;
+}
+function findV81KanaRescue(results,target,scale){
+  const targetChars=[...target];
+  if(!targetChars.length || targetChars.some(ch=>!isV81Kana(ch))) return [];
+  const out=[];
+  for(const r of results||[]){
+    for(const line of r.lines||[]){
+      const units=extractLineUnits(line);
+      if(!units.length) continue;
+      // 対象と同じ文字数の窓だけを見る。追加・削除を許すとV74と同じく候補が爆発するため。
+      for(let i=0;i<=units.length-targetChars.length;i++){
+        const selected=units.slice(i,i+targetChars.length);
+        let substitutions=0;
+        let ok=true;
+        for(let j=0;j<targetChars.length;j++){
+          if(!v81KanaEquivalent(targetChars[j],selected[j].ch)){ ok=false; break; }
+          if(targetChars[j]!==selected[j].ch) substitutions++;
+        }
+        if(!ok || substitutions<1 || substitutions>1) continue;
+        // すべて同じ文字種の「かな置換」だけ。漢字混入は除外。
+        if(selected.some(u=>!isV81Kana(u.ch))) continue;
+        const b=makeTargetHit(selected,'v81-kana').targetBox;
+        out.push({
+          ocr:selected.map(u=>u.ch).join(''),
+          target,
+          substitutions,
+          box:b,
+          lineText:units.map(u=>u.ch).join(''),
+          mode:r.mode
+        });
+      }
+    }
+  }
+  // 同じ場所に複数候補が出た場合は1件にまとめる。
+  const unique=[];
+  for(const x of out){
+    const dup=unique.some(q=>{
+      const a=x.box,b=q.box;
+      const ix0=Math.max(a.x0,b.x0),iy0=Math.max(a.y0,b.y0),ix1=Math.min(a.x1,b.x1),iy1=Math.min(a.y1,b.y1);
+      if(ix1<=ix0||iy1<=iy0) return false;
+      const inter=(ix1-ix0)*(iy1-iy0), area=Math.min((a.x1-a.x0)*(a.y1-a.y0),(b.x1-b.x0)*(b.y1-b.y0));
+      return area>0 && inter/area>.45;
+    });
+    if(!dup) unique.push(x);
+  }
+  return unique;
+}
+
 function editDistance(a,b){const A=[...a],B=[...b],d=Array.from({length:A.length+1},()=>Array(B.length+1).fill(0));for(let i=0;i<=A.length;i++)d[i][0]=i;for(let j=0;j<=B.length;j++)d[0][j]=j;for(let i=1;i<=A.length;i++)for(let j=1;j<=B.length;j++)d[i][j]=Math.min(d[i-1][j]+1,d[i][j-1]+1,d[i-1][j-1]+(A[i-1]===B[j-1]?0:1));return d[A.length][B.length];}
 function sequenceSimilarity(a, b) {
   const A = [...a], B = [...b];
