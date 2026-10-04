@@ -1848,45 +1848,6 @@ async function run(){
   }catch(error){status("OCRでエラーが発生しました。下のエラー詳細を確認してください。",error);}
 }
 
-
-// V80実験：OCRのword.textには対象文字が含まれているのに、
-// extractLineUnits()側でsymbol分割が崩れて完全一致HITにならない場合を救出する。
-// word全体のbboxを文字数比で分割し、対象文字部分の位置を診断するだけ。
-function findTargetInsideWords(results,target,scale){
-  const out=[];
-  const chars=[...target];
-  if(!chars.length) return out;
-  for(const r of results){
-    for(const word of (r.words||[])){
-      const raw=String(word?.text||'');
-      const norm=normalize(raw);
-      if(!norm) continue;
-      let from=0;
-      while(from<=norm.length-chars.length){
-        const i=norm.indexOf(target,from);
-        if(i<0) break;
-        const b=word?.bbox;
-        if(b){
-          const w=Math.max(1,b.x1-b.x0), h=Math.max(1,b.y1-b.y0);
-          const x0=b.x0+w*(i/norm.length);
-          const x1=b.x0+w*((i+chars.length)/norm.length);
-          out.push({
-            mode:r.mode,
-            raw,
-            normalized:norm,
-            targetIndex:i,
-            targetBox:{x0:x0/scale,y0:b.y0/scale,x1:x1/scale,y1:b.y1/scale},
-            wordBox:{x0:b.x0/scale,y0:b.y0/scale,x1:b.x1/scale,y1:b.y1/scale},
-            exactNearby:(r.matches||[]).some(m=>Math.abs((m.x0+x1/scale)/2-(x0/scale+m.x1)/2)<Math.max(30,w/scale*1.5)&&Math.abs((m.y0+m.y1)/2-(b.y0+b.y1)/(2*scale))<Math.max(25,h/scale))
-          });
-        }
-        from=i+Math.max(1,chars.length);
-      }
-    }
-  }
-  return out;
-}
-
 async function diagnoseOCR(){
   ocrDiagnostics.hidden=false;
   ocrDebugLayer.hidden=true;
@@ -1977,32 +1938,6 @@ async function diagnoseOCR(){
     const verifyElapsed=performance.now()-verifyStarted;
     lines.push(`検証時間：${(verifyElapsed/1000).toFixed(2)}秒 / 修正：${changedCount}件 / 対象：${exactMatches.length}件`);
 
-    lines.push("",`===== V80 複合word内の対象文字位置推定 =====`);
-    const wordCandidates=findTargetInsideWords(results,target,scale);
-    const uniqueWordCandidates=[];
-    for(const c of wordCandidates){
-      const duplicate=uniqueWordCandidates.some(q=>{
-        const a=c.targetBox,b=q.targetBox;
-        const ix0=Math.max(a.x0,b.x0),iy0=Math.max(a.y0,b.y0),ix1=Math.min(a.x1,b.x1),iy1=Math.min(a.y1,b.y1);
-        if(ix1<=ix0||iy1<=iy0)return false;
-        const inter=(ix1-ix0)*(iy1-iy0);
-        const area=Math.min((a.x1-a.x0)*(a.y1-a.y0),(b.x1-b.x0)*(b.y1-b.y0));
-        return area>0&&inter/area>.5;
-      });
-      if(!duplicate)uniqueWordCandidates.push(c);
-    }
-    const newWordCandidates=uniqueWordCandidates.filter(c=>!c.exactNearby);
-    lines.push(`word内対象候補：${wordCandidates.length}件 / 位置重複除外後：${uniqueWordCandidates.length}件 / 新規候補：${newWordCandidates.length}件`);
-    if(uniqueWordCandidates.length){
-      uniqueWordCandidates.slice(0,30).forEach((c,i)=>{
-        const b=c.targetBox,w=c.wordBox;
-        lines.push(`  候補${i+1}: word「${c.raw}」 / 正規化「${c.normalized}」 / target位置=${c.targetIndex} / (${Math.round(b.x0)},${Math.round(b.y0)},w${Math.round(b.x1-b.x0)},h${Math.round(b.y1-b.y0)}) / wordBBox=(${Math.round(w.x0)},${Math.round(w.y0)},w${Math.round(w.x1-w.x0)},h${Math.round(w.y1-w.y0)}) / ${c.exactNearby?'既存HIT付近':'新規地点'}`);
-      });
-    }else{
-      lines.push(`対象文字を含むword候補はありません。`);
-    }
-    lines.push(`※ word全体のbboxを文字数比で分割した診断です。まだ黒塗りには使用しません。`);
-
     // V67実験：V64の文字領域推定を維持し、通常OCRで見つからなかった領域だけ
     // 前処理違いの局所OCRを追加する。
     lines.push("",`===== 文字領域全走査＋局所OCR実験（V70） =====`);
@@ -2024,6 +1959,23 @@ async function diagnoseOCR(){
     });
     lines.push(`局所OCR時間：${(regionResult.elapsed/1000).toFixed(2)}秒`);
     lines.push(`※ V68の全領域走査方式を診断用にも使用。V70本体では、この局所OCRのHITを追加の黒塗り候補として統合します。`);
+
+    lines.push("",`===== V81 誤認識救出診断（かな） =====`);
+    const v81KanaRescue=findV81KanaRescue(results,target,scale);
+    const hasKanjiTarget=[...target].some(isV81Kanji);
+    if(hasKanjiTarget){
+      lines.push(`対象文字に漢字を含むため、V81では誤認識置換を実行しません。`);
+      lines.push(`漢字は置換辞書ではなく、今後は文字形・位置・サイズ等を組み合わせて救出する方針です。`);
+    }else if(![...target].every(isV81Kana)){
+      lines.push(`対象文字はかな専用救出の対象外です。`);
+    }else{
+      lines.push(`かな誤認識による新規候補：${v81KanaRescue.length}件`);
+      v81KanaRescue.slice(0,20).forEach((c,i)=>{
+        lines.push(`  候補${i+1}: OCR「${c.ocr}」→対象「${c.target}」 / 置換${c.substitutions}文字 / bbox=(${Math.round(c.box.x0)},${Math.round(c.box.y0)},w${Math.round(c.box.x1-c.box.x0)},h${Math.round(c.box.y1-c.box.y0)}) / 「${c.lineText}」`);
+      });
+      if(!v81KanaRescue.length) lines.push(`かな誤認識による新規候補はありません。`);
+      lines.push(`※ V81ではまだ黒塗りに使用しません。`);
+    }
 
     lines.push('', `===== V76 局所OCR・順序維持ロバスト一致実験 =====`);
     const localRobust=[];
