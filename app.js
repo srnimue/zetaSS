@@ -652,7 +652,7 @@ function findTargetInUnits(units,target){
   return hits;
 }
 
-// V75実験：OCRが対象文字の間に余計なunitを挟んだり、文字を細かく分割しても、
+// V76実験：OCRが対象文字の間に余計なunitを挟んだり、文字を細かく分割しても、
 // 「対象文字がこの順番で出現しているか」を見る。完全一致とは別の診断用ルート。
 // 近似文字そのものへの置換は行わず、対象文字が実際にunits内に存在する場合だけ拾う。
 function findTargetInUnitsRobust(units,target,options={}){
@@ -1161,14 +1161,24 @@ function makeSourceCandidateCrop(candidate, scale) {
   return { canvas: c, x0: sx0, y0: sy0 };
 }
 
-async function recognizeVariant(worker,inputCanvas,target,mode,scale){const result=await worker.recognize(inputCanvas,{tessedit_pageseg_mode:"11"});const data=result?.data||{},lines=data.lines||[],matches=[];for(const line of lines){const units=extractLineUnits(line),hits=findTargetInUnits(units,target),lineText=units.map(u=>u.ch).join("");for(const hit of hits){
-    // symbols[].bbox は OCR用に拡大したcanvas(scale倍)の座標のまま渡ってくる。
-    // x0/y0/x1/y1 はscaleで割って元画像座標に戻しているので、symbolsも同じ座標系に
-    // 揃えておかないと、getOcrPaintBoxでの高さ・幅比較がscale分ズレて誤判定する。
-    const scaleBbox=b=>b?{x0:b.x0/scale,y0:b.y0/scale,x1:b.x1/scale,y1:b.y1/scale}:null;
+function shiftOcrBboxes(value,dx,dy){
+  if(Array.isArray(value)) return value.map(v=>shiftOcrBboxes(v,dx,dy));
+  if(!value || typeof value!=="object") return value;
+  const out={};
+  for(const [k,v] of Object.entries(value)){
+    if(k==="bbox" && v && typeof v.x0==="number") out[k]={...v,x0:v.x0-dx,y0:v.y0-dy,x1:v.x1-dx,y1:v.y1-dy};
+    else out[k]=shiftOcrBboxes(v,dx,dy);
+  }
+  return out;
+}
+
+async function recognizeVariant(worker,inputCanvas,target,mode,scale,offsetX=0,offsetY=0){const result=await worker.recognize(inputCanvas,{tessedit_pageseg_mode:"11"});const data=result?.data||{},rawLines=data.lines||[],lines=(offsetX||offsetY)?shiftOcrBboxes(rawLines,offsetX,offsetY):rawLines,matches=[];for(const line of lines){const units=extractLineUnits(line),hits=findTargetInUnits(units,target),lineText=units.map(u=>u.ch).join("");for(const hit of hits){
+    // symbols[].bbox はOCR用に拡大したcanvas(scale倍)の座標。境界線を追加した場合は
+    // その分のoffsetも引いて元画像座標へ戻す。
+    const scaleBbox=b=>b?{x0:(b.x0)/scale,y0:(b.y0)/scale,x1:(b.x1)/scale,y1:(b.y1)/scale}:null;
     const symbols=hit.symbols.map(s=>({...s,bbox:scaleBbox(s.bbox),prevRawBbox:scaleBbox(s.prevRawBbox)}));
     matches.push({x0:hit.targetBox.x0/scale,y0:hit.targetBox.y0/scale,x1:hit.targetBox.x1/scale,y1:hit.targetBox.y1/scale,mode,lineText,symbols});
-}}return {mode,lines,words:data.words||[],rawText:String(data.text||""),matches,near:findNearCandidates(lines,target)};}
+}}const words=(offsetX||offsetY)?shiftOcrBboxes(data.words||[],offsetX,offsetY):(data.words||[]);return {mode,lines,words,rawText:String(data.text||""),matches,near:findNearCandidates(lines,target)};}
 
 // 完全一致した箇所でも、Tesseractがページ全体を一度にOCRした際に
 // 文字1つ分だけ座標がズレて報告されることがある（周辺のノイズ・隣接文字の影響）。
@@ -1243,8 +1253,22 @@ async function refineExactHitBox(worker, box, target) {
     return box;
 }
 
+const OCR_BORDER_PX = 10;
+
+function makeWhiteBorderCanvas(src,pad){
+  const c=document.createElement("canvas");
+  c.width=src.width+pad*2;
+  c.height=src.height+pad*2;
+  const g=c.getContext("2d");
+  g.fillStyle="#fff";
+  g.fillRect(0,0,c.width,c.height);
+  g.drawImage(src,pad,pad);
+  return c;
+}
+
 function buildOcrCanvas(){
-  // OCR用キャンバスだけを作る。表示用canvasはここでは絶対に変更しない。
+  // OCR用キャンバス本体は従来の座標系のまま保持し、実際にTesseractへ渡す
+  // キャンバスだけに白い10px境界線を追加する。表示用canvasは変更しない。
   const scale=2.5;
   const oc=document.createElement("canvas");
   oc.width=Math.round(canvas.width*scale);
@@ -1266,13 +1290,15 @@ async function collectOcrResults(worker,target){
   // ※診断用の速度実験版。見落としの有無を確認するため、V32は別に保存しておく。
   const primaryStarted=performance.now();
   status("実行中…");
-  const primaryVariant=makeOcrVariant(oc,stats.primaryName);
+  const primaryBase=makeOcrVariant(oc,stats.primaryName);
+  const primaryVariant=makeWhiteBorderCanvas(primaryBase,OCR_BORDER_PX*scale);
   try {
-    const primary=await recognizeVariant(worker,primaryVariant,target,stats.primaryName,scale);
+    const primary=await recognizeVariant(worker,primaryVariant,target,stats.primaryName,scale,OCR_BORDER_PX*scale,OCR_BORDER_PX*scale);
     results.push(primary);
     stats.primaryHitCount=primary.matches.length;
   } finally {
-    if(primaryVariant!==oc){primaryVariant.width=1;primaryVariant.height=1;}
+    primaryVariant.width=1;primaryVariant.height=1;
+    if(primaryBase!==oc){primaryBase.width=1;primaryBase.height=1;}
     stats.primaryMs=performance.now()-primaryStarted;
   }
 
@@ -1283,11 +1309,13 @@ async function collectOcrResults(worker,target){
     const fallbackStarted=performance.now();
     for(const name of stats.fallbackNames){
       status("実行中…");
-      const variant=makeOcrVariant(oc,name);
+      const baseVariant=makeOcrVariant(oc,name);
+      const variant=makeWhiteBorderCanvas(baseVariant,OCR_BORDER_PX*scale);
       try {
-        results.push(await recognizeVariant(worker,variant,target,name,scale));
+        results.push(await recognizeVariant(worker,variant,target,name,scale,OCR_BORDER_PX*scale,OCR_BORDER_PX*scale));
       } finally {
-        if(variant!==oc){variant.width=1;variant.height=1;}
+        variant.width=1;variant.height=1;
+        if(baseVariant!==oc){baseVariant.width=1;baseVariant.height=1;}
       }
     }
     stats.fallbackMs=performance.now()-fallbackStarted;
@@ -1848,7 +1876,7 @@ async function diagnoseOCR(){
     const totalElapsed=performance.now()-totalStarted;
     const exactCount=results.reduce((n,r)=>n+r.matches.length,0);
     const candidateCount=results.reduce((n,r)=>n+r.near.length,0);
-    const lines=[`対象文字：${targetText.value}`,`正規化後：${target}`,""];
+    const lines=[`対象文字：${targetText.value}`,`正規化後：${target}`,`OCR境界線：${OCR_BORDER_PX}px（白）`,""];
     for(const r of results){
       lines.push(`===== ${r.mode} / PSM 11 =====`,`HIT：${r.matches.length}件`);
       for(const m of r.matches){
@@ -1932,7 +1960,7 @@ async function diagnoseOCR(){
     lines.push(`局所OCR時間：${(regionResult.elapsed/1000).toFixed(2)}秒`);
     lines.push(`※ V68の全領域走査方式を診断用にも使用。V70本体では、この局所OCRのHITを追加の黒塗り候補として統合します。`);
 
-    lines.push('', `===== V75 局所OCR・順序維持ロバスト一致実験 =====`);
+    lines.push('', `===== V76 局所OCR・順序維持ロバスト一致実験 =====`);
     const localRobust=[];
     for(const r of regionResult.tested){
       for(const v of (r.variants||[])){
