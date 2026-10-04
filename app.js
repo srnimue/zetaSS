@@ -2159,12 +2159,32 @@ async function diagnoseOCR(){
       `※ 再OCRは近似候補救出で確定できなかった地点だけ実行します。`,
       `※ 診断で救出した候補は、自動黒塗りにも使用されます。`
     );
+    lines.push(`※ V82では、かな誤認識候補を画像上にも赤枠で表示します。赤枠は診断専用で、黒塗りには使用しません。`);
     ocrDiagnostics.textContent=lines.join("\n");
     canvas.hidden=false; canvas.style.display='block';
     const tr=getCanvasDisplayTransform(),seen=[];
     for(const r of results)for(const m of r.matches){
       if(seen.some(o=>Math.abs(o.x0-m.x0)<3&&Math.abs(o.y0-m.y0)<3&&Math.abs(o.x1-m.x1)<3&&Math.abs(o.y1-m.y1)<3))continue;
       seen.push(m); const box=document.createElement('div'); box.className='ocr-debug-box'; box.style.borderColor='#22aa55'; box.style.left=`${tr.left+m.x0*tr.scaleX}px`; box.style.top=`${tr.top+m.y0*tr.scaleY}px`; box.style.width=`${(m.x1-m.x0)*tr.scaleX}px`; box.style.height=`${(m.y1-m.y0)*tr.scaleY}px`; const label=document.createElement('span'); label.className='ocr-debug-label'; label.textContent=`${r.mode}: ${target}`; box.appendChild(label); ocrDebugLayer.appendChild(box);
+    }
+    // V82: V81かな誤認識救出候補を実画像上で仮表示する。
+    // 候補は診断専用で、自動黒塗り処理には一切接続しない。
+    if(v81KanaRescue.length && !hasKanjiTarget && [...target].every(isV81Kana)){
+      v81KanaRescue.slice(0,20).forEach((c,i)=>{
+        const b=c.box;
+        if(!b) return;
+        const box=document.createElement('div');
+        box.className='ocr-debug-box ocr-debug-kana-candidate';
+        box.style.left=`${tr.left+b.x0*tr.scaleX}px`;
+        box.style.top=`${tr.top+b.y0*tr.scaleY}px`;
+        box.style.width=`${Math.max(2,(b.x1-b.x0)*tr.scaleX)}px`;
+        box.style.height=`${Math.max(2,(b.y1-b.y0)*tr.scaleY)}px`;
+        const label=document.createElement('span');
+        label.className='ocr-debug-label';
+        label.textContent=`V82候補${i+1}: ${c.ocr}→${c.target}`;
+        box.appendChild(label);
+        ocrDebugLayer.appendChild(box);
+      });
     }
     ocrDebugLayer.hidden=ocrDebugLayer.childElementCount===0;
     status(`OCR診断完了。\n検出：${exactCount}件（重複を含む） / 候補地点：${candidateGroups.length}箇所 / 再OCR確認：${refined.length}箇所\n処理時間：${(totalElapsed/1000).toFixed(2)}秒\n下の診断結果を確認してください。`);
