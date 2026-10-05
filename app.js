@@ -1988,6 +1988,113 @@ async function run(){
   }catch(error){status("OCRでエラーが発生しました。下のエラー詳細を確認してください。",error);}
 }
 
+
+// ===== V83 実験：Canvas文字テンプレート検索 =====
+// OCRの認識結果ではなく、指定文字をCanvasで描画した「形」を画像内から探す。
+// 診断専用。自動黒塗りにはまだ接続しない。
+const TEMPLATE_FONT_STACK='-apple-system, BlinkMacSystemFont, "Helvetica Neue", "Hiragino Sans", "Yu Gothic", sans-serif';
+const TEMPLATE_STEP=4;
+const TEMPLATE_SCORE_THRESHOLD=0.72;
+const TEMPLATE_MIN_BRIGHTNESS=105;
+
+function estimateTemplateFontSize(results){
+  const hs=[];
+  for(const r of results||[]){
+    for(const line of (r.lines||[])){
+      for(const u of extractLineUnits(line)){
+        const b=u?.bbox;
+        if(!b) continue;
+        const h=(b.y1-b.y0);
+        if(h>=14 && h<=90) hs.push(h);
+      }
+    }
+  }
+  if(!hs.length) return 34;
+  hs.sort((a,b)=>a-b);
+  const mid=hs[Math.floor(hs.length/2)];
+  return Math.max(20,Math.min(60,Math.round(mid)));
+}
+
+function buildTextTemplate(text,fontSize){
+  const c=document.createElement('canvas');
+  const m=document.createElement('canvas');
+  const mc=m.getContext('2d');
+  mc.font=`400 ${fontSize}px ${TEMPLATE_FONT_STACK}`;
+  const met=mc.measureText(text);
+  const w=Math.ceil(met.width)+8;
+  const h=Math.ceil(fontSize*1.35);
+  c.width=w; c.height=h;
+  const g=c.getContext('2d',{willReadFrequently:true});
+  g.clearRect(0,0,w,h);
+  g.font=`400 ${fontSize}px ${TEMPLATE_FONT_STACK}`;
+  g.fillStyle='#fff';
+  g.textBaseline='alphabetic';
+  g.fillText(text,4,fontSize);
+  const d=g.getImageData(0,0,w,h).data;
+  const pts=[];
+  // 文字の輪郭・芯を少数点サンプリング。完全な全ピクセル比較はしない。
+  for(let y=0;y<h;y++) for(let x=0;x<w;x++){
+    const a=d[(y*w+x)*4+3];
+    if(a>=70) pts.push({x,y,a:a/255});
+  }
+  const stride=Math.max(1,Math.ceil(pts.length/180));
+  const samples=[];
+  for(let i=0;i<pts.length;i+=stride) samples.push(pts[i]);
+  return {canvas:c,w,h,samples,fontSize};
+}
+
+function templateSearch(source,text,fontSize){
+  const tpl=buildTextTemplate(text,fontSize);
+  const sw=source.naturalWidth||source.width, sh=source.naturalHeight||source.height;
+  if(tpl.w>=sw||tpl.h>=sh) return {tpl,candidates:[],error:'テンプレートが画像より大きいため検索できません。'};
+  const sc=document.createElement('canvas'); sc.width=sw; sc.height=sh;
+  const sg=sc.getContext('2d',{willReadFrequently:true}); sg.drawImage(source,0,0,sw,sh);
+  const sd=sg.getImageData(0,0,sw,sh).data;
+  const gray=new Uint8Array(sw*sh);
+  for(let i=0,p=0;i<sd.length;i+=4,p++) gray[p]=Math.round(sd[i]*.299+sd[i+1]*.587+sd[i+2]*.114);
+
+  // 探索エリアを「明るい文字が存在する行」に限定。全画像を毎回精査しない。
+  const rowHas=new Uint8Array(sh);
+  for(let y=0;y<sh;y++){
+    let count=0;
+    for(let x=0;x<sw;x+=3){ if(gray[y*sw+x]>=TEMPLATE_MIN_BRIGHTNESS){ if(++count>=8) break; } }
+    if(count>=8) rowHas[y]=1;
+  }
+  const candidates=[];
+  const step=TEMPLATE_STEP;
+  const sxMax=sw-tpl.w, syMax=sh-tpl.h;
+  for(let y=0;y<=syMax;y+=step){
+    let rowOk=false;
+    for(let yy=0;yy<tpl.h;yy+=Math.max(2,step)){ if(rowHas[y+yy]){rowOk=true;break;} }
+    if(!rowOk) continue;
+    for(let x=0;x<=sxMax;x+=step){
+      let good=0, total=0;
+      for(const p of tpl.samples){
+        const v=gray[(y+p.y)*sw+(x+p.x)];
+        // テンプレートの文字部分は「明るい」ことを主条件にする。
+        if(v>=TEMPLATE_MIN_BRIGHTNESS) good++;
+        total++;
+      }
+      const score=total?good/total:0;
+      if(score>=TEMPLATE_SCORE_THRESHOLD) candidates.push({x,y,w:tpl.w,h:tpl.h,score});
+    }
+  }
+  // 近接候補を統合し、スコアの高い場所だけ残す。
+  candidates.sort((a,b)=>b.score-a.score);
+  const kept=[];
+  for(const c of candidates){
+    const dup=kept.some(k=>{
+      const ix=Math.max(0,Math.min(c.x+c.w,k.x+k.w)-Math.max(c.x,k.x));
+      const iy=Math.max(0,Math.min(c.y+c.h,k.y+k.h)-Math.max(c.y,k.y));
+      return ix*iy>Math.min(c.w*c.h,k.w*k.h)*.35;
+    });
+    if(!dup) kept.push(c);
+    if(kept.length>=30) break;
+  }
+  return {tpl,candidates:kept,rawCount:candidates.length,step,threshold:TEMPLATE_SCORE_THRESHOLD};
+}
+// ===== /V83 実験 =====
+
 async function diagnoseOCR(){
   ocrDiagnostics.hidden=false;
   ocrDebugLayer.hidden=true;
@@ -2004,6 +2111,8 @@ async function diagnoseOCR(){
     status("OCR診断中…\n認識条件を比較しています。画像表示は維持します。");
     const ocrStarted=performance.now();
     const {results,scale,ocrCanvas,stats}=await collectOcrResults(worker,target);
+    const templateFontSize=estimateTemplateFontSize(results);
+    const templateResult=templateSearch(sourceImage,target,templateFontSize);
     const ocrElapsed=performance.now()-ocrStarted;
     const refineStarted=performance.now();
     const refine=await refineNearCandidates(worker,results,ocrCanvas,target,scale);
@@ -2101,7 +2210,13 @@ async function diagnoseOCR(){
     lines.push(`色抽出OCR：${stats.colorHitCount||0}件 / ${(stats.colorMs/1000).toFixed(2)}秒`);
     lines.push(`※ V68の全領域走査方式を診断用にも使用。V70本体では、この局所OCRのHITを追加の黒塗り候補として統合します。`);
 
-    lines.push("",`===== V82.2 誤認識救出診断（かな）＋候補bbox仮表示 =====`);
+    lines.push("",`===== V83 Canvasテンプレート検索実験 =====`);
+    lines.push(`対象文字：${target} / 推定フォントサイズ：${templateFontSize}px / 探索間隔：${templateResult.step||TEMPLATE_STEP}px / 閾値：${TEMPLATE_SCORE_THRESHOLD}`);
+    lines.push(`テンプレート：${templateResult.tpl?.w||0}x${templateResult.tpl?.h||0}px / 候補：${templateResult.candidates?.length||0}件（粗候補${templateResult.rawCount||0}件）`);
+    (templateResult.candidates||[]).slice(0,20).forEach((c,i)=>lines.push(`  候補${i+1}: score ${c.score.toFixed(3)} / (${c.x},${c.y},w${c.w},h${c.h})`));
+    lines.push(`※ V83ではまだ黒塗りには使用しません。緑枠はCanvasテンプレート検索の候補です。`);
+
+    lines.push("",`===== V82.1 誤認識救出診断（かな）＋候補bbox仮表示 =====`);
     const v81KanaRescue=findV81KanaRescue(results,target,scale);
     const hasKanjiTarget=[...target].some(isV81Kanji);
     if(hasKanjiTarget){
@@ -2115,7 +2230,7 @@ async function diagnoseOCR(){
         lines.push(`  候補${i+1}: OCR「${c.ocr}」→対象「${c.target}」 / 置換${c.substitutions}文字 / bbox=(${Math.round(c.box.x0)},${Math.round(c.box.y0)},w${Math.round(c.box.x1-c.box.x0)},h${Math.round(c.box.y1-c.box.y0)}) / 「${c.lineText}」`);
       });
       if(!v81KanaRescue.length) lines.push(`かな誤認識による新規候補はありません。`);
-      lines.push(`※ V82.3ではまだ黒塗りに使用しません。候補が出た場合は赤枠で直接表示します。`);
+      lines.push(`※ V82.1ではまだ黒塗りに使用しません。候補が出た場合のみ赤枠で仮表示します。`);
     }
 
     lines.push('', `===== V76 局所OCR・順序維持ロバスト一致実験 =====`);
@@ -2211,27 +2326,29 @@ async function diagnoseOCR(){
       if(seen.some(o=>Math.abs(o.x0-m.x0)<3&&Math.abs(o.y0-m.y0)<3&&Math.abs(o.x1-m.x1)<3&&Math.abs(o.y1-m.y1)<3))continue;
       seen.push(m); const box=document.createElement('div'); box.className='ocr-debug-box'; box.style.borderColor='#22aa55'; box.style.left=`${tr.left+m.x0*tr.scaleX}px`; box.style.top=`${tr.top+m.y0*tr.scaleY}px`; box.style.width=`${(m.x1-m.x0)*tr.scaleX}px`; box.style.height=`${(m.y1-m.y0)*tr.scaleY}px`; const label=document.createElement('span'); label.className='ocr-debug-label'; label.textContent=`${r.mode}: ${target}`; box.appendChild(label); ocrDebugLayer.appendChild(box);
     }
-    // V82.3: かな誤認識候補を、検出直後に確実に表示する。
-    // 黒塗り処理には使用しない。診断表示だけ。
+    // V83: Canvasテンプレート候補を緑枠で表示。黒塗りには使用しない。
+    for(const c of (templateResult.candidates||[])){
+      const box=document.createElement('div');
+      box.className='ocr-debug-box'; box.style.borderColor='#00aa66';
+      box.style.left=`${tr.left+c.x*tr.scaleX}px`; box.style.top=`${tr.top+c.y*tr.scaleY}px`;
+      box.style.width=`${c.w*tr.scaleX}px`; box.style.height=`${c.h*tr.scaleY}px`;
+      const label=document.createElement('span'); label.className='ocr-debug-label';
+      label.textContent=`V83: ${target} ${c.score.toFixed(2)}`; box.appendChild(label); ocrDebugLayer.appendChild(box);
+    }
+
+    // V82.1: かな誤認識候補は黒塗りせず、画像上に赤枠だけ表示。
     const kanaCandidates = v81KanaRescue.slice(0,20);
     for(const c of kanaCandidates){
       const b=c.box;
       const box=document.createElement('div');
-      box.className='ocr-debug-box v82-kana-candidate';
-      box.style.cssText += `;position:absolute;z-index:99999;display:block;visibility:visible;opacity:1;box-sizing:border-box;border:4px solid #ff0000;background:rgba(255,0,0,.08);pointer-events:none;`;
-      box.style.left=`${tr.left+b.x0*tr.scaleX}px`;
-      box.style.top=`${tr.top+b.y0*tr.scaleY}px`;
-      box.style.width=`${Math.max(8,(b.x1-b.x0)*tr.scaleX)}px`;
-      box.style.height=`${Math.max(8,(b.y1-b.y0)*tr.scaleY)}px`;
-      const label=document.createElement('span');
-      label.className='ocr-debug-label';
-      label.style.cssText += `;z-index:100000;background:#ff0000;color:#fff;font-weight:bold;`;
-      label.textContent=`V82.3候補: ${c.ocr}→${c.target}`;
-      box.appendChild(label);
+      box.className='ocr-debug-box'; box.style.borderColor='#ff3333';
+      box.style.left=`${tr.left+b.x0*tr.scaleX}px`; box.style.top=`${tr.top+b.y0*tr.scaleY}px`;
+      box.style.width=`${(b.x1-b.x0)*tr.scaleX}px`; box.style.height=`${(b.y1-b.y0)*tr.scaleY}px`;
+      const label=document.createElement('span'); label.className='ocr-debug-label';
+      label.textContent=`V82.1候補: ${c.ocr}→${c.target}`; box.appendChild(label);
       ocrDebugLayer.appendChild(box);
     }
-    ocrDebugLayer.hidden=false;
-    ocrDebugLayer.style.cssText += `;display:block!important;visibility:visible!important;opacity:1!important;z-index:99998;`;
+    ocrDebugLayer.hidden=ocrDebugLayer.childElementCount===0;
     status(`OCR診断完了。\n検出：${exactCount}件（重複を含む） / 候補地点：${candidateGroups.length}箇所 / 再OCR確認：${refined.length}箇所\n処理時間：${(totalElapsed/1000).toFixed(2)}秒\n下の診断結果を確認してください。`);
   }catch(error){canvas.hidden=false;canvas.style.display='block';status("OCR診断でエラーが発生しました。",error);}
 }
@@ -2663,85 +2780,3 @@ async function saveImage() {
 saveBtn.addEventListener("click", saveImage);
 
 window.addEventListener("beforeunload", () => worker?.terminate());
-
-
-// ===== V82.2 bbox visual debug helper =====
-function drawV82_2CandidateDebug(c) {
-  try {
-    if (!c || !Number.isFinite(c.x) || !Number.isFinite(c.y) ||
-        !Number.isFinite(c.w) || !Number.isFinite(c.h)) return false;
-    const x = c.x, y = c.y, w = c.w, h = c.h;
-
-    // Try common overlay/canvas names first.
-    const canvases = Array.from(document.querySelectorAll("canvas"));
-    let target = canvases.find(cv =>
-      /overlay|result|preview|canvas/i.test(cv.id || "") ||
-      /overlay|result|preview|canvas/i.test(cv.className || "")
-    ) || canvases[canvases.length - 1];
-
-    if (target) {
-      const ctx = target.getContext("2d");
-      if (ctx) {
-        const sx = target.width / (target.clientWidth || target.width);
-        const sy = target.height / (target.clientHeight || target.height);
-        ctx.save();
-        ctx.strokeStyle = "#ff0000";
-        ctx.lineWidth = Math.max(4, 4 * Math.min(sx, sy));
-        ctx.setLineDash([]);
-        ctx.strokeRect(x * sx, y * sy, w * sx, h * sy);
-        ctx.fillStyle = "#ff0000";
-        ctx.font = `${Math.max(18, 18 * Math.min(sx, sy))}px sans-serif`;
-        ctx.fillText("V82.2候補", x * sx, Math.max(22, y * sy - 6));
-        ctx.restore();
-      }
-    }
-
-    // DOM fallback, positioned against the page viewport.
-    const old = document.getElementById("v82_2_bbox_debug");
-    if (old) old.remove();
-    const box = document.createElement("div");
-    box.id = "v82_2_bbox_debug";
-    box.style.cssText = [
-      "position:fixed",
-      "left:12px",
-      "top:12px",
-      "width:calc(100vw - 24px)",
-      "height:calc(100vh - 24px)",
-      "pointer-events:none",
-      "z-index:2147483647",
-      "box-sizing:border-box"
-    ].join(";");
-
-    const note = document.createElement("div");
-    note.textContent = `V82.2 候補 bbox: x=${x}, y=${y}, w=${w}, h=${h}`;
-    note.style.cssText = "position:absolute;left:8px;top:8px;background:#ff0000;color:#fff;padding:4px 7px;font:14px sans-serif;";
-    box.appendChild(note);
-
-    // If a visible image/canvas has a matching coordinate space, place a
-    // second marker using normalized coordinates as a diagnostic fallback.
-    const vw = Math.max(1, document.documentElement.clientWidth);
-    const vh = Math.max(1, document.documentElement.clientHeight);
-    const marker = document.createElement("div");
-    marker.style.cssText = [
-      "position:absolute",
-      `left:${Math.max(0, Math.min(vw - 20, x))}px`,
-      `top:${Math.max(0, Math.min(vh - 20, y))}px`,
-      `width:${Math.max(10, Math.min(vw - x, w))}px`,
-      `height:${Math.max(10, Math.min(vh - y, h))}px`,
-      "border:4px solid #ff0000",
-      "box-sizing:border-box"
-    ].join(";");
-    box.appendChild(marker);
-    document.body.appendChild(box);
-    return true;
-  } catch (e) {
-    console.warn("V82.2 bbox debug draw failed", e);
-    return false;
-  }
-}
-// ===== /V82.2 bbox visual debug helper =====
-
-
-// V82.2: expose a tiny explicit hook for the diagnostic path.
-// Existing code may call window.showV82_2Candidate(c).
-window.showV82_2Candidate = function(c) { return false; };

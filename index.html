@@ -3,8 +3,8 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>スクショ黒塗りツール V82.1</title>
-<link rel="stylesheet" href="style.css?v=32">
+<title>スクショ黒塗りツール V83</title>
+<link rel="stylesheet" href="style.css?v=33">
 <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
 </head>
 <body>
@@ -71,27 +71,6 @@
 <pre id="errorDetails" class="error" hidden></pre>
 <pre id="ocrDiagnostics" class="diagnostics" hidden></pre>
 </main>
-<script src="app.js?v=823"></script>
-
-<script>
-/* V82.3: disabled legacy visual bridge.
-   Does not change OCR or blacking. It only watches the diagnostic text and,
-   when a bbox=(x,y,w,h) appears, asks the debug helper to draw it. */
-(function(){
-  function scanV822(){
-    try{
-      if(typeof window.drawV82_2CandidateDebug !== "function") return;
-      const text = document.body ? document.body.innerText : "";
-      const m = text.match(/bbox=\(\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*,\s*(\d+(?:\.\d+)?)\s*,\s*(\d+(?:\.\d+)?)\s*\)/);
-      if(!m) return;
-      const c = {x:+m[1], y:+m[2], w:+m[3], h:+m[4]};
-      window.drawV82_2CandidateDebug(c);
-    }catch(e){}
-  }
-  setInterval(scanV822, 700);
-  window.addEventListener("load", function(){ setTimeout(scanV822, 500); });
-})();
-</script>
-
+<script src="app.js?v=830"></script>
 </body>
 </html>
