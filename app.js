@@ -1989,7 +1989,7 @@ async function run(){
 }
 
 
-// ===== V83 実験：Canvas文字テンプレート検索 =====
+// ===== V83.1 実験：Canvas文字テンプレート検索（実文字サイズ合わせ） =====
 // OCRの認識結果ではなく、指定文字をCanvasで描画した「形」を画像内から探す。
 // 診断専用。自動黒塗りにはまだ接続しない。
 const TEMPLATE_FONT_STACK='-apple-system, BlinkMacSystemFont, "Helvetica Neue", "Hiragino Sans", "Yu Gothic", sans-serif';
@@ -1997,81 +1997,110 @@ const TEMPLATE_STEP=4;
 const TEMPLATE_SCORE_THRESHOLD=0.72;
 const TEMPLATE_MIN_BRIGHTNESS=105;
 
-function estimateTemplateFontSize(results){
+function estimateTemplateBox(results,target){
+  const boxes=[];
+  for(const r of results||[]){
+    // まず対象文字として実際に完全一致したOCR bboxを使う。
+    for(const m of (r.matches||[])){
+      const w=(m.x1-m.x0), h=(m.y1-m.y0);
+      if(w>=10&&h>=8&&w<=500&&h<=160) boxes.push({w,h});
+    }
+  }
+  if(boxes.length){
+    boxes.sort((a,b)=>a.h-b.h);
+    const mh=boxes[Math.floor(boxes.length/2)].h;
+    boxes.sort((a,b)=>a.w-b.w);
+    const mw=boxes[Math.floor(boxes.length/2)].w;
+    return {w:Math.round(mw),h:Math.round(mh),source:"OCR完全一致bbox"};
+  }
+
+  // 完全一致がない場合だけ、OCRの各文字高さから概算する。
   const hs=[];
   for(const r of results||[]){
     for(const line of (r.lines||[])){
       for(const u of extractLineUnits(line)){
         const b=u?.bbox;
         if(!b) continue;
-        const h=(b.y1-b.y0);
-        if(h>=14 && h<=90) hs.push(h);
+        const h=b.y1-b.y0;
+        if(h>=14&&h<=90) hs.push(h);
       }
     }
   }
-  if(!hs.length) return 34;
+  if(!hs.length) return {w:Math.max(30,target.length*24),h:34,source:"既定値"};
   hs.sort((a,b)=>a-b);
-  const mid=hs[Math.floor(hs.length/2)];
-  return Math.max(20,Math.min(60,Math.round(mid)));
+  const h=Math.max(20,Math.min(90,Math.round(hs[Math.floor(hs.length/2)])));
+  return {w:Math.max(20,Math.round(h*target.length*0.95)),h,source:"OCR文字高さ"};
 }
 
-function buildTextTemplate(text,fontSize){
-  const c=document.createElement('canvas');
+function buildTextTemplate(text,fontSize,fitW=null,fitH=null){
   const m=document.createElement('canvas');
   const mc=m.getContext('2d');
   mc.font=`400 ${fontSize}px ${TEMPLATE_FONT_STACK}`;
   const met=mc.measureText(text);
-  const w=Math.ceil(met.width)+8;
-  const h=Math.ceil(fontSize*1.35);
-  c.width=w; c.height=h;
-  const g=c.getContext('2d',{willReadFrequently:true});
-  g.clearRect(0,0,w,h);
+  const rawW=Math.ceil(met.width)+8;
+  const rawH=Math.ceil(fontSize*1.35);
+  m.width=rawW; m.height=rawH;
+  const g=m.getContext('2d',{willReadFrequently:true});
+  g.clearRect(0,0,rawW,rawH);
   g.font=`400 ${fontSize}px ${TEMPLATE_FONT_STACK}`;
   g.fillStyle='#fff';
   g.textBaseline='alphabetic';
   g.fillText(text,4,fontSize);
-  const d=g.getImageData(0,0,w,h).data;
+
+  let c=m, w=rawW, h=rawH;
+  if(fitW&&fitH){
+    const resized=document.createElement('canvas');
+    resized.width=Math.max(8,fitW);
+    resized.height=Math.max(8,fitH);
+    const rg=resized.getContext('2d',{willReadFrequently:true});
+    rg.clearRect(0,0,resized.width,resized.height);
+    rg.drawImage(m,0,0,resized.width,resized.height);
+    c=resized; w=resized.width; h=resized.height;
+  }
+
+  const d=c.getContext('2d',{willReadFrequently:true}).getImageData(0,0,w,h).data;
   const pts=[];
-  // 文字の輪郭・芯を少数点サンプリング。完全な全ピクセル比較はしない。
   for(let y=0;y<h;y++) for(let x=0;x<w;x++){
     const a=d[(y*w+x)*4+3];
     if(a>=70) pts.push({x,y,a:a/255});
   }
-  const stride=Math.max(1,Math.ceil(pts.length/180));
+  const stride=Math.max(1,Math.ceil(pts.length/220));
   const samples=[];
   for(let i=0;i<pts.length;i+=stride) samples.push(pts[i]);
   return {canvas:c,w,h,samples,fontSize};
 }
 
-function templateSearch(source,text,fontSize){
-  const tpl=buildTextTemplate(text,fontSize);
+function templateSearch(source,text,size){
+  const tpl=buildTextTemplate(text,60,size.w,size.h);
   const sw=source.naturalWidth||source.width, sh=source.naturalHeight||source.height;
-  if(tpl.w>=sw||tpl.h>=sh) return {tpl,candidates:[],error:'テンプレートが画像より大きいため検索できません。'};
+  if(tpl.w>=sw||tpl.h>=sh) return {tpl,candidates:[],rawCount:0,step:TEMPLATE_STEP,threshold:TEMPLATE_SCORE_THRESHOLD};
   const sc=document.createElement('canvas'); sc.width=sw; sc.height=sh;
   const sg=sc.getContext('2d',{willReadFrequently:true}); sg.drawImage(source,0,0,sw,sh);
   const sd=sg.getImageData(0,0,sw,sh).data;
   const gray=new Uint8Array(sw*sh);
   for(let i=0,p=0;i<sd.length;i+=4,p++) gray[p]=Math.round(sd[i]*.299+sd[i+1]*.587+sd[i+2]*.114);
 
-  // 探索エリアを「明るい文字が存在する行」に限定。全画像を毎回精査しない。
   const rowHas=new Uint8Array(sh);
   for(let y=0;y<sh;y++){
     let count=0;
-    for(let x=0;x<sw;x+=3){ if(gray[y*sw+x]>=TEMPLATE_MIN_BRIGHTNESS){ if(++count>=8) break; } }
+    for(let x=0;x<sw;x+=3){
+      if(gray[y*sw+x]>=TEMPLATE_MIN_BRIGHTNESS){ if(++count>=8) break; }
+    }
     if(count>=8) rowHas[y]=1;
   }
-  const candidates=[];
-  const step=TEMPLATE_STEP;
+
+  const candidates=[], step=TEMPLATE_STEP;
   const sxMax=sw-tpl.w, syMax=sh-tpl.h;
   for(let y=0;y<=syMax;y+=step){
     let rowOk=false;
-    for(let yy=0;yy<tpl.h;yy+=Math.max(2,step)){ if(rowHas[y+yy]){rowOk=true;break;} }
+    for(let yy=0;yy<tpl.h;yy+=Math.max(2,step)){
+      if(rowHas[y+yy]){rowOk=true;break;}
+    }
     if(!rowOk) continue;
     for(let x=0;x<=sxMax;x+=step){
-      let good=0, total=0;
+      let good=0,total=0;
       for(const p of tpl.samples){
         const v=gray[(y+p.y)*sw+(x+p.x)];
-        // テンプレートの文字部分は「明るい」ことを主条件にする。
         if(v>=TEMPLATE_MIN_BRIGHTNESS) good++;
         total++;
       }
@@ -2079,7 +2108,7 @@ function templateSearch(source,text,fontSize){
       if(score>=TEMPLATE_SCORE_THRESHOLD) candidates.push({x,y,w:tpl.w,h:tpl.h,score});
     }
   }
-  // 近接候補を統合し、スコアの高い場所だけ残す。
+
   candidates.sort((a,b)=>b.score-a.score);
   const kept=[];
   for(const c of candidates){
@@ -2111,8 +2140,9 @@ async function diagnoseOCR(){
     status("OCR診断中…\n認識条件を比較しています。画像表示は維持します。");
     const ocrStarted=performance.now();
     const {results,scale,ocrCanvas,stats}=await collectOcrResults(worker,target);
-    const templateFontSize=estimateTemplateFontSize(results);
-    const templateResult=templateSearch(sourceImage,target,templateFontSize);
+    const templateSize=estimateTemplateBox(results,target);
+    const templateFontSize=60;
+    const templateResult=templateSearch(sourceImage,target,templateSize);
     const ocrElapsed=performance.now()-ocrStarted;
     const refineStarted=performance.now();
     const refine=await refineNearCandidates(worker,results,ocrCanvas,target,scale);
@@ -2210,11 +2240,11 @@ async function diagnoseOCR(){
     lines.push(`色抽出OCR：${stats.colorHitCount||0}件 / ${(stats.colorMs/1000).toFixed(2)}秒`);
     lines.push(`※ V68の全領域走査方式を診断用にも使用。V70本体では、この局所OCRのHITを追加の黒塗り候補として統合します。`);
 
-    lines.push("",`===== V83 Canvasテンプレート検索実験 =====`);
-    lines.push(`対象文字：${target} / 推定フォントサイズ：${templateFontSize}px / 探索間隔：${templateResult.step||TEMPLATE_STEP}px / 閾値：${TEMPLATE_SCORE_THRESHOLD}`);
+    lines.push("",`===== V83.1 Canvasテンプレート検索実験（実文字サイズ合わせ） =====`);
+    lines.push(`対象文字：${target} / 基準サイズ：${templateSize.w}x${templateSize.h}px（${templateSize.source}） / 探索間隔：${templateResult.step||TEMPLATE_STEP}px / 閾値：${TEMPLATE_SCORE_THRESHOLD}`);
     lines.push(`テンプレート：${templateResult.tpl?.w||0}x${templateResult.tpl?.h||0}px / 候補：${templateResult.candidates?.length||0}件（粗候補${templateResult.rawCount||0}件）`);
     (templateResult.candidates||[]).slice(0,20).forEach((c,i)=>lines.push(`  候補${i+1}: score ${c.score.toFixed(3)} / (${c.x},${c.y},w${c.w},h${c.h})`));
-    lines.push(`※ V83ではまだ黒塗りには使用しません。緑枠はCanvasテンプレート検索の候補です。`);
+    lines.push(`※ V83.1ではまだ黒塗りには使用しません。緑枠はCanvasテンプレート検索の候補です。`);
 
     lines.push("",`===== V82.1 誤認識救出診断（かな）＋候補bbox仮表示 =====`);
     const v81KanaRescue=findV81KanaRescue(results,target,scale);
