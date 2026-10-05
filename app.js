@@ -2098,14 +2098,35 @@ function templateSearch(source,text,size){
     }
     if(!rowOk) continue;
     for(let x=0;x<=sxMax;x+=step){
-      let good=0,total=0;
+      let fgGood=0, fgTotal=0, bgBright=0, bgTotal=0;
+      // Foreground: template ink should be bright.
       for(const p of tpl.samples){
         const v=gray[(y+p.y)*sw+(x+p.x)];
-        if(v>=TEMPLATE_MIN_BRIGHTNESS) good++;
-        total++;
+        if(v>=TEMPLATE_MIN_BRIGHTNESS) fgGood++;
+        fgTotal++;
       }
-      const score=total?good/total:0;
-      if(score>=TEMPLATE_SCORE_THRESHOLD) candidates.push({x,y,w:tpl.w,h:tpl.h,score});
+      // Background: sample pixels outside the template ink. A real text glyph
+      // should sit on a relatively uniform dark background. This strongly
+      // suppresses avatars and other bright image regions.
+      const bgStep=Math.max(2, Math.ceil(Math.min(tpl.w,tpl.h)/12));
+      for(let yy=0; yy<tpl.h; yy+=bgStep){
+        for(let xx=0; xx<tpl.w; xx+=bgStep){
+          let isInk=false;
+          for(const p of tpl.samples){
+            if(Math.abs(p.x-xx)<=1 && Math.abs(p.y-yy)<=1){ isInk=true; break; }
+          }
+          if(isInk) continue;
+          bgTotal++;
+          if(gray[(y+yy)*sw+(x+xx)]>=TEMPLATE_MIN_BRIGHTNESS) bgBright++;
+        }
+      }
+      const fgScore=fgTotal?fgGood/fgTotal:0;
+      const bgScore=bgTotal?1-(bgBright/bgTotal):1;
+      // Foreground is primary; background consistency prevents bright icons
+      // from winning. Keep the threshold close to the previous 0.72 behavior.
+      const score=fgScore*0.72+bgScore*0.28;
+      if(fgScore>=0.78 && score>=TEMPLATE_SCORE_THRESHOLD)
+        candidates.push({x,y,w:tpl.w,h:tpl.h,score,fgScore,bgScore});
     }
   }
 
@@ -2240,11 +2261,11 @@ async function diagnoseOCR(){
     lines.push(`色抽出OCR：${stats.colorHitCount||0}件 / ${(stats.colorMs/1000).toFixed(2)}秒`);
     lines.push(`※ V68の全領域走査方式を診断用にも使用。V70本体では、この局所OCRのHITを追加の黒塗り候補として統合します。`);
 
-    lines.push("",`===== V83.1 Canvasテンプレート検索実験（実文字サイズ合わせ） =====`);
+    lines.push("",`===== V83.2 Canvasテンプレート検索実験（形状＋背景判定） =====`);
     lines.push(`対象文字：${target} / 基準サイズ：${templateSize.w}x${templateSize.h}px（${templateSize.source}） / 探索間隔：${templateResult.step||TEMPLATE_STEP}px / 閾値：${TEMPLATE_SCORE_THRESHOLD}`);
     lines.push(`テンプレート：${templateResult.tpl?.w||0}x${templateResult.tpl?.h||0}px / 候補：${templateResult.candidates?.length||0}件（粗候補${templateResult.rawCount||0}件）`);
     (templateResult.candidates||[]).slice(0,20).forEach((c,i)=>lines.push(`  候補${i+1}: score ${c.score.toFixed(3)} / (${c.x},${c.y},w${c.w},h${c.h})`));
-    lines.push(`※ V83.1ではまだ黒塗りには使用しません。緑枠はCanvasテンプレート検索の候補です。`);
+    lines.push(`※ V83.2ではまだ黒塗りには使用しません。緑枠はCanvasテンプレート検索の候補です。`);
 
     lines.push("",`===== V82.1 誤認識救出診断（かな）＋候補bbox仮表示 =====`);
     const v81KanaRescue=findV81KanaRescue(results,target,scale);
