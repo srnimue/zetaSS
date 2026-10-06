@@ -2122,7 +2122,7 @@ function templateSearch(source,text){
       const bgScore=bgTotal?bgGood/bgTotal:0;
       const score=fgScore*TEMPLATE_FG_WEIGHT+bgScore*TEMPLATE_BG_WEIGHT;
       if(score>=TEMPLATE_SCORE_THRESHOLD){
-        candidates.push({x,y,w:tpl.w,h:tpl.h,score,fgScore,bgScore});
+        if (bgScore >= 0.55) candidates.push({x,y,w:tpl.w,h:tpl.h,score,fgScore,bgScore});
       }
     }
   }
@@ -2260,10 +2260,10 @@ async function diagnoseOCR(){
     lines.push(`色抽出OCR：${stats.colorHitCount||0}件 / ${(stats.colorMs/1000).toFixed(2)}秒`);
     lines.push(`※ V68の全領域走査方式を診断用にも使用。V70本体では、この局所OCRのHITを追加の黒塗り候補として統合します。`);
 
-    lines.push("",`===== V83.4 Canvasテンプレート検索実験（14px描画＋形状＋背景） =====`);
+    lines.push("",`===== V83.5 Canvasテンプレート検索実験（背景閾値強化＋探索範囲調整） =====`);
     lines.push(`対象文字：${target} / Canvas基準フォント：${TEMPLATE_BASE_FONT_SIZE}px / 目標文字高：${TEMPLATE_TARGET_HEIGHT}px / 探索間隔：${templateResult.step||TEMPLATE_STEP}px / 閾値：${TEMPLATE_SCORE_THRESHOLD}`);
     lines.push(`テンプレート：${templateResult.tpl?.w||0}x${templateResult.tpl?.h||0}px（14px描画→実文字領域crop→比率維持拡大）`);
-    lines.push(`探索範囲：x=${templateResult.searchXStart||0}〜${templateResult.searchXEnd||0} / y=${templateResult.searchYStart||0}〜${templateResult.searchYEnd||0}（上部12%を除外）`);
+    lines.push(`探索範囲：x=${templateResult.searchXStart||0}〜${templateResult.searchXEnd||0} / y=${templateResult.searchYStart||0}〜${templateResult.searchYEnd||0}（上部を広めに除外（開始Yを280pxへ調整））`);
     lines.push(`候補：${templateResult.candidates?.length||0}件（粗候補${templateResult.rawCount||0}件）`);
     (templateResult.candidates||[]).slice(0,20).forEach((c,i)=>lines.push(`  候補${i+1}: score ${c.score.toFixed(3)} / 形状${c.fgScore.toFixed(3)} / 背景${c.bgScore.toFixed(3)} / (${c.x},${c.y},w${c.w},h${c.h})`));
     lines.push(`※ V83.4ではまだ黒塗りには使用しません。緑枠はCanvasテンプレート検索の候補です。`);
