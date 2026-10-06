@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>スクショ黒塗りツール V85.2</title>
+<title>スクショ黒塗りツール V85.3</title>
 <link rel="stylesheet" href="style.css?v=33">
 <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
 </head>
@@ -63,6 +63,7 @@
 <div id="canvasWrap">
 <canvas id="canvas"></canvas>
 <div id="selection" hidden></div>
+<button id="manualDeleteBtn" class="manual-delete-btn" type="button" hidden aria-label="この黒塗りを削除">×</button>
 <div id="ocrDebugLayer" hidden></div>
 </div>
 <div class="zoom-controls">
@@ -79,6 +80,6 @@
 <pre id="errorDetails" class="error" hidden></pre>
 <pre id="ocrDiagnostics" class="diagnostics" hidden></pre>
 </main>
-<script src="app.js?v=8520"></script>
+<script src="app.js?v=8530"></script>
 </body>
 </html>
