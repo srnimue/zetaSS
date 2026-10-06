@@ -286,3 +286,46 @@ body.help-dialog-open{
     line-height:28px !important;
   }
 }
+
+
+/* V87.2: プルダウンを同じコンパクト幅に揃え、カラーピッカー出現時のガタつきを防ぐ */
+.manual-draw-controls,
+.redaction-style-controls{
+  justify-content:flex-start;
+}
+
+.manual-draw-controls select,
+.redaction-style-controls select{
+  flex:0 0 170px !important;
+  width:170px !important;
+  max-width:170px !important;
+}
+
+#redactionColor{
+  flex:0 0 44px;
+  width:44px;
+  min-width:44px;
+  height:34px;
+  padding:3px;
+  transition:opacity .12s ease;
+}
+
+#redactionColor.is-placeholder{
+  visibility:hidden;
+  opacity:0;
+  pointer-events:none;
+}
+
+@media (max-width: 600px) {
+  .manual-draw-controls,
+  .redaction-style-controls{
+    width:100%;
+  }
+
+  .manual-draw-controls select,
+  .redaction-style-controls select{
+    flex:0 0 160px !important;
+    width:160px !important;
+    max-width:160px !important;
+  }
+}

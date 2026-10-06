@@ -126,7 +126,10 @@ function getStampRedactionStyle(stamp) {
 
 function updateRedactionStyleUI() {
     if (!redactionColor || !redactionMode) return;
-    redactionColor.hidden = redactionMode.value !== "color";
+    const showColor = redactionMode.value === "color";
+    // V87.2: カラーピッカーの場所は常に確保して、表示/非表示でUIが動かないようにする。
+    redactionColor.classList.toggle("is-placeholder", !showColor);
+    redactionColor.disabled = !showColor;
 }
 
 function savePreferences() {
@@ -279,22 +282,37 @@ function drawOverlayText(text, rect, style) {
 function renderRedactionRect(rect, text = "", style = null) {
     const applied = cloneRedactionStyle(style);
     if (applied.mode === "blur") {
-        const blurMargin = 10;
+        // V87.2:
+        // SafariではCanvasRenderingContext2D.filterのblurが効かない/弱いことがあるため、
+        // 対象範囲を一度縮小してから滑らかに拡大する方式で確実にぼかす。
+        const blurMargin = 8;
         const sx = Math.max(0, Math.floor(rect.x - blurMargin));
         const sy = Math.max(0, Math.floor(rect.y - blurMargin));
-        const sw = Math.min(canvas.width - sx, Math.ceil(rect.w + blurMargin * 2));
-        const sh = Math.min(canvas.height - sy, Math.ceil(rect.h + blurMargin * 2));
-        const temp = document.createElement("canvas");
-        temp.width = Math.max(1, sw);
-        temp.height = Math.max(1, sh);
-        const tctx = temp.getContext("2d");
-        tctx.drawImage(canvas, sx, sy, sw, sh, 0, 0, sw, sh);
+        const sw = Math.max(1, Math.min(canvas.width - sx, Math.ceil(rect.w + blurMargin * 2)));
+        const sh = Math.max(1, Math.min(canvas.height - sy, Math.ceil(rect.h + blurMargin * 2)));
+
+        const source = document.createElement("canvas");
+        source.width = sw;
+        source.height = sh;
+        const sctx = source.getContext("2d");
+        sctx.drawImage(canvas, sx, sy, sw, sh, 0, 0, sw, sh);
+
+        // およそ1/6まで縮小。文字が読めない程度にしつつ、モザイクより柔らかい見た目にする。
+        const small = document.createElement("canvas");
+        small.width = Math.max(1, Math.round(sw / 6));
+        small.height = Math.max(1, Math.round(sh / 6));
+        const smctx = small.getContext("2d");
+        smctx.imageSmoothingEnabled = true;
+        smctx.imageSmoothingQuality = "high";
+        smctx.drawImage(source, 0, 0, sw, sh, 0, 0, small.width, small.height);
+
         ctx.save();
         ctx.beginPath();
         ctx.rect(rect.x, rect.y, rect.w, rect.h);
         ctx.clip();
-        ctx.filter = "blur(8px)";
-        ctx.drawImage(temp, 0, 0, sw, sh, sx, sy, sw, sh);
+        ctx.imageSmoothingEnabled = true;
+        ctx.imageSmoothingQuality = "high";
+        ctx.drawImage(small, 0, 0, small.width, small.height, sx, sy, sw, sh);
         ctx.restore();
     } else {
         ctx.save();
