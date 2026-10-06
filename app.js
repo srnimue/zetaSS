@@ -58,8 +58,8 @@ const pointers = new Map();
 let pinchStartDistance = 0;
 let pinchStartZoom = 1;
 let panLastCenter = null;
-const TOUCH_X_OFFSET = -0;
-const TOUCH_Y_OFFSET = -50;
+const TOUCH_X_OFFSET = -30;
+const TOUCH_Y_OFFSET = -40;
 const MANUAL_HIT_RADIUS_PX = 30; // 画面表示上の当たり判定。新規描画より既存編集を優先。
 const TRACE_FIXED_HEIGHT = 32; // なぞり式の矩形高さ（元画像canvas座標px）
 
@@ -2048,7 +2048,7 @@ async function run(){
 }
 
 
-// ===== V85.4 実験：14px Canvas文字テンプレート検索（グレー文字パス修正版） =====
+// ===== V85.5 実験：14px Canvas文字テンプレート検索（グレー文字パス修正版） =====
 // OCRのbboxをテンプレートの横幅として引き伸ばさず、14pxで実際に描画した文字の
 // アルファ領域だけを切り出し、目標高さへ等倍比率で拡大して検索する。
 // 診断専用。自動黒塗りにはまだ接続しない。
@@ -2202,7 +2202,7 @@ function templateSearch(source,text){
   }
 
   
-  // V85.4: 黒背景＋グレー文字用の第2パス。
+  // V85.5: 黒背景＋グレー文字用の第2パス。
   // buildTextTemplate() の実データ構造（samples / bgSamples）を使う。
   // 先に「中間輝度の画素がある行」だけを絞り、全画面総当たりの負荷も抑える。
   const rowHasGray=new Uint8Array(sh);
@@ -2392,13 +2392,13 @@ async function diagnoseOCR(){
     lines.push(`色抽出OCR：${stats.colorHitCount||0}件 / ${(stats.colorMs/1000).toFixed(2)}秒`);
     lines.push(`※ V68の全領域走査方式を診断用にも使用。V70本体では、この局所OCRのHITを追加の黒塗り候補として統合します。`);
 
-    lines.push("",`===== V85.4 Canvasテンプレート検索実験（グレー文字パス修正版） =====`);
+    lines.push("",`===== V85.5 Canvasテンプレート検索実験（グレー文字パス修正版） =====`);
     lines.push(`対象文字：${target} / Canvas基準フォント：${TEMPLATE_BASE_FONT_SIZE}px / 目標文字高：${TEMPLATE_TARGET_HEIGHT}px / 探索間隔：${templateResult.step||TEMPLATE_STEP}px / 閾値：${TEMPLATE_SCORE_THRESHOLD}`);
     lines.push(`テンプレート：${templateResult.tpl?.w||0}x${templateResult.tpl?.h||0}px（14px描画→実文字領域crop→比率維持拡大）`);
     lines.push(`探索範囲：x=${templateResult.searchXStart||0}〜${templateResult.searchXEnd||0} / y=${templateResult.searchYStart||0}〜${templateResult.searchYEnd||0}（左10%のアイコン列＋上部12%を除外）`);
     lines.push(`候補：${templateResult.candidates?.length||0}件（白pass ${templateResult.rawCount||0}件 / 白背景除外${templateResult.bgRejectedCount||0}件 / グレーpass ${templateResult.grayScorePassCount||0}件）`);
     (templateResult.candidates||[]).slice(0,20).forEach((c,i)=>lines.push(`  候補${i+1}: score ${c.score.toFixed(3)} / 形状${c.fgScore.toFixed(3)} / 背景${c.bgScore.toFixed(3)} / (${c.x},${c.y},w${c.w},h${c.h})`));
-    lines.push(`※ V85.4ではまだ黒塗りには使用しません。緑枠はCanvasテンプレート検索の候補です。`);
+    lines.push(`※ V85.5ではまだ黒塗りには使用しません。緑枠はCanvasテンプレート検索の候補です。`);
 
     lines.push("",`===== V82.1 誤認識救出診断（かな）＋候補bbox仮表示 =====`);
     const v81KanaRescue=findV81KanaRescue(results,target,scale);
@@ -2709,14 +2709,23 @@ function getPointerCenter() {
     };
 }
 
+function resetManualGestureState() {
+    pointers.clear();
+    pinchStartDistance = 0;
+    pinchStartZoom = zoom;
+    panLastCenter = null;
+    isDragging = false;
+    dragStart = null;
+    stampTapStart = null;
+    editMode = null;
+}
+
 function deleteSelectedManualStamp() {
     if (selectedManualIndex < 0 || !manualStamps[selectedManualIndex]) return;
     pushManualHistory();
     manualStamps.splice(selectedManualIndex, 1);
     selectedManualIndex = -1;
-    editMode = null;
-    isDragging = false;
-    dragStart = null;
+    resetManualGestureState();
     hideManualDeleteButton();
     redrawFromBase();
     saveBtn.disabled = false;
@@ -2728,6 +2737,8 @@ function deleteSelectedManualStamp() {
 manualDeleteBtn?.addEventListener("pointerdown", event => {
     event.preventDefault();
     event.stopPropagation();
+    // ×操作はcanvasのポインタ追跡と完全に切り離す。
+    resetManualGestureState();
 });
 
 manualDeleteBtn?.addEventListener("pointerup", event => {
@@ -2743,6 +2754,13 @@ manualDeleteBtn?.addEventListener("click", event => {
 
 canvasWrap.addEventListener("pointerdown", event => {
     if (!sourceImage) return;
+
+    // iOS Safariで×削除後に古いpointerIdが残るケースを防ぐ。
+    // 新しい1本指操作の開始時に、前ジェスチャーの残骸だけなら破棄する。
+    if (event.pointerType === "touch" && event.isPrimary && !isDragging && !panLastCenter && pinchStartDistance === 0) {
+        pointers.clear();
+    }
+
     pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
     canvasWrap.setPointerCapture?.(event.pointerId);
 
@@ -2759,6 +2777,7 @@ canvasWrap.addEventListener("pointerdown", event => {
     }
 
     panLastCenter = null;
+    pinchStartDistance = 0;
 
     if (!manualMode) return;
     event.preventDefault();
@@ -2938,6 +2957,7 @@ canvasWrap.addEventListener("pointercancel", event => {
     isDragging = false;
     dragStart = null;
     stampTapStart = null;
+    if (!pointers.size) pinchStartDistance = 0;
     selection.hidden = true;
     hideManualDeleteButton();
 });
