@@ -2067,7 +2067,11 @@ function buildTextTemplate(text,fontSize,fitW=null,fitH=null){
   const stride=Math.max(1,Math.ceil(pts.length/220));
   const samples=[];
   for(let i=0;i<pts.length;i+=stride) samples.push(pts[i]);
-  return {canvas:c,w,h,samples,fontSize};
+  const ink = new Uint8Array(w*h);
+  for(const p of pts) if(p.x>=0&&p.x<w&&p.y>=0&&p.y<h) ink[p.y*w+p.x]=1;
+  const bgSamples=[]; const bgStep=Math.max(2,Math.ceil(Math.min(w,h)/10));
+  for(let yy=0;yy<h;yy+=bgStep) for(let xx=0;xx<w;xx+=bgStep) if(!ink[yy*w+xx]) bgSamples.push({x:xx,y:yy});
+  return {canvas:c,w,h,samples,bgSamples,fontSize};
 }
 
 function templateSearch(source,text,size){
@@ -2098,35 +2102,16 @@ function templateSearch(source,text,size){
     }
     if(!rowOk) continue;
     for(let x=0;x<=sxMax;x+=step){
-      let fgGood=0, fgTotal=0, bgBright=0, bgTotal=0;
-      // Foreground: template ink should be bright.
-      for(const p of tpl.samples){
-        const v=gray[(y+p.y)*sw+(x+p.x)];
-        if(v>=TEMPLATE_MIN_BRIGHTNESS) fgGood++;
-        fgTotal++;
-      }
-      // Background: sample pixels outside the template ink. A real text glyph
-      // should sit on a relatively uniform dark background. This strongly
-      // suppresses avatars and other bright image regions.
-      const bgStep=Math.max(2, Math.ceil(Math.min(tpl.w,tpl.h)/12));
-      for(let yy=0; yy<tpl.h; yy+=bgStep){
-        for(let xx=0; xx<tpl.w; xx+=bgStep){
-          let isInk=false;
-          for(const p of tpl.samples){
-            if(Math.abs(p.x-xx)<=1 && Math.abs(p.y-yy)<=1){ isInk=true; break; }
-          }
-          if(isInk) continue;
-          bgTotal++;
-          if(gray[(y+yy)*sw+(x+xx)]>=TEMPLATE_MIN_BRIGHTNESS) bgBright++;
-        }
-      }
-      const fgScore=fgTotal?fgGood/fgTotal:0;
-      const bgScore=bgTotal?1-(bgBright/bgTotal):1;
-      // Foreground is primary; background consistency prevents bright icons
-      // from winning. Keep the threshold close to the previous 0.72 behavior.
+      let fgGood=0;
+      const fg=tpl.samples;
+      for(let i=0;i<fg.length;i++){ const p=fg[i]; if(gray[(y+p.y)*sw+(x+p.x)]>=TEMPLATE_MIN_BRIGHTNESS) fgGood++; }
+      const fgScore=fg.length?fgGood/fg.length:0;
+      if(fgScore<0.78) continue;
+      let bgGood=0; const bg=tpl.bgSamples||[];
+      for(let i=0;i<bg.length;i++){ const p=bg[i]; if(gray[(y+p.y)*sw+(x+p.x)]<TEMPLATE_MIN_BRIGHTNESS) bgGood++; }
+      const bgScore=bg.length?bgGood/bg.length:1;
       const score=fgScore*0.72+bgScore*0.28;
-      if(fgScore>=0.78 && score>=TEMPLATE_SCORE_THRESHOLD)
-        candidates.push({x,y,w:tpl.w,h:tpl.h,score,fgScore,bgScore});
+      if(score>=TEMPLATE_SCORE_THRESHOLD) candidates.push({x,y,w:tpl.w,h:tpl.h,score,fgScore,bgScore});
     }
   }
 
@@ -2261,11 +2246,11 @@ async function diagnoseOCR(){
     lines.push(`色抽出OCR：${stats.colorHitCount||0}件 / ${(stats.colorMs/1000).toFixed(2)}秒`);
     lines.push(`※ V68の全領域走査方式を診断用にも使用。V70本体では、この局所OCRのHITを追加の黒塗り候補として統合します。`);
 
-    lines.push("",`===== V83.2 Canvasテンプレート検索実験（形状＋背景判定） =====`);
+    lines.push("",`===== V83.3 Canvasテンプレート検索実験（高速・形状＋背景） =====`);
     lines.push(`対象文字：${target} / 基準サイズ：${templateSize.w}x${templateSize.h}px（${templateSize.source}） / 探索間隔：${templateResult.step||TEMPLATE_STEP}px / 閾値：${TEMPLATE_SCORE_THRESHOLD}`);
     lines.push(`テンプレート：${templateResult.tpl?.w||0}x${templateResult.tpl?.h||0}px / 候補：${templateResult.candidates?.length||0}件（粗候補${templateResult.rawCount||0}件）`);
     (templateResult.candidates||[]).slice(0,20).forEach((c,i)=>lines.push(`  候補${i+1}: score ${c.score.toFixed(3)} / (${c.x},${c.y},w${c.w},h${c.h})`));
-    lines.push(`※ V83.2ではまだ黒塗りには使用しません。緑枠はCanvasテンプレート検索の候補です。`);
+    lines.push(`※ V83.3ではまだ黒塗りには使用しません。緑枠はCanvasテンプレート検索の候補です。`);
 
     lines.push("",`===== V82.1 誤認識救出診断（かな）＋候補bbox仮表示 =====`);
     const v81KanaRescue=findV81KanaRescue(results,target,scale);
