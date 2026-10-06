@@ -89,10 +89,7 @@ body { padding: 12px; } h1 { font-size: 21px; } .panel, .canvas-panel { padding:
 }
 
 .manual-delete-btn{
-  pointer-events:auto;
   position:absolute;
-  left:-18px;
-  top:-18px;
   width:36px;
   height:36px;
   min-width:36px;
@@ -108,8 +105,16 @@ body { padding: 12px; } h1 { font-size: 21px; } .panel, .canvas-panel { padding:
   display:flex;
   align-items:center;
   justify-content:center;
-  z-index:5;
+  z-index:20;
+  pointer-events:auto;
   touch-action:manipulation;
   -webkit-tap-highlight-color:transparent;
   box-shadow:0 1px 4px rgba(0,0,0,.35);
+}
+
+#canvasWrap{ position:relative; }
+
+.manual-delete-btn[hidden]{
+  display:none !important;
+  pointer-events:none !important;
 }

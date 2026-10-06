@@ -350,11 +350,18 @@ function getManualVisualRect(stamp) {
     };
 }
 
+function hideManualDeleteButton() {
+    if (!manualDeleteBtn) return;
+    manualDeleteBtn.hidden = true;
+    manualDeleteBtn.style.left = "";
+    manualDeleteBtn.style.top = "";
+}
+
 function renderManualSelection() {
     if (selectedManualIndex < 0 || !manualStamps[selectedManualIndex]) {
         selection.hidden = true;
         selection.innerHTML = "";
-        if (manualDeleteBtn) manualDeleteBtn.hidden = true;
+        hideManualDeleteButton();
         return;
     }
     const stamp = manualStamps[selectedManualIndex];
@@ -367,10 +374,12 @@ function renderManualSelection() {
     selection.innerHTML = "";
 
     // 削除ボタンはselectionの子にせず、canvasWrap直下の独立要素として表示する。
-    if (manualDeleteBtn) {
-        manualDeleteBtn.hidden = false;
+    if (manualDeleteBtn && manualMode) {
         manualDeleteBtn.style.left = `${transform.left + stamp.x * transform.scaleX - 18}px`;
         manualDeleteBtn.style.top = `${transform.top + stamp.y * transform.scaleY - 18}px`;
+        manualDeleteBtn.hidden = false;
+    } else {
+        hideManualDeleteButton();
     }
     for (const handle of ["nw", "ne", "sw", "se"]) {
         const el = document.createElement("span");
@@ -2039,7 +2048,7 @@ async function run(){
 }
 
 
-// ===== V85.3 実験：14px Canvas文字テンプレート検索（グレー文字パス修正版） =====
+// ===== V85.4 実験：14px Canvas文字テンプレート検索（グレー文字パス修正版） =====
 // OCRのbboxをテンプレートの横幅として引き伸ばさず、14pxで実際に描画した文字の
 // アルファ領域だけを切り出し、目標高さへ等倍比率で拡大して検索する。
 // 診断専用。自動黒塗りにはまだ接続しない。
@@ -2193,7 +2202,7 @@ function templateSearch(source,text){
   }
 
   
-  // V85.3: 黒背景＋グレー文字用の第2パス。
+  // V85.4: 黒背景＋グレー文字用の第2パス。
   // buildTextTemplate() の実データ構造（samples / bgSamples）を使う。
   // 先に「中間輝度の画素がある行」だけを絞り、全画面総当たりの負荷も抑える。
   const rowHasGray=new Uint8Array(sh);
@@ -2383,13 +2392,13 @@ async function diagnoseOCR(){
     lines.push(`色抽出OCR：${stats.colorHitCount||0}件 / ${(stats.colorMs/1000).toFixed(2)}秒`);
     lines.push(`※ V68の全領域走査方式を診断用にも使用。V70本体では、この局所OCRのHITを追加の黒塗り候補として統合します。`);
 
-    lines.push("",`===== V85.3 Canvasテンプレート検索実験（グレー文字パス修正版） =====`);
+    lines.push("",`===== V85.4 Canvasテンプレート検索実験（グレー文字パス修正版） =====`);
     lines.push(`対象文字：${target} / Canvas基準フォント：${TEMPLATE_BASE_FONT_SIZE}px / 目標文字高：${TEMPLATE_TARGET_HEIGHT}px / 探索間隔：${templateResult.step||TEMPLATE_STEP}px / 閾値：${TEMPLATE_SCORE_THRESHOLD}`);
     lines.push(`テンプレート：${templateResult.tpl?.w||0}x${templateResult.tpl?.h||0}px（14px描画→実文字領域crop→比率維持拡大）`);
     lines.push(`探索範囲：x=${templateResult.searchXStart||0}〜${templateResult.searchXEnd||0} / y=${templateResult.searchYStart||0}〜${templateResult.searchYEnd||0}（左10%のアイコン列＋上部12%を除外）`);
     lines.push(`候補：${templateResult.candidates?.length||0}件（白pass ${templateResult.rawCount||0}件 / 白背景除外${templateResult.bgRejectedCount||0}件 / グレーpass ${templateResult.grayScorePassCount||0}件）`);
     (templateResult.candidates||[]).slice(0,20).forEach((c,i)=>lines.push(`  候補${i+1}: score ${c.score.toFixed(3)} / 形状${c.fgScore.toFixed(3)} / 背景${c.bgScore.toFixed(3)} / (${c.x},${c.y},w${c.w},h${c.h})`));
-    lines.push(`※ V85.3ではまだ黒塗りには使用しません。緑枠はCanvasテンプレート検索の候補です。`);
+    lines.push(`※ V85.4ではまだ黒塗りには使用しません。緑枠はCanvasテンプレート検索の候補です。`);
 
     lines.push("",`===== V82.1 誤認識救出診断（かな）＋候補bbox仮表示 =====`);
     const v81KanaRescue=findV81KanaRescue(results,target,scale);
@@ -2600,7 +2609,7 @@ function stopManualMode() {
     dragStart = null;
     stampTapStart = null;
     selection.hidden = true;
-    if (manualDeleteBtn) manualDeleteBtn.hidden = true;
+    hideManualDeleteButton();
     manualHelp.hidden = true;
     manualDoneBtn.hidden = true;
     manualBtn.disabled = !sourceImage;
@@ -2708,7 +2717,7 @@ function deleteSelectedManualStamp() {
     editMode = null;
     isDragging = false;
     dragStart = null;
-    if (manualDeleteBtn) manualDeleteBtn.hidden = true;
+    hideManualDeleteButton();
     redrawFromBase();
     saveBtn.disabled = false;
     status(`選択した黒塗りを削除しました。\n残り：${manualStamps.length}箇所`);
@@ -2741,6 +2750,7 @@ canvasWrap.addEventListener("pointerdown", event => {
         isDragging = false;
         dragStart = null;
         selection.hidden = true;
+        hideManualDeleteButton();
         pinchStartDistance = getPointerDistance();
         pinchStartZoom = zoom;
         panLastCenter = getPointerCenter();
@@ -2752,6 +2762,11 @@ canvasWrap.addEventListener("pointerdown", event => {
 
     if (!manualMode) return;
     event.preventDefault();
+
+    // 新しい操作開始時はいったん削除ボタンを消す。
+    // 既存黒塗りを選択した場合だけ、この後 renderManualSelection() で再表示する。
+    hideManualDeleteButton();
+
     const rawPoint = getRawManualPoint(event);
 
     // 既存の手動黒塗りをタップすると編集対象にする。
@@ -2924,10 +2939,12 @@ canvasWrap.addEventListener("pointercancel", event => {
     dragStart = null;
     stampTapStart = null;
     selection.hidden = true;
+    hideManualDeleteButton();
 });
 
 manualDrawMode?.addEventListener("change", () => {
     selection.hidden = true;
+    hideManualDeleteButton();
     dragStart = null;
     isDragging = false;
     const label = manualDrawMode.value === "trace" ? `なぞり式（高さ${TRACE_FIXED_HEIGHT}px固定）` : "自由矩形";
@@ -2960,6 +2977,7 @@ resetBtn.addEventListener("click", () => {
     manualHistory.length = 0;
     selectedManualIndex = -1;
     editMode = null;
+    hideManualDeleteButton();
     ocrBaseCanvas = null;
     redrawFromBase();
     status("黒塗りをすべてリセットしました。");
@@ -2983,6 +3001,7 @@ fileInput.addEventListener("change", async () => {
         manualHistory.length = 0;
         selectedManualIndex = -1;
         editMode = null;
+        hideManualDeleteButton();
         ocrBaseCanvas = null;
         canvas.width = sourceImage.naturalWidth;
         canvas.height = sourceImage.naturalHeight;
