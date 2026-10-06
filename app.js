@@ -58,8 +58,8 @@ const pointers = new Map();
 let pinchStartDistance = 0;
 let pinchStartZoom = 1;
 let panLastCenter = null;
-const TOUCH_X_OFFSET = -30;
-const TOUCH_Y_OFFSET = -40;
+const TOUCH_X_OFFSET = -0;
+const TOUCH_Y_OFFSET = -50;
 const MANUAL_HIT_RADIUS_PX = 30; // 画面表示上の当たり判定。新規描画より既存編集を優先。
 const TRACE_FIXED_HEIGHT = 32; // なぞり式の矩形高さ（元画像canvas座標px）
 
