@@ -113,6 +113,40 @@ function getOcrPaintBox(box, symbols = []) {
     if (symbols.length && box.h > 0) {
         const first = symbols[0]?.bbox;
         const second = symbols[1]?.bbox;
+
+        // V86:
+        // 完全一致HITで対象文字ごとのsymbol bboxが取れている場合は、
+        // 「単語bbox」よりもまず対象文字自身のunionを信用する。
+        // これで
+        // ・1文字だけ残る（最終boxが細すぎる）
+        // ・隣の文字まで消す（単語bboxが広すぎる）
+        // の両方を抑える。
+        const validBoxes = symbols
+            .map(s => s?.bbox)
+            .filter(b => b && Number.isFinite(b.x0) && Number.isFinite(b.x1) && Number.isFinite(b.y0) && Number.isFinite(b.y1) && b.x1 > b.x0 && b.y1 > b.y0);
+
+        if (validBoxes.length >= 2) {
+            const sx0 = Math.min(...validBoxes.map(b => b.x0));
+            const sy0 = Math.min(...validBoxes.map(b => b.y0));
+            const sx1 = Math.max(...validBoxes.map(b => b.x1));
+            const sy1 = Math.max(...validBoxes.map(b => b.y1));
+            const sw = sx1 - sx0;
+            const sh = sy1 - sy0;
+
+            // 幅/高さが明らかに壊れていない時だけunionへ寄せる。
+            // 高さ基準の上限を設け、隣接文字を巻き込んだ異常bboxは除外する。
+            const plausibleSymbolUnion = sw > 0 && sh > 0 &&
+                sh >= box.h * 0.45 &&
+                sw <= box.h * Math.max(1, validBoxes.length) * 2.2;
+
+            if (plausibleSymbolUnion) {
+                out.x = sx0;
+                out.y = Math.min(out.y, sy0);
+                out.w = sw;
+                out.h = Math.max(out.y + out.h, sy1) - out.y;
+            }
+        }
+
         if (first) {
             const firstHeight = Math.max(0, first.y1 - first.y0);
             if (firstHeight / box.h < OCR_FIRST_SYMBOL_MIN_HEIGHT_RATIO) {
@@ -120,7 +154,7 @@ function getOcrPaintBox(box, symbols = []) {
                 // 左端をその分広げる（右端はそのまま、対象外の文字を巻き込まない）。
                 const extra = Math.max(0, box.h - firstHeight);
                 out.x = Math.max(0, Math.min(out.x, first.x0) - extra);
-                out.w = (box.x + box.w) - out.x;
+                out.w = (Math.max(box.x + box.w, out.x + out.w)) - out.x;
             }
 
             if (symbols.length === 2 && second) {
@@ -137,8 +171,9 @@ function getOcrPaintBox(box, symbols = []) {
                     // box全体の左端を、1文字目の本来の開始位置まで広げる。
                     const expectedWidth = secondWidth; // 2文字目と同程度の幅があったはず
                     const missing = Math.max(0, expectedWidth - firstWidth);
+                    const rightEdge = Math.max(box.x + box.w, out.x + out.w);
                     out.x = Math.max(0, Math.min(out.x, first.x0) - missing);
-                    out.w = (box.x + box.w) - out.x;
+                    out.w = rightEdge - out.x;
                 }
             }
 
@@ -177,7 +212,7 @@ function getOcrPaintBox(box, symbols = []) {
         // 左端はそのままに、幅を「1文字あたり高さの2倍」程度まで切り詰める。
         // 隠したい本体（1文字目）は左端にあるはずなので、切り詰めても
         // 対象自体が露出することはなく、余計な巻き込みだけを防げる。
-        const maxPlausibleWidth = box.h * Math.max(1, symbols.length) * 2;
+        const maxPlausibleWidth = out.h * Math.max(1, symbols.length) * 2;
         if (out.w > maxPlausibleWidth) {
             out.w = maxPlausibleWidth;
         }
@@ -1999,28 +2034,12 @@ async function run(){
       }
     }
 
-    // V70：周囲の文字を手掛かりにした追加救出。
-    // まず今回のOCR結果から「対象文字の直後に出やすい文脈」を学習し、
-    // 局所OCRで文脈だけ拾えた地点を対象文字の推定位置として追加する。
-    status("OCR中…\n周囲の文字から見落としを確認しています。");
+    // V86:
+    // V70の文脈救出は「ちゃん」「さん」など一般的な語尾に反応して
+    // 別の名前や無関係な位置を黒塗りしてしまう誤爆が確認されたため、
+    // 本番の自動黒塗り候補への統合は停止する。
+    // collectContextRescueCandidates() 自体は診断用として残す。
     const contextRescue = collectContextRescueCandidates(results, regionScan, target);
-    for (const c of contextRescue.candidates) {
-      const b = c.box;
-      const duplicate = paintBoxes.some(o => {
-        const ix0 = Math.max(o.x, b.x0), iy0 = Math.max(o.y, b.y0);
-        const ix1 = Math.min(o.x + o.w, b.x1), iy1 = Math.min(o.y + o.h, b.y1);
-        if (ix1 <= ix0 || iy1 <= iy0) return false;
-        const inter = (ix1 - ix0) * (iy1 - iy0);
-        const area = Math.min(o.w * o.h, (b.x1 - b.x0) * (b.y1 - b.y0));
-        return area > 0 && inter / area > .45;
-      });
-      if (!duplicate) {
-        paintBoxes.push({
-          x:b.x0, y:b.y0, w:b.x1-b.x0, h:b.y1-b.y0,
-          symbols:[], source:"文脈救出", rescue:true, context:c.context
-        });
-      }
-    }
 
     // OCR黒塗りを編集可能なオブジェクトとして登録する。
     // OCR専用の補正・余白計算はここで一度だけ行い、以後の移動・サイズ変更では
@@ -2048,7 +2067,7 @@ async function run(){
 }
 
 
-// ===== V85.5 実験：14px Canvas文字テンプレート検索（グレー文字パス修正版） =====
+// ===== V86 実験：14px Canvas文字テンプレート検索（グレー文字パス修正版） =====
 // OCRのbboxをテンプレートの横幅として引き伸ばさず、14pxで実際に描画した文字の
 // アルファ領域だけを切り出し、目標高さへ等倍比率で拡大して検索する。
 // 診断専用。自動黒塗りにはまだ接続しない。
@@ -2202,7 +2221,7 @@ function templateSearch(source,text){
   }
 
   
-  // V85.5: 黒背景＋グレー文字用の第2パス。
+  // V86: 黒背景＋グレー文字用の第2パス。
   // buildTextTemplate() の実データ構造（samples / bgSamples）を使う。
   // 先に「中間輝度の画素がある行」だけを絞り、全画面総当たりの負荷も抑える。
   const rowHasGray=new Uint8Array(sh);
@@ -2392,13 +2411,13 @@ async function diagnoseOCR(){
     lines.push(`色抽出OCR：${stats.colorHitCount||0}件 / ${(stats.colorMs/1000).toFixed(2)}秒`);
     lines.push(`※ V68の全領域走査方式を診断用にも使用。V70本体では、この局所OCRのHITを追加の黒塗り候補として統合します。`);
 
-    lines.push("",`===== V85.5 Canvasテンプレート検索実験（グレー文字パス修正版） =====`);
+    lines.push("",`===== V86 Canvasテンプレート検索実験（グレー文字パス修正版） =====`);
     lines.push(`対象文字：${target} / Canvas基準フォント：${TEMPLATE_BASE_FONT_SIZE}px / 目標文字高：${TEMPLATE_TARGET_HEIGHT}px / 探索間隔：${templateResult.step||TEMPLATE_STEP}px / 閾値：${TEMPLATE_SCORE_THRESHOLD}`);
     lines.push(`テンプレート：${templateResult.tpl?.w||0}x${templateResult.tpl?.h||0}px（14px描画→実文字領域crop→比率維持拡大）`);
     lines.push(`探索範囲：x=${templateResult.searchXStart||0}〜${templateResult.searchXEnd||0} / y=${templateResult.searchYStart||0}〜${templateResult.searchYEnd||0}（左10%のアイコン列＋上部12%を除外）`);
     lines.push(`候補：${templateResult.candidates?.length||0}件（白pass ${templateResult.rawCount||0}件 / 白背景除外${templateResult.bgRejectedCount||0}件 / グレーpass ${templateResult.grayScorePassCount||0}件）`);
     (templateResult.candidates||[]).slice(0,20).forEach((c,i)=>lines.push(`  候補${i+1}: score ${c.score.toFixed(3)} / 形状${c.fgScore.toFixed(3)} / 背景${c.bgScore.toFixed(3)} / (${c.x},${c.y},w${c.w},h${c.h})`));
-    lines.push(`※ V85.5ではまだ黒塗りには使用しません。緑枠はCanvasテンプレート検索の候補です。`);
+    lines.push(`※ V86ではまだ黒塗りには使用しません。緑枠はCanvasテンプレート検索の候補です。`);
 
     lines.push("",`===== V82.1 誤認識救出診断（かな）＋候補bbox仮表示 =====`);
     const v81KanaRescue=findV81KanaRescue(results,target,scale);
@@ -2482,7 +2501,7 @@ async function diagnoseOCR(){
     contextRescue.candidates.slice(0,20).forEach((c,i)=>{
       lines.push(`  候補${i+1}: 文脈「${c.context}」 / (${Math.round(c.box.x0)},${Math.round(c.box.y0)},w${Math.round(c.box.x1-c.box.x0)},h${Math.round(c.box.y1-c.box.y0)}) / ${c.source} / ${c.confidence}`);
     });
-    lines.push(`※ V70では、完全一致HITから対象文字の直後の2～4文字を文脈として学習します。`);
+    lines.push(`※ V70では、完全一致HITから対象文字の直後の2～4文字を文脈として学習します。V86では誤爆対策のため、この文脈救出は診断表示のみに留め、本番黒塗りには使いません。`);
     lines.push(`※ 文脈だけが認識された地点では、既知の対象文字サイズと対象→文脈の間隔から位置を推定します。`);
 
     lines.push("",`===== 処理時間 =====`,
