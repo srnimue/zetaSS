@@ -3,8 +3,8 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>スクショ黒塗りツール V86</title>
-<link rel="stylesheet" href="style.css?v=33">
+<title>スクショ黒塗りツール V86.1</title>
+<link rel="stylesheet" href="style.css?v=8610">
 <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
 </head>
 <body>
@@ -34,10 +34,13 @@
 
 <div class="manual-draw-setting">
   <label for="manualDrawMode">手動の描画方法</label>
-  <select id="manualDrawMode">
-    <option value="free">自由矩形</option>
-    <option value="trace">なぞり式（高さ固定）</option>
-  </select>
+  <div class="manual-draw-controls">
+    <select id="manualDrawMode">
+      <option value="trace" selected>なぞり式（高さ固定）</option>
+      <option value="free">自由矩形</option>
+    </select>
+    <button id="manualHelpBtn" class="help-button" type="button" aria-label="手動モードの使い方" aria-haspopup="dialog" aria-controls="manualHelpDialog">?</button>
+  </div>
 </div>
 
 <div class="button-row main-actions">
@@ -51,10 +54,24 @@
 <button id="diagnoseBtn" type="button" disabled>OCR診断</button>
 </div>
 
-<p class="manual-help" id="manualHelp" hidden>
-手動黒塗り中：描画方法を「自由矩形 / なぞり式」から選べます。既存の黒塗りは新規描画より優先して掴めます。中央ドラッグで移動、四隅でサイズ変更。選択枠の左上に出る×で削除できます。なぞり式は指でなぞった開始〜終了の横幅に合わせます。
-</p>
 <button id="manualDoneBtn" class="secondary" type="button" hidden>手動黒塗り終了</button>
+
+<div id="manualHelpDialog" class="help-dialog" hidden role="dialog" aria-modal="true" aria-labelledby="manualHelpTitle">
+  <div class="help-dialog-backdrop" data-help-close></div>
+  <div class="help-dialog-card" role="document">
+    <div class="help-dialog-header">
+      <h2 id="manualHelpTitle">手動モードの使い方</h2>
+      <button id="manualHelpCloseBtn" class="help-dialog-close" type="button" aria-label="説明を閉じる">×</button>
+    </div>
+    <div class="help-dialog-body">
+      <p><strong>なぞり式</strong>：文字の上を横になぞると、高さ固定の黒塗りを作れます。</p>
+      <p><strong>自由矩形</strong>：指で囲んだ範囲を自由な大きさで黒塗りします。</p>
+      <p><strong>既存の黒塗り</strong>：タップして選択し、中央をドラッグで移動、四隅をドラッグでサイズ変更できます。</p>
+      <p><strong>削除</strong>：選択した黒塗りの左上に出る「×」を押します。</p>
+      <p><strong>画像の移動・拡大縮小</strong>：2本指で移動、ピンチで拡大縮小できます。</p>
+    </div>
+  </div>
+</div>
 </section>
 
 <pre id="status" class="status">画像を選択してください。</pre>
@@ -80,6 +97,6 @@
 <pre id="errorDetails" class="error" hidden></pre>
 <pre id="ocrDiagnostics" class="diagnostics" hidden></pre>
 </main>
-<script src="app.js?v=8600"></script>
+<script src="app.js?v=8610"></script>
 </body>
 </html>

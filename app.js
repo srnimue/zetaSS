@@ -16,7 +16,9 @@ const undoBtn = $("undoBtn");
 const resetBtn = $("resetBtn");
 const manualDoneBtn = $("manualDoneBtn");
 const saveBtn = $("saveBtn");
-const manualHelp = $("manualHelp");
+const manualHelpBtn = $("manualHelpBtn");
+const manualHelpDialog = $("manualHelpDialog");
+const manualHelpCloseBtn = $("manualHelpCloseBtn");
 const statusEl = $("status");
 const errorEl = $("errorDetails");
 const canvasWrap = $("canvasWrap");
@@ -29,6 +31,9 @@ const ocrDiagnostics = $("ocrDiagnostics");
 const zoomOutBtn = $("zoomOutBtn");
 const zoomInBtn = $("zoomInBtn");
 const zoomLabel = $("zoomLabel");
+
+// V86.1: 手動描画の初期モードは「なぞり式」。
+if (manualDrawMode) manualDrawMode.value = "trace";
 
 if (!ENABLE_DIAGNOSTIC) {
     diagnoseBtn.hidden = true;
@@ -58,8 +63,9 @@ const pointers = new Map();
 let pinchStartDistance = 0;
 let pinchStartZoom = 1;
 let panLastCenter = null;
-const TOUCH_X_OFFSET = -30;
-const TOUCH_Y_OFFSET = -40;
+// V86.1: 新規手動描画の指オフセットは「画面上のCSS px」で管理する。
+ // ズーム倍率が変わっても、指から見た描画位置の距離を一定にする。
+const TOUCH_Y_OFFSET_SCREEN_PX = -40;
 const MANUAL_HIT_RADIUS_PX = 30; // 画面表示上の当たり判定。新規描画より既存編集を優先。
 const TRACE_FIXED_HEIGHT = 32; // なぞり式の矩形高さ（元画像canvas座標px）
 
@@ -2615,7 +2621,6 @@ function startManualMode() {
     if (!sourceImage) return;
     manualMode = true;
     document.body.classList.add("manual-mode");
-    manualHelp.hidden = false;
     manualDoneBtn.hidden = false;
     manualBtn.disabled = true;
     status(`手動黒塗りモードです。\n描画方法：${manualDrawMode?.value === "trace" ? "なぞり式" : "自由矩形"}`);
@@ -2629,7 +2634,6 @@ function stopManualMode() {
     stampTapStart = null;
     selection.hidden = true;
     hideManualDeleteButton();
-    manualHelp.hidden = true;
     manualDoneBtn.hidden = true;
     manualBtn.disabled = !sourceImage;
     if (sourceImage) status(`手動黒塗り終了：追加した黒塗り ${manualStamps.length}箇所`);
@@ -2695,28 +2699,29 @@ function getRawManualPoint(event) {
     return getCanvasPoint(event);
 }
 
-// 新規黒塗りを作るときだけ、指から少し左上へ操作位置をずらす。
-// 既存黒塗りの編集（移動・サイズ変更）では指の位置をそのまま使う。
-function getManualPoint(event, applyOffset = true) {
-    if (applyOffset && event.pointerType === "touch") {
-        return getCanvasPoint({
-            clientX: event.clientX + TOUCH_X_OFFSET,
-            clientY: event.clientY + TOUCH_Y_OFFSET
-        });
-    }
-    return getRawManualPoint(event);
+// V86.1:
+// 新規描画時の指オフセットは画面表示上のCSS pxをcanvas座標へ変換する。
+// これにより等倍・拡大時のどちらでも、指から見た描画位置を同じ感覚に保つ。
+// 横方向は自由矩形・なぞり式とも指の実位置に合わせ、Y方向だけ上へずらす。
+function getManualDrawPoint(event) {
+    if (event.pointerType !== "touch") return getRawManualPoint(event);
+
+    const raw = getRawManualPoint(event);
+    const transform = getCanvasDisplayTransform();
+    const scaleY = Math.max(0.0001, transform.scaleY);
+
+    return {
+        x: raw.x,
+        y: raw.y + TOUCH_Y_OFFSET_SCREEN_PX / scaleY
+    };
 }
 
-// なぞり式は横幅を指でなぞった開始〜終了にぴったり合わせる。
-// 横方向オフセットは使わず、指で文字を隠さないためY方向だけ従来オフセットを残す。
+function getManualPoint(event, applyOffset = true) {
+    return applyOffset ? getManualDrawPoint(event) : getRawManualPoint(event);
+}
+
 function getTraceManualPoint(event) {
-    if (event.pointerType === "touch") {
-        return getCanvasPoint({
-            clientX: event.clientX,
-            clientY: event.clientY + TOUCH_Y_OFFSET
-        });
-    }
-    return getRawManualPoint(event);
+    return getManualDrawPoint(event);
 }
 
 function getPointerCenter() {
@@ -2834,7 +2839,7 @@ canvasWrap.addEventListener("pointerdown", event => {
     editMode = null;
     renderManualSelection();
 
-    // 自由矩形は従来オフセット。なぞり式は横方向だけ指の実位置に合わせる。
+    // V86.1: 自由矩形・なぞり式とも、Xは指の実位置、Yは画面px基準の同じオフセットを使う。
     dragStart = manualDrawMode?.value === "trace"
         ? getTraceManualPoint(event)
         : getManualPoint(event, true);
@@ -2979,6 +2984,31 @@ canvasWrap.addEventListener("pointercancel", event => {
     if (!pointers.size) pinchStartDistance = 0;
     selection.hidden = true;
     hideManualDeleteButton();
+});
+
+function openManualHelp() {
+    if (!manualHelpDialog) return;
+    manualHelpDialog.hidden = false;
+    document.body.classList.add("help-dialog-open");
+    manualHelpCloseBtn?.focus();
+}
+
+function closeManualHelp() {
+    if (!manualHelpDialog || manualHelpDialog.hidden) return;
+    manualHelpDialog.hidden = true;
+    document.body.classList.remove("help-dialog-open");
+    manualHelpBtn?.focus();
+}
+
+manualHelpBtn?.addEventListener("click", openManualHelp);
+manualHelpCloseBtn?.addEventListener("click", closeManualHelp);
+manualHelpDialog?.addEventListener("click", event => {
+    if (event.target.closest("[data-help-close]")) closeManualHelp();
+});
+document.addEventListener("keydown", event => {
+    if (event.key === "Escape" && manualHelpDialog && !manualHelpDialog.hidden) {
+        closeManualHelp();
+    }
 });
 
 manualDrawMode?.addEventListener("change", () => {

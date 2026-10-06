@@ -28,7 +28,6 @@ font-weight: 600; cursor: pointer; background: #222; color: #fff;
 }
 button:disabled { opacity: .45; cursor: default; }
 button.secondary { margin-top: 10px; background: #666; }
-.manual-help { margin: 12px 0 0; padding: 10px 12px; background: #f0f0f0; border-radius: 8px; line-height: 1.6; font-size: 14px; }
 #canvasWrap { position: relative; width: 100%; overflow: auto; border-radius: 8px; background: #eee; touch-action: none; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; }
 #canvas { display: block; max-width: 100%; height: auto; margin: 0 auto; user-select: none; -webkit-user-select: none; touch-action: none; }
 #canvasWrap.zoomed { max-height: 70vh; }
@@ -117,4 +116,111 @@ body { padding: 12px; } h1 { font-size: 21px; } .panel, .canvas-panel { padding:
 .manual-delete-btn[hidden]{
   display:none !important;
   pointer-events:none !important;
+}
+
+
+/* V86.1 手動モードヘルプ */
+.manual-draw-controls{
+  display:flex;
+  align-items:center;
+  gap:7px;
+  min-width:0;
+}
+.manual-draw-controls select{
+  flex:1 1 auto;
+}
+.help-button{
+  flex:0 0 34px;
+  width:34px;
+  min-width:34px;
+  height:34px;
+  padding:0;
+  border-radius:999px;
+  background:#666;
+  font-size:18px;
+  line-height:34px;
+  text-align:center;
+}
+.help-dialog[hidden]{
+  display:none !important;
+}
+.help-dialog{
+  position:fixed;
+  inset:0;
+  z-index:1000;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  padding:20px;
+}
+.help-dialog-backdrop{
+  position:absolute;
+  inset:0;
+  background:rgba(0,0,0,.48);
+}
+.help-dialog-card{
+  position:relative;
+  z-index:1;
+  width:min(460px,100%);
+  max-height:min(78vh,620px);
+  overflow:auto;
+  background:#fff;
+  border-radius:14px;
+  box-shadow:0 12px 36px rgba(0,0,0,.28);
+}
+.help-dialog-header{
+  position:sticky;
+  top:0;
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:12px;
+  padding:15px 16px 10px;
+  background:#fff;
+  border-bottom:1px solid #e5e5e5;
+}
+.help-dialog-header h2{
+  margin:0;
+  font-size:18px;
+}
+.help-dialog-close{
+  flex:0 0 36px;
+  width:36px;
+  height:36px;
+  min-width:36px;
+  padding:0;
+  border-radius:999px;
+  background:#666;
+  font-size:22px;
+  line-height:36px;
+}
+.help-dialog-body{
+  padding:8px 16px 16px;
+  line-height:1.65;
+  font-size:14px;
+}
+.help-dialog-body p{
+  margin:10px 0;
+}
+body.help-dialog-open{
+  overflow:hidden;
+}
+
+@media (max-width: 600px) {
+  .manual-draw-setting{
+    align-items:flex-start;
+  }
+  .manual-draw-controls{
+    width:100%;
+  }
+  .help-button{
+    flex:0 0 36px !important;
+    width:36px !important;
+    min-width:36px !important;
+    padding:0 !important;
+    font-size:18px !important;
+  }
+  .help-dialog{
+    padding:14px;
+  }
 }
