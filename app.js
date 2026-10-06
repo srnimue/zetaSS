@@ -8,6 +8,7 @@ const targetText = $("targetText");
 const overlayText = $("overlayText");
 const overlayName = $("overlayName");
 const stampMode = $("stampMode");
+const manualDrawMode = $("manualDrawMode");
 const redactBtn = $("redactBtn");
 const diagnoseBtn = $("diagnoseBtn");
 const manualBtn = $("manualBtn");
@@ -58,6 +59,8 @@ let pinchStartZoom = 1;
 let panLastCenter = null;
 const TOUCH_X_OFFSET = -30;
 const TOUCH_Y_OFFSET = -40;
+const MANUAL_HIT_RADIUS_PX = 30; // 画面表示上の当たり判定。新規描画より既存編集を優先。
+const TRACE_FIXED_HEIGHT = 32; // なぞり式の矩形高さ（元画像canvas座標px）
 
 function status(message, error = null) {
     statusEl.textContent = message;
@@ -368,30 +371,65 @@ function renderManualSelection() {
     }
 }
 
-function hitTestManual(point) {
-    for (let i = manualStamps.length - 1; i >= 0; i--) {
-        const b = manualStamps[i];
-        const padX = Math.max(8, b.w * 0.08);
-        const padY = Math.max(8, b.h * 0.08);
-        if (point.x >= b.x - padX && point.x <= b.x + b.w + padX &&
-            point.y >= b.y - padY && point.y <= b.y + b.h + padY) return i;
-    }
-    return -1;
+function getManualHitRadiusCanvas() {
+    const transform = getCanvasDisplayTransform();
+    const scale = Math.max(0.0001, Math.min(transform.scaleX, transform.scaleY));
+    return MANUAL_HIT_RADIUS_PX / scale;
 }
 
-function getResizeHandle(point, stamp) {
-    const transform = getCanvasDisplayTransform();
-    const size = 22 / Math.max(transform.scaleX, transform.scaleY);
+function getResizeHandle(point, stamp, radius = null) {
+    const size = radius ?? getManualHitRadiusCanvas();
     const handles = {
         nw: [stamp.x, stamp.y],
         ne: [stamp.x + stamp.w, stamp.y],
         sw: [stamp.x, stamp.y + stamp.h],
         se: [stamp.x + stamp.w, stamp.y + stamp.h]
     };
+    let best = null;
+    let bestDistance = Infinity;
     for (const [name, [x, y]] of Object.entries(handles)) {
-        if (Math.hypot(point.x - x, point.y - y) <= size) return name;
+        const distance = Math.hypot(point.x - x, point.y - y);
+        if (distance <= size && distance < bestDistance) {
+            best = name;
+            bestDistance = distance;
+        }
+    }
+    return best;
+}
+
+// 編集対象は「四隅ハンドル → 矩形本体 → 新規描画」の順に判定する。
+// 画面上およそ30pxまで当たり判定を広げ、指のオフセットとは切り離して生タッチ座標で判定する。
+function findManualEditTarget(point) {
+    const radius = getManualHitRadiusCanvas();
+
+    // まず全矩形のハンドルを優先。近いハンドルがあれば必ずリサイズ扱い。
+    let bestHandle = null;
+    for (let i = manualStamps.length - 1; i >= 0; i--) {
+        const stamp = manualStamps[i];
+        const handle = getResizeHandle(point, stamp, radius);
+        if (!handle) continue;
+        const hx = handle.includes("e") ? stamp.x + stamp.w : stamp.x;
+        const hy = handle.includes("s") ? stamp.y + stamp.h : stamp.y;
+        const distance = Math.hypot(point.x - hx, point.y - hy);
+        if (!bestHandle || distance < bestHandle.distance) {
+            bestHandle = { index: i, handle, distance };
+        }
+    }
+    if (bestHandle) return { index: bestHandle.index, type: "resize", handle: bestHandle.handle };
+
+    // 次に矩形本体。実矩形の外側にもradiusぶん余裕を持たせる。
+    for (let i = manualStamps.length - 1; i >= 0; i--) {
+        const b = manualStamps[i];
+        if (point.x >= b.x - radius && point.x <= b.x + b.w + radius &&
+            point.y >= b.y - radius && point.y <= b.y + b.h + radius) {
+            return { index: i, type: "move", handle: null };
+        }
     }
     return null;
+}
+
+function hitTestManual(point) {
+    return findManualEditTarget(point)?.index ?? -1;
 }
 
 function applyMoveEdit(current) {
@@ -1989,7 +2027,7 @@ async function run(){
 }
 
 
-// ===== V83.8 実験：14px Canvas文字テンプレート検索（グレー文字パス修正版） =====
+// ===== V84 実験：14px Canvas文字テンプレート検索（グレー文字パス修正版） =====
 // OCRのbboxをテンプレートの横幅として引き伸ばさず、14pxで実際に描画した文字の
 // アルファ領域だけを切り出し、目標高さへ等倍比率で拡大して検索する。
 // 診断専用。自動黒塗りにはまだ接続しない。
@@ -2143,7 +2181,7 @@ function templateSearch(source,text){
   }
 
   
-  // V83.8: 黒背景＋グレー文字用の第2パス。
+  // V84: 黒背景＋グレー文字用の第2パス。
   // buildTextTemplate() の実データ構造（samples / bgSamples）を使う。
   // 先に「中間輝度の画素がある行」だけを絞り、全画面総当たりの負荷も抑える。
   const rowHasGray=new Uint8Array(sh);
@@ -2333,13 +2371,13 @@ async function diagnoseOCR(){
     lines.push(`色抽出OCR：${stats.colorHitCount||0}件 / ${(stats.colorMs/1000).toFixed(2)}秒`);
     lines.push(`※ V68の全領域走査方式を診断用にも使用。V70本体では、この局所OCRのHITを追加の黒塗り候補として統合します。`);
 
-    lines.push("",`===== V83.8 Canvasテンプレート検索実験（グレー文字パス修正版） =====`);
+    lines.push("",`===== V84 Canvasテンプレート検索実験（グレー文字パス修正版） =====`);
     lines.push(`対象文字：${target} / Canvas基準フォント：${TEMPLATE_BASE_FONT_SIZE}px / 目標文字高：${TEMPLATE_TARGET_HEIGHT}px / 探索間隔：${templateResult.step||TEMPLATE_STEP}px / 閾値：${TEMPLATE_SCORE_THRESHOLD}`);
     lines.push(`テンプレート：${templateResult.tpl?.w||0}x${templateResult.tpl?.h||0}px（14px描画→実文字領域crop→比率維持拡大）`);
     lines.push(`探索範囲：x=${templateResult.searchXStart||0}〜${templateResult.searchXEnd||0} / y=${templateResult.searchYStart||0}〜${templateResult.searchYEnd||0}（左10%のアイコン列＋上部12%を除外）`);
     lines.push(`候補：${templateResult.candidates?.length||0}件（白pass ${templateResult.rawCount||0}件 / 白背景除外${templateResult.bgRejectedCount||0}件 / グレーpass ${templateResult.grayScorePassCount||0}件）`);
     (templateResult.candidates||[]).slice(0,20).forEach((c,i)=>lines.push(`  候補${i+1}: score ${c.score.toFixed(3)} / 形状${c.fgScore.toFixed(3)} / 背景${c.bgScore.toFixed(3)} / (${c.x},${c.y},w${c.w},h${c.h})`));
-    lines.push(`※ V83.8ではまだ黒塗りには使用しません。緑枠はCanvasテンプレート検索の候補です。`);
+    lines.push(`※ V84ではまだ黒塗りには使用しません。緑枠はCanvasテンプレート検索の候補です。`);
 
     lines.push("",`===== V82.1 誤認識救出診断（かな）＋候補bbox仮表示 =====`);
     const v81KanaRescue=findV81KanaRescue(results,target,scale);
@@ -2514,6 +2552,25 @@ function updateSelection(start, current) {
     selection.style.height = `${h * transform.scaleY}px`;
 }
 
+function getTraceRect(start, current) {
+    const x = Math.min(start.x, current.x);
+    const w = Math.abs(current.x - start.x);
+    const h = TRACE_FIXED_HEIGHT;
+    // Yは開始地点を基準に固定。指が上下にぶれても黒塗りが蛇行しない。
+    const y = Math.max(0, Math.min(canvas.height - h, start.y - h / 2));
+    return { x, y, w, h };
+}
+
+function updateTraceSelection(start, current) {
+    const rect = getTraceRect(start, current);
+    const transform = getCanvasDisplayTransform();
+    selection.hidden = false;
+    selection.style.left = `${transform.left + rect.x * transform.scaleX}px`;
+    selection.style.top = `${transform.top + rect.y * transform.scaleY}px`;
+    selection.style.width = `${rect.w * transform.scaleX}px`;
+    selection.style.height = `${rect.h * transform.scaleY}px`;
+}
+
 function startManualMode() {
     if (!sourceImage) return;
     manualMode = true;
@@ -2521,7 +2578,7 @@ function startManualMode() {
     manualHelp.hidden = false;
     manualDoneBtn.hidden = false;
     manualBtn.disabled = true;
-    status("手動黒塗りモードです。\n画像上をドラッグして隠したい範囲を選択してください。");
+    status(`手動黒塗りモードです。\n描画方法：${manualDrawMode?.value === "trace" ? "なぞり式" : "自由矩形"}`);
 }
 
 function stopManualMode() {
@@ -2564,13 +2621,21 @@ function placeStampAt(point) {
 
 function finishStamp(point) {
     if (!dragStart) return;
-    const x = Math.min(dragStart.x, point.x);
-    const y = Math.min(dragStart.y, point.y);
-    const w = Math.abs(point.x - dragStart.x);
-    const h = Math.abs(point.y - dragStart.y);
+
+    let x, y, w, h;
+    if (manualDrawMode?.value === "trace") {
+        const rect = getTraceRect(dragStart, point);
+        ({ x, y, w, h } = rect);
+    } else {
+        x = Math.min(dragStart.x, point.x);
+        y = Math.min(dragStart.y, point.y);
+        w = Math.abs(point.x - dragStart.x);
+        h = Math.abs(point.y - dragStart.y);
+    }
     selection.hidden = true;
 
-    if (w < 4 || h < 4) {
+    // なぞり式は高さ固定なので横幅だけ最低サイズを確認。
+    if (w < MIN_MANUAL_SIZE || h < MIN_MANUAL_SIZE) {
         dragStart = null;
         return;
     }
@@ -2581,7 +2646,7 @@ function finishStamp(point) {
     paintManual(stamp, stamp.text);
     updateUndoButton();
     saveBtn.disabled = false;
-    status(`手動黒塗りを追加しました。\n追加済み：${manualStamps.length}箇所`);
+    status(`${manualDrawMode?.value === "trace" ? "なぞり式" : "手動"}黒塗りを追加しました。\n追加済み：${manualStamps.length}箇所`);
     dragStart = null;
 }
 
@@ -2635,22 +2700,23 @@ canvasWrap.addEventListener("pointerdown", event => {
     // 既存の手動黒塗りをタップすると編集対象にする。
     // 編集時はオフセットを使わず、指の位置をそのまま操作位置にする。
     // スタンプモード中でも、まず既存黒塗りの編集を優先する。
-    const hitIndex = hitTestManual(rawPoint);
-    if (hitIndex >= 0) {
+    const editTarget = findManualEditTarget(rawPoint);
+    if (editTarget) {
         dragStart = rawPoint;
-        selectedManualIndex = hitIndex;
-        const hitStamp = manualStamps[hitIndex];
-        const handle = getResizeHandle(rawPoint, hitStamp);
+        selectedManualIndex = editTarget.index;
+        const hitStamp = manualStamps[editTarget.index];
         editMode = {
-            type: handle ? "resize" : "move",
-            handle,
+            type: editTarget.type,
+            handle: editTarget.handle,
             startPoint: { ...dragStart },
             original: { ...hitStamp },
             historyPushed: false
         };
         isDragging = true;
         renderManualSelection();
-        status("黒塗りを選択中です。\n中央をドラッグ：移動 / 四隅をドラッグ：サイズ変更");
+        status(editTarget.type === "resize"
+            ? "黒塗りの角を掴みました。\nドラッグでサイズ変更できます。"
+            : "黒塗りを掴みました。\nドラッグで移動できます。");
         return;
     }
 
@@ -2673,7 +2739,8 @@ canvasWrap.addEventListener("pointerdown", event => {
     }
 
     isDragging = true;
-    updateSelection(dragStart, dragStart);
+    if (manualDrawMode?.value === "trace") updateTraceSelection(dragStart, dragStart);
+    else updateSelection(dragStart, dragStart);
 });
 
 canvasWrap.addEventListener("pointermove", event => {
@@ -2722,7 +2789,9 @@ canvasWrap.addEventListener("pointermove", event => {
     }
 
     if (!isDragging || !dragStart) return;
-    updateSelection(dragStart, getManualPoint(event, true));
+    const point = getManualPoint(event, true);
+    if (manualDrawMode?.value === "trace") updateTraceSelection(dragStart, point);
+    else updateSelection(dragStart, point);
 });
 
 function endPointer(event) {
@@ -2790,6 +2859,14 @@ canvasWrap.addEventListener("pointercancel", event => {
     dragStart = null;
     stampTapStart = null;
     selection.hidden = true;
+});
+
+manualDrawMode?.addEventListener("change", () => {
+    selection.hidden = true;
+    dragStart = null;
+    isDragging = false;
+    const label = manualDrawMode.value === "trace" ? `なぞり式（高さ${TRACE_FIXED_HEIGHT}px固定）` : "自由矩形";
+    status(`手動の描画方法を「${label}」にしました。`);
 });
 
 stampMode.addEventListener("change", () => {
