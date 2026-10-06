@@ -89,6 +89,7 @@ body { padding: 12px; } h1 { font-size: 21px; } .panel, .canvas-panel { padding:
 }
 
 .manual-delete-btn{
+  pointer-events:auto;
   position:absolute;
   left:-18px;
   top:-18px;

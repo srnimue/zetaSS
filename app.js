@@ -2037,7 +2037,7 @@ async function run(){
 }
 
 
-// ===== V85.1 実験：14px Canvas文字テンプレート検索（グレー文字パス修正版） =====
+// ===== V85.2 実験：14px Canvas文字テンプレート検索（グレー文字パス修正版） =====
 // OCRのbboxをテンプレートの横幅として引き伸ばさず、14pxで実際に描画した文字の
 // アルファ領域だけを切り出し、目標高さへ等倍比率で拡大して検索する。
 // 診断専用。自動黒塗りにはまだ接続しない。
@@ -2191,7 +2191,7 @@ function templateSearch(source,text){
   }
 
   
-  // V85.1: 黒背景＋グレー文字用の第2パス。
+  // V85.2: 黒背景＋グレー文字用の第2パス。
   // buildTextTemplate() の実データ構造（samples / bgSamples）を使う。
   // 先に「中間輝度の画素がある行」だけを絞り、全画面総当たりの負荷も抑える。
   const rowHasGray=new Uint8Array(sh);
@@ -2381,13 +2381,13 @@ async function diagnoseOCR(){
     lines.push(`色抽出OCR：${stats.colorHitCount||0}件 / ${(stats.colorMs/1000).toFixed(2)}秒`);
     lines.push(`※ V68の全領域走査方式を診断用にも使用。V70本体では、この局所OCRのHITを追加の黒塗り候補として統合します。`);
 
-    lines.push("",`===== V85.1 Canvasテンプレート検索実験（グレー文字パス修正版） =====`);
+    lines.push("",`===== V85.2 Canvasテンプレート検索実験（グレー文字パス修正版） =====`);
     lines.push(`対象文字：${target} / Canvas基準フォント：${TEMPLATE_BASE_FONT_SIZE}px / 目標文字高：${TEMPLATE_TARGET_HEIGHT}px / 探索間隔：${templateResult.step||TEMPLATE_STEP}px / 閾値：${TEMPLATE_SCORE_THRESHOLD}`);
     lines.push(`テンプレート：${templateResult.tpl?.w||0}x${templateResult.tpl?.h||0}px（14px描画→実文字領域crop→比率維持拡大）`);
     lines.push(`探索範囲：x=${templateResult.searchXStart||0}〜${templateResult.searchXEnd||0} / y=${templateResult.searchYStart||0}〜${templateResult.searchYEnd||0}（左10%のアイコン列＋上部12%を除外）`);
     lines.push(`候補：${templateResult.candidates?.length||0}件（白pass ${templateResult.rawCount||0}件 / 白背景除外${templateResult.bgRejectedCount||0}件 / グレーpass ${templateResult.grayScorePassCount||0}件）`);
     (templateResult.candidates||[]).slice(0,20).forEach((c,i)=>lines.push(`  候補${i+1}: score ${c.score.toFixed(3)} / 形状${c.fgScore.toFixed(3)} / 背景${c.bgScore.toFixed(3)} / (${c.x},${c.y},w${c.w},h${c.h})`));
-    lines.push(`※ V85.1ではまだ黒塗りには使用しません。緑枠はCanvasテンプレート検索の候補です。`);
+    lines.push(`※ V85.2ではまだ黒塗りには使用しません。緑枠はCanvasテンプレート検索の候補です。`);
 
     lines.push("",`===== V82.1 誤認識救出診断（かな）＋候補bbox仮表示 =====`);
     const v81KanaRescue=findV81KanaRescue(results,target,scale);
@@ -2676,6 +2676,18 @@ function getManualPoint(event, applyOffset = true) {
     return getRawManualPoint(event);
 }
 
+// なぞり式は横幅を指でなぞった開始〜終了にぴったり合わせる。
+// 横方向オフセットは使わず、指で文字を隠さないためY方向だけ従来オフセットを残す。
+function getTraceManualPoint(event) {
+    if (event.pointerType === "touch") {
+        return getCanvasPoint({
+            clientX: event.clientX,
+            clientY: event.clientY + TOUCH_Y_OFFSET
+        });
+    }
+    return getRawManualPoint(event);
+}
+
 function getPointerCenter() {
     const values = [...pointers.values()];
     if (!values.length) return null;
@@ -2704,10 +2716,9 @@ selection.addEventListener("pointerdown", event => {
     if (!btn) return;
     event.preventDefault();
     event.stopPropagation();
-    btn.setPointerCapture?.(event.pointerId);
 });
 
-selection.addEventListener("pointerup", event => {
+selection.addEventListener("click", event => {
     const btn = event.target.closest?.(".manual-delete-btn");
     if (!btn) return;
     event.preventDefault();
@@ -2764,8 +2775,10 @@ canvasWrap.addEventListener("pointerdown", event => {
     editMode = null;
     renderManualSelection();
 
-    // 新規黒塗りは指から左上へオフセットした位置を使う。
-    dragStart = getManualPoint(event, true);
+    // 自由矩形は従来オフセット。なぞり式は横方向だけ指の実位置に合わせる。
+    dragStart = manualDrawMode?.value === "trace"
+        ? getTraceManualPoint(event)
+        : getManualPoint(event, true);
 
     if (stampMode.checked && getLastManualStamp()) {
         stampTapStart = { x: event.clientX, y: event.clientY };
@@ -2829,7 +2842,9 @@ canvasWrap.addEventListener("pointermove", event => {
     }
 
     if (!isDragging || !dragStart) return;
-    const point = getManualPoint(event, true);
+    const point = manualDrawMode?.value === "trace"
+        ? getTraceManualPoint(event)
+        : getManualPoint(event, true);
     if (manualDrawMode?.value === "trace") updateTraceSelection(dragStart, point);
     else updateSelection(dragStart, point);
 });
@@ -2875,7 +2890,11 @@ function endPointer(event) {
 
     if (!isDragging || !dragStart) return;
     isDragging = false;
-    finishStamp(getManualPoint(event));
+    finishStamp(
+        manualDrawMode?.value === "trace"
+            ? getTraceManualPoint(event)
+            : getManualPoint(event)
+    );
 }
 
 canvasWrap.addEventListener("pointerup", endPointer);
