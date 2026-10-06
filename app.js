@@ -1989,7 +1989,7 @@ async function run(){
 }
 
 
-// ===== V83.6 実験：14px Canvas文字テンプレート検索（左アイコン領域除外＋背景判定） =====
+// ===== V83.7 実験：14px Canvas文字テンプレート検索（白文字＋グレー文字の2パス） =====
 // OCRのbboxをテンプレートの横幅として引き伸ばさず、14pxで実際に描画した文字の
 // アルファ領域だけを切り出し、目標高さへ等倍比率で拡大して検索する。
 // 診断専用。自動黒塗りにはまだ接続しない。
@@ -2005,6 +2005,10 @@ const TEMPLATE_MIN_BG_SCORE=0.55;
 const TEMPLATE_SEARCH_LEFT_RATIO=0.10;
 const TEMPLATE_SEARCH_RIGHT_RATIO=0.02;
 const TEMPLATE_SEARCH_TOP_RATIO=0.12;
+const TEMPLATE_GRAY_TEXT_MIN=90;
+const TEMPLATE_GRAY_TEXT_MAX=210;
+const TEMPLATE_GRAY_BG_MAX=75;
+const TEMPLATE_GRAY_SCORE_THRESHOLD=0.68;
 
 function buildTextTemplate(text){
   // まず14pxで描画し、実際に文字が存在するアルファ領域だけをcropする。
@@ -2129,7 +2133,7 @@ function templateSearch(source,text){
       if(score>=TEMPLATE_SCORE_THRESHOLD){
         scorePassCount++;
         if(bgScore>=TEMPLATE_MIN_BG_SCORE){
-          candidates.push({x,y,w:tpl.w,h:tpl.h,score,fgScore,bgScore});
+          candidates.push({x,y,w:tpl.w,h:tpl.h,score,fgScore,bgScore,pass:"white"});
         }else{
           bgRejectedCount++;
         }
@@ -2137,7 +2141,49 @@ function templateSearch(source,text){
     }
   }
 
-  candidates.sort((a,b)=>b.score-a.score);
+  
+  // V83.7: 黒背景＋グレー文字用の第2パス。
+  // 白文字向けの「明るさそのもの」ではなく、周囲の黒背景に対する相対コントラストを見る。
+  let grayScorePassCount=0, grayAddedCount=0;
+  for(let y=searchYStart;y<=searchYEnd;y+=step){
+    for(let x=searchXStart;x<=searchXEnd;x+=step){
+      let fgHit=0, fgTotal=0, bgHit=0, bgTotal=0;
+
+      for(let i=0;i<tpl.fg.length;i++){
+        const p=tpl.fg[i], sx=x+p.x, sy=y+p.y;
+        const idx=(sy*sw+sx)*4;
+        const r=srcData.data[idx], g=srcData.data[idx+1], b=srcData.data[idx+2];
+        const lum=(r*299+g*587+b*114)/1000;
+        fgTotal++;
+        if(lum>=TEMPLATE_GRAY_TEXT_MIN && lum<=TEMPLATE_GRAY_TEXT_MAX) fgHit++;
+      }
+
+      for(let i=0;i<tpl.bg.length;i++){
+        const p=tpl.bg[i], sx=x+p.x, sy=y+p.y;
+        const idx=(sy*sw+sx)*4;
+        const r=srcData.data[idx], g=srcData.data[idx+1], b=srcData.data[idx+2];
+        const lum=(r*299+g*587+b*114)/1000;
+        bgTotal++;
+        if(lum<=TEMPLATE_GRAY_BG_MAX) bgHit++;
+      }
+
+      const grayFgScore=fgTotal?fgHit/fgTotal:0;
+      const grayBgScore=bgTotal?bgHit/bgTotal:0;
+      const grayScore=grayFgScore*0.78 + grayBgScore*0.22;
+
+      if(grayScore>=TEMPLATE_GRAY_SCORE_THRESHOLD){
+        grayScorePassCount++;
+        candidates.push({
+          x,y,w:tpl.w,h:tpl.h,
+          score:grayScore,fgScore:grayFgScore,bgScore:grayBgScore,
+          pass:"gray"
+        });
+        grayAddedCount++;
+      }
+    }
+  }
+
+candidates.sort((a,b)=>b.score-a.score);
   const kept=[];
   for(const c of candidates){
     const dup=kept.some(k=>{
@@ -2150,7 +2196,8 @@ function templateSearch(source,text){
   }
   return {
     tpl,candidates:kept,rawCount:scorePassCount,bgRejectedCount,
-    step,threshold:TEMPLATE_SCORE_THRESHOLD,
+    grayScorePassCount,grayAddedCount,
+    step,threshold:TEMPLATE_SCORE_THRESHOLD,grayThreshold:TEMPLATE_GRAY_SCORE_THRESHOLD,
     searchYStart,searchYEnd,searchXStart,searchXEnd
   };
 }
@@ -2270,13 +2317,13 @@ async function diagnoseOCR(){
     lines.push(`色抽出OCR：${stats.colorHitCount||0}件 / ${(stats.colorMs/1000).toFixed(2)}秒`);
     lines.push(`※ V68の全領域走査方式を診断用にも使用。V70本体では、この局所OCRのHITを追加の黒塗り候補として統合します。`);
 
-    lines.push("",`===== V83.6 Canvasテンプレート検索実験（左アイコン領域除外＋背景判定） =====`);
+    lines.push("",`===== V83.7 Canvasテンプレート検索実験（白文字＋グレー文字の2パス） =====`);
     lines.push(`対象文字：${target} / Canvas基準フォント：${TEMPLATE_BASE_FONT_SIZE}px / 目標文字高：${TEMPLATE_TARGET_HEIGHT}px / 探索間隔：${templateResult.step||TEMPLATE_STEP}px / 閾値：${TEMPLATE_SCORE_THRESHOLD}`);
     lines.push(`テンプレート：${templateResult.tpl?.w||0}x${templateResult.tpl?.h||0}px（14px描画→実文字領域crop→比率維持拡大）`);
     lines.push(`探索範囲：x=${templateResult.searchXStart||0}〜${templateResult.searchXEnd||0} / y=${templateResult.searchYStart||0}〜${templateResult.searchYEnd||0}（左10%のアイコン列＋上部12%を除外）`);
-    lines.push(`候補：${templateResult.candidates?.length||0}件（score通過${templateResult.rawCount||0}件 / 背景で除外${templateResult.bgRejectedCount||0}件 / 背景下限${TEMPLATE_MIN_BG_SCORE}）`);
+    lines.push(`候補：${templateResult.candidates?.length||0}件（白pass ${templateResult.rawCount||0}件 / 白背景除外${templateResult.bgRejectedCount||0}件 / グレーpass ${templateResult.grayScorePassCount||0}件）`);
     (templateResult.candidates||[]).slice(0,20).forEach((c,i)=>lines.push(`  候補${i+1}: score ${c.score.toFixed(3)} / 形状${c.fgScore.toFixed(3)} / 背景${c.bgScore.toFixed(3)} / (${c.x},${c.y},w${c.w},h${c.h})`));
-    lines.push(`※ V83.6ではまだ黒塗りには使用しません。緑枠はCanvasテンプレート検索の候補です。`);
+    lines.push(`※ V83.7ではまだ黒塗りには使用しません。緑枠はCanvasテンプレート検索の候補です。`);
 
     lines.push("",`===== V82.1 誤認識救出診断（かな）＋候補bbox仮表示 =====`);
     const v81KanaRescue=findV81KanaRescue(results,target,scale);
