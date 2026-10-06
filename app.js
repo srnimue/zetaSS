@@ -61,6 +61,11 @@ const TOUCH_X_OFFSET = -30;
 const TOUCH_Y_OFFSET = -40;
 const MANUAL_HIT_RADIUS_PX = 30; // 画面表示上の当たり判定。新規描画より既存編集を優先。
 const TRACE_FIXED_HEIGHT = 32; // なぞり式の矩形高さ（元画像canvas座標px）
+const TRIPLE_TAP_MAX_INTERVAL = 600; // 3回タップ全体の猶予(ms)
+const TRIPLE_TAP_MAX_DISTANCE = 30; // 画面上で同じ場所とみなす距離(px)
+const TRIPLE_TAP_MAX_MOVE = 12; // 1タップ中の移動許容量(px)
+let tripleTapState = { index: -1, count: 0, firstTime: 0, lastClientX: 0, lastClientY: 0 };
+let manualPressStart = null;
 
 function status(message, error = null) {
     statusEl.textContent = message;
@@ -461,9 +466,7 @@ function applyResizeEdit(current) {
 function redrawFromBase() {
     if (!sourceImage) return;
 
-    // 編集中にcanvasを描き直しても、現在のズーム率とスクロール位置を
-    // 変えない。canvas.width/heightを書き換えるとブラウザがスクロール位置を
-    // 戻してしまうことがあるため、編集前の表示位置を保存して復元する。
+    // 編集中は OCR 済み/未実行に関係なく、現在のズーム率とスクロール位置を維持する。
     const keepZoom = zoom;
     const keepScrollLeft = canvasWrap.scrollLeft;
     const keepScrollTop = canvasWrap.scrollTop;
@@ -475,30 +478,34 @@ function redrawFromBase() {
     } else {
         canvas.width = sourceImage.naturalWidth;
         canvas.height = sourceImage.naturalHeight;
-        zoom = 1;
         ctx.drawImage(sourceImage, 0, 0);
-        updateZoomUI();
     }
 
     for (const stamp of manualStamps) {
         paintStamp(stamp);
     }
     updateUndoButton();
-    renderManualSelection();
 
-    if (ocrBaseCanvas && keepZoom > 1.001) {
-        zoom = keepZoom;
+    // canvas.width/height の書き換えで CSS サイズやスクロール位置がリセットされるため、
+    // 毎回 keepZoom を戻し、次フレームでスクロールも復元する。
+    zoom = keepZoom;
+    const base = getBaseDisplaySize();
+    if (keepZoom > 1.001) {
         canvasWrap.classList.add("zoomed");
-        const base = getBaseDisplaySize();
-        canvas.style.width = `${base.width * zoom}px`;
-        canvas.style.height = `${base.height * zoom}px`;
-        zoomLabel.textContent = `${Math.round(zoom * 100)}%`;
-        requestAnimationFrame(() => {
-            canvasWrap.scrollLeft = keepScrollLeft;
-            canvasWrap.scrollTop = keepScrollTop;
-            renderManualSelection();
-        });
+        canvas.style.width = `${base.width * keepZoom}px`;
+        canvas.style.height = `${base.height * keepZoom}px`;
+    } else {
+        canvasWrap.classList.remove("zoomed");
+        canvas.style.width = `${base.width}px`;
+        canvas.style.height = `${base.height}px`;
     }
+    zoomLabel.textContent = `${Math.round(keepZoom * 100)}%`;
+
+    requestAnimationFrame(() => {
+        canvasWrap.scrollLeft = keepScrollLeft;
+        canvasWrap.scrollTop = keepScrollTop;
+        renderManualSelection();
+    });
 }
 
 async function getWorker(preferredLang = "jpn") {
@@ -2027,7 +2034,7 @@ async function run(){
 }
 
 
-// ===== V84 実験：14px Canvas文字テンプレート検索（グレー文字パス修正版） =====
+// ===== V85 実験：14px Canvas文字テンプレート検索（グレー文字パス修正版） =====
 // OCRのbboxをテンプレートの横幅として引き伸ばさず、14pxで実際に描画した文字の
 // アルファ領域だけを切り出し、目標高さへ等倍比率で拡大して検索する。
 // 診断専用。自動黒塗りにはまだ接続しない。
@@ -2181,7 +2188,7 @@ function templateSearch(source,text){
   }
 
   
-  // V84: 黒背景＋グレー文字用の第2パス。
+  // V85: 黒背景＋グレー文字用の第2パス。
   // buildTextTemplate() の実データ構造（samples / bgSamples）を使う。
   // 先に「中間輝度の画素がある行」だけを絞り、全画面総当たりの負荷も抑える。
   const rowHasGray=new Uint8Array(sh);
@@ -2371,13 +2378,13 @@ async function diagnoseOCR(){
     lines.push(`色抽出OCR：${stats.colorHitCount||0}件 / ${(stats.colorMs/1000).toFixed(2)}秒`);
     lines.push(`※ V68の全領域走査方式を診断用にも使用。V70本体では、この局所OCRのHITを追加の黒塗り候補として統合します。`);
 
-    lines.push("",`===== V84 Canvasテンプレート検索実験（グレー文字パス修正版） =====`);
+    lines.push("",`===== V85 Canvasテンプレート検索実験（グレー文字パス修正版） =====`);
     lines.push(`対象文字：${target} / Canvas基準フォント：${TEMPLATE_BASE_FONT_SIZE}px / 目標文字高：${TEMPLATE_TARGET_HEIGHT}px / 探索間隔：${templateResult.step||TEMPLATE_STEP}px / 閾値：${TEMPLATE_SCORE_THRESHOLD}`);
     lines.push(`テンプレート：${templateResult.tpl?.w||0}x${templateResult.tpl?.h||0}px（14px描画→実文字領域crop→比率維持拡大）`);
     lines.push(`探索範囲：x=${templateResult.searchXStart||0}〜${templateResult.searchXEnd||0} / y=${templateResult.searchYStart||0}〜${templateResult.searchYEnd||0}（左10%のアイコン列＋上部12%を除外）`);
     lines.push(`候補：${templateResult.candidates?.length||0}件（白pass ${templateResult.rawCount||0}件 / 白背景除外${templateResult.bgRejectedCount||0}件 / グレーpass ${templateResult.grayScorePassCount||0}件）`);
     (templateResult.candidates||[]).slice(0,20).forEach((c,i)=>lines.push(`  候補${i+1}: score ${c.score.toFixed(3)} / 形状${c.fgScore.toFixed(3)} / 背景${c.bgScore.toFixed(3)} / (${c.x},${c.y},w${c.w},h${c.h})`));
-    lines.push(`※ V84ではまだ黒塗りには使用しません。緑枠はCanvasテンプレート検索の候補です。`);
+    lines.push(`※ V85ではまだ黒塗りには使用しません。緑枠はCanvasテンプレート検索の候補です。`);
 
     lines.push("",`===== V82.1 誤認識救出診断（かな）＋候補bbox仮表示 =====`);
     const v81KanaRescue=findV81KanaRescue(results,target,scale);
@@ -2675,12 +2682,64 @@ function getPointerCenter() {
     };
 }
 
+function resetTripleTapState() {
+    tripleTapState = { index: -1, count: 0, firstTime: 0, lastClientX: 0, lastClientY: 0 };
+}
+
+function registerTripleTap(event, index) {
+    if (event.pointerType !== "touch" || index < 0 || !manualStamps[index]) {
+        resetTripleTapState();
+        return false;
+    }
+
+    const now = performance.now();
+    const closeEnough = Math.hypot(
+        event.clientX - tripleTapState.lastClientX,
+        event.clientY - tripleTapState.lastClientY
+    ) <= TRIPLE_TAP_MAX_DISTANCE;
+    const sameTarget = tripleTapState.index === index;
+    const inTime = now - tripleTapState.firstTime <= TRIPLE_TAP_MAX_INTERVAL;
+
+    if (!sameTarget || !closeEnough || !inTime || tripleTapState.count === 0) {
+        tripleTapState = {
+            index,
+            count: 1,
+            firstTime: now,
+            lastClientX: event.clientX,
+            lastClientY: event.clientY
+        };
+        return false;
+    }
+
+    tripleTapState.count += 1;
+    tripleTapState.lastClientX = event.clientX;
+    tripleTapState.lastClientY = event.clientY;
+
+    if (tripleTapState.count >= 3) {
+        pushManualHistory();
+        manualStamps.splice(index, 1);
+        selectedManualIndex = -1;
+        editMode = null;
+        isDragging = false;
+        dragStart = null;
+        manualPressStart = null;
+        resetTripleTapState();
+        redrawFromBase();
+        saveBtn.disabled = false;
+        status(`トリプルタップで黒塗りを削除しました。\n残り：${manualStamps.length}箇所`);
+        return true;
+    }
+    return false;
+}
+
 canvasWrap.addEventListener("pointerdown", event => {
     if (!sourceImage) return;
     pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
     canvasWrap.setPointerCapture?.(event.pointerId);
 
     if (pointers.size >= 2) {
+        resetTripleTapState();
+        manualPressStart = null;
         isDragging = false;
         dragStart = null;
         selection.hidden = true;
@@ -2696,6 +2755,13 @@ canvasWrap.addEventListener("pointerdown", event => {
     if (!manualMode) return;
     event.preventDefault();
     const rawPoint = getRawManualPoint(event);
+    manualPressStart = {
+        pointerId: event.pointerId,
+        clientX: event.clientX,
+        clientY: event.clientY,
+        pointerType: event.pointerType,
+        time: performance.now()
+    };
 
     // 既存の手動黒塗りをタップすると編集対象にする。
     // 編集時はオフセットを使わず、指の位置をそのまま操作位置にする。
@@ -2767,6 +2833,26 @@ canvasWrap.addEventListener("pointermove", event => {
     event.preventDefault();
 
     if (editMode && selectedManualIndex >= 0 && isDragging) {
+        const movedPx = manualPressStart
+            ? Math.hypot(event.clientX - manualPressStart.clientX, event.clientY - manualPressStart.clientY)
+            : Infinity;
+
+        // ほぼ動かしていない1本指タップだけをトリプルタップ候補にする。
+        if (manualPressStart?.pointerType === "touch" && movedPx <= TRIPLE_TAP_MAX_MOVE) {
+            const tappedIndex = selectedManualIndex;
+            const deleted = registerTripleTap(event, tappedIndex);
+            isDragging = false;
+            dragStart = null;
+            editMode = null;
+            manualPressStart = null;
+            if (!deleted) {
+                renderManualSelection();
+                status(`黒塗りを選択中です。\n同じ場所を3回タップで削除できます。`);
+            }
+            return;
+        }
+
+        resetTripleTapState();
         const point = getManualPoint(event, false);
         if (!editMode.historyPushed) {
             pushManualHistory();
@@ -2775,6 +2861,7 @@ canvasWrap.addEventListener("pointermove", event => {
         if (editMode.type === "move") applyMoveEdit(point);
         else applyResizeEdit(point);
         redrawFromBase();
+        manualPressStart = null;
         return;
     }
 
@@ -2811,6 +2898,12 @@ function endPointer(event) {
     event.preventDefault();
 
     if (editMode && selectedManualIndex >= 0 && isDragging) {
+        if (manualPressStart && Math.hypot(
+            event.clientX - manualPressStart.clientX,
+            event.clientY - manualPressStart.clientY
+        ) > TRIPLE_TAP_MAX_MOVE) {
+            resetTripleTapState();
+        }
         const point = getManualPoint(event, false);
         if (!editMode.historyPushed) {
             pushManualHistory();
@@ -2858,6 +2951,8 @@ canvasWrap.addEventListener("pointercancel", event => {
     isDragging = false;
     dragStart = null;
     stampTapStart = null;
+    manualPressStart = null;
+    resetTripleTapState();
     selection.hidden = true;
 });
 
