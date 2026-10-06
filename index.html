@@ -3,8 +3,8 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>スクショ黒塗りツール V86.1</title>
-<link rel="stylesheet" href="style.css?v=8610">
+<title>スクショ黒塗りツール V87</title>
+<link rel="stylesheet" href="style.css?v=8700">
 <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
 </head>
 <body>
@@ -18,6 +18,7 @@
 
 <label for="targetText">黒塗りする文字</label>
 <input id="targetText" type="text" placeholder="例：ゆーざー" autocomplete="off">
+<div id="targetHistory" class="target-history" hidden></div>
 
 <label for="overlayText">置き換え文字</label>
 <input id="overlayText" type="text" value="{{user}}" autocomplete="off">
@@ -26,6 +27,17 @@
 <input id="overlayName" type="checkbox">
 黒塗り部分に置き換え文字を表示
 </label>
+
+<label for="redactionMode">隠し方</label>
+<div class="redaction-style-controls">
+  <select id="redactionMode">
+    <option value="black">黒塗り</option>
+    <option value="bg">背景色</option>
+    <option value="blur">ぼかし</option>
+    <option value="color">任意の色</option>
+  </select>
+  <input id="redactionColor" type="color" value="#1a1a1a" aria-label="任意の色" hidden>
+</div>
 
 <label class="checkbox">
 <input id="stampMode" type="checkbox" disabled>
@@ -97,6 +109,6 @@
 <pre id="errorDetails" class="error" hidden></pre>
 <pre id="ocrDiagnostics" class="diagnostics" hidden></pre>
 </main>
-<script src="app.js?v=8610"></script>
+<script src="app.js?v=8700"></script>
 </body>
 </html>

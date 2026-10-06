@@ -5,8 +5,11 @@ const ENABLE_DIAGNOSTIC = true;
 
 const fileInput = $("fileInput");
 const targetText = $("targetText");
+const targetHistory = $("targetHistory");
 const overlayText = $("overlayText");
 const overlayName = $("overlayName");
+const redactionMode = $("redactionMode");
+const redactionColor = $("redactionColor");
 const stampMode = $("stampMode");
 const manualDrawMode = $("manualDrawMode");
 const redactBtn = $("redactBtn");
@@ -34,6 +37,8 @@ const zoomLabel = $("zoomLabel");
 
 // V86.1: 手動描画の初期モードは「なぞり式」。
 if (manualDrawMode) manualDrawMode.value = "trace";
+loadPreferences();
+renderTargetHistory();
 
 if (!ENABLE_DIAGNOSTIC) {
     diagnoseBtn.hidden = true;
@@ -68,6 +73,12 @@ let panLastCenter = null;
 const TOUCH_Y_OFFSET_SCREEN_PX = -40;
 const MANUAL_HIT_RADIUS_PX = 30; // 画面表示上の当たり判定。新規描画より既存編集を優先。
 const TRACE_FIXED_HEIGHT = 32; // なぞり式の矩形高さ（元画像canvas座標px）
+const SETTINGS_STORAGE_KEY = "zetaSS.settings.v87";
+const TARGET_HISTORY_STORAGE_KEY = "zetaSS.targetHistory.v87";
+const MAX_TARGET_HISTORY = 6;
+
+let sourceCanvasRef = null;
+let sourceCtxRef = null;
 
 function status(message, error = null) {
     statusEl.textContent = message;
@@ -78,6 +89,224 @@ function status(message, error = null) {
         "",
         error.stack || error
     ].join("\n") : "";
+}
+
+function safeLoadJson(key, fallback) {
+    try {
+        const raw = localStorage.getItem(key);
+        return raw ? JSON.parse(raw) : fallback;
+    } catch {
+        return fallback;
+    }
+}
+
+function safeSaveJson(key, value) {
+    try {
+        localStorage.setItem(key, JSON.stringify(value));
+    } catch {
+        // private mode等では保存できないことがあるが、アプリ動作は継続する。
+    }
+}
+
+function cloneRedactionStyle(style = null) {
+    return {
+        mode: style?.mode || "black",
+        color: style?.color || (redactionColor?.value || "#1a1a1a")
+    };
+}
+
+function getCurrentRedactionStyle() {
+    return cloneRedactionStyle({
+        mode: redactionMode?.value || "black",
+        color: redactionColor?.value || "#1a1a1a"
+    });
+}
+
+function getStampRedactionStyle(stamp) {
+    return cloneRedactionStyle(stamp?.style);
+}
+
+function updateRedactionStyleUI() {
+    if (!redactionColor || !redactionMode) return;
+    redactionColor.hidden = redactionMode.value !== "color";
+}
+
+function savePreferences() {
+    safeSaveJson(SETTINGS_STORAGE_KEY, {
+        overlayText: overlayText?.value || "{{user}}",
+        overlayName: !!overlayName?.checked,
+        manualDrawMode: manualDrawMode?.value || "trace",
+        redactionMode: redactionMode?.value || "black",
+        redactionColor: redactionColor?.value || "#1a1a1a"
+    });
+}
+
+function loadPreferences() {
+    const saved = safeLoadJson(SETTINGS_STORAGE_KEY, {});
+    if (typeof saved.overlayText === "string" && overlayText) overlayText.value = saved.overlayText;
+    if (typeof saved.overlayName === "boolean" && overlayName) overlayName.checked = saved.overlayName;
+    if (typeof saved.manualDrawMode === "string" && manualDrawMode) manualDrawMode.value = saved.manualDrawMode;
+    if (typeof saved.redactionMode === "string" && redactionMode) redactionMode.value = saved.redactionMode;
+    if (typeof saved.redactionColor === "string" && redactionColor) redactionColor.value = saved.redactionColor;
+    updateRedactionStyleUI();
+}
+
+function getTargetHistoryList() {
+    const list = safeLoadJson(TARGET_HISTORY_STORAGE_KEY, []);
+    return Array.isArray(list) ? list.filter(v => typeof v === "string" && v.trim()) : [];
+}
+
+function saveTargetHistoryEntry(text) {
+    const value = (text || "").trim();
+    if (!value) return;
+    const list = getTargetHistoryList().filter(v => v !== value);
+    list.unshift(value);
+    safeSaveJson(TARGET_HISTORY_STORAGE_KEY, list.slice(0, MAX_TARGET_HISTORY));
+    renderTargetHistory();
+}
+
+function renderTargetHistory() {
+    if (!targetHistory) return;
+    const list = getTargetHistoryList();
+    targetHistory.innerHTML = "";
+    targetHistory.hidden = !list.length;
+    if (!list.length) return;
+
+    const label = document.createElement("span");
+    label.className = "target-history-label";
+    label.textContent = "履歴";
+    targetHistory.appendChild(label);
+
+    for (const item of list) {
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "target-history-chip";
+        btn.textContent = item;
+        btn.addEventListener("click", () => {
+            targetText.value = item;
+            targetText.focus();
+        });
+        targetHistory.appendChild(btn);
+    }
+}
+
+function buildSourceCanvas() {
+    if (!sourceImage) {
+        sourceCanvasRef = null;
+        sourceCtxRef = null;
+        return;
+    }
+    sourceCanvasRef = document.createElement("canvas");
+    sourceCanvasRef.width = sourceImage.naturalWidth;
+    sourceCanvasRef.height = sourceImage.naturalHeight;
+    sourceCtxRef = sourceCanvasRef.getContext("2d", { willReadFrequently: true });
+    sourceCtxRef.drawImage(sourceImage, 0, 0);
+}
+
+function sampleBackgroundColor(rect) {
+    if (!sourceCtxRef || !sourceCanvasRef) return "#ffffff";
+    const ring = 6;
+    const x0 = Math.max(0, Math.floor(rect.x - ring));
+    const y0 = Math.max(0, Math.floor(rect.y - ring));
+    const x1 = Math.min(sourceCanvasRef.width, Math.ceil(rect.x + rect.w + ring));
+    const y1 = Math.min(sourceCanvasRef.height, Math.ceil(rect.y + rect.h + ring));
+    const sw = Math.max(1, x1 - x0);
+    const sh = Math.max(1, y1 - y0);
+    const data = sourceCtxRef.getImageData(x0, y0, sw, sh).data;
+    const innerX0 = rect.x - x0;
+    const innerY0 = rect.y - y0;
+    const innerX1 = innerX0 + rect.w;
+    const innerY1 = innerY0 + rect.h;
+    let r = 0, g = 0, b = 0, count = 0;
+    for (let y = 0; y < sh; y++) {
+        for (let x = 0; x < sw; x++) {
+            const inside = x >= innerX0 && x < innerX1 && y >= innerY0 && y < innerY1;
+            if (inside) continue;
+            const i = (y * sw + x) * 4;
+            const a = data[i + 3];
+            if (a < 8) continue;
+            r += data[i];
+            g += data[i + 1];
+            b += data[i + 2];
+            count++;
+        }
+    }
+    if (!count) return "#ffffff";
+    return `rgb(${Math.round(r / count)}, ${Math.round(g / count)}, ${Math.round(b / count)})`;
+}
+
+function getContrastTextColor(color) {
+    if (!color) return "#fff";
+    let r = 255, g = 255, b = 255;
+    if (color.startsWith("#")) {
+        const hex = color.slice(1);
+        const full = hex.length === 3 ? hex.split("").map(v => v + v).join("") : hex;
+        if (full.length >= 6) {
+            r = parseInt(full.slice(0, 2), 16);
+            g = parseInt(full.slice(2, 4), 16);
+            b = parseInt(full.slice(4, 6), 16);
+        }
+    } else {
+        const m = color.match(/rgba?\(([^)]+)\)/i);
+        if (m) {
+            const parts = m[1].split(",").map(v => parseFloat(v.trim()));
+            r = parts[0] || 0;
+            g = parts[1] || 0;
+            b = parts[2] || 0;
+        }
+    }
+    const luminance = 0.299 * r + 0.587 * g + 0.114 * b;
+    return luminance > 160 ? "#111" : "#fff";
+}
+
+function drawOverlayText(text, rect, style) {
+    if (!text) return;
+    ctx.save();
+    ctx.font = `bold ${Math.max(12, Math.round(rect.h * 0.8))}px sans-serif`;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    if (style.mode === "blur") {
+        ctx.lineWidth = Math.max(3, rect.h * 0.08);
+        ctx.strokeStyle = "rgba(0,0,0,.7)";
+        ctx.strokeText(text, rect.x + rect.w / 2, rect.y + rect.h / 2);
+        ctx.fillStyle = "#fff";
+    } else {
+        const baseColor = style.mode === "bg" ? sampleBackgroundColor(rect) : (style.mode === "color" ? style.color : "#000000");
+        ctx.fillStyle = getContrastTextColor(baseColor);
+    }
+    ctx.fillText(text, rect.x + rect.w / 2, rect.y + rect.h / 2);
+    ctx.restore();
+}
+
+function renderRedactionRect(rect, text = "", style = null) {
+    const applied = cloneRedactionStyle(style);
+    if (applied.mode === "blur") {
+        const blurMargin = 10;
+        const sx = Math.max(0, Math.floor(rect.x - blurMargin));
+        const sy = Math.max(0, Math.floor(rect.y - blurMargin));
+        const sw = Math.min(canvas.width - sx, Math.ceil(rect.w + blurMargin * 2));
+        const sh = Math.min(canvas.height - sy, Math.ceil(rect.h + blurMargin * 2));
+        const temp = document.createElement("canvas");
+        temp.width = Math.max(1, sw);
+        temp.height = Math.max(1, sh);
+        const tctx = temp.getContext("2d");
+        tctx.drawImage(canvas, sx, sy, sw, sh, 0, 0, sw, sh);
+        ctx.save();
+        ctx.beginPath();
+        ctx.rect(rect.x, rect.y, rect.w, rect.h);
+        ctx.clip();
+        ctx.filter = "blur(8px)";
+        ctx.drawImage(temp, 0, 0, sw, sh, sx, sy, sw, sh);
+        ctx.restore();
+    } else {
+        ctx.save();
+        if (applied.mode === "bg") ctx.fillStyle = sampleBackgroundColor(rect);
+        else if (applied.mode === "color") ctx.fillStyle = applied.color || "#1a1a1a";
+        else ctx.fillStyle = "#000";
+        ctx.fillRect(rect.x, rect.y, rect.w, rect.h);
+        ctx.restore();
+    }
+    drawOverlayText(text, rect, applied);
 }
 
 function loadImage(file) {
@@ -252,55 +481,29 @@ function getOcrVisualRect(box, symbols = [], rescue = false) {
     return { x: left, y: top, w: width, h: height };
 }
 
-function paintOcr(box, text = "", symbols = [], rescue = false) {
+function paintOcr(box, text = "", symbols = [], rescue = false, style = null) {
     const rect = getOcrVisualRect(box, symbols, rescue);
-    ctx.fillStyle = "#000";
-    ctx.fillRect(rect.x, rect.y, rect.w, rect.h);
-
-    if (text) {
-        ctx.fillStyle = "#fff";
-        ctx.font = `bold ${Math.max(12, Math.round(box.h * 0.8))}px sans-serif`;
-        ctx.textAlign = "center";
-        ctx.textBaseline = "middle";
-        ctx.fillText(text, rect.x + rect.w / 2, rect.y + rect.h / 2);
-    }
+    renderRedactionRect(rect, text, style);
     return rect;
 }
 
-function paintManual(box, text = "") {
+function paintManual(box, text = "", style = null) {
     const padding = Math.max(4, Math.round(Math.min(box.w, box.h) * 0.12));
     const verticalPadding = padding + 2;
     const left = Math.max(0, box.x - padding - 6);
     const top = Math.max(0, box.y - verticalPadding);
     const width = box.w + padding;
     const height = box.h + verticalPadding * 2;
-
-    ctx.fillStyle = "#000";
-    ctx.fillRect(left, top, width, height);
-
-    if (text) {
-        ctx.fillStyle = "#fff";
-        ctx.font = `bold ${Math.max(12, Math.round(box.h * 0.8))}px sans-serif`;
-        ctx.textAlign = "center";
-        ctx.textBaseline = "middle";
-        ctx.fillText(text, left + width / 2, top + height / 2);
-    }
+    renderRedactionRect({ x: left, y: top, w: width, h: height }, text, style);
 }
 
 function paintStamp(stamp) {
+    const style = getStampRedactionStyle(stamp);
     if (stamp.kind === "ocr") {
-        ctx.fillStyle = "#000";
-        ctx.fillRect(stamp.x, stamp.y, stamp.w, stamp.h);
-        if (stamp.text) {
-            ctx.fillStyle = "#fff";
-            ctx.font = `bold ${Math.max(12, Math.round(stamp.h * 0.8))}px sans-serif`;
-            ctx.textAlign = "center";
-            ctx.textBaseline = "middle";
-            ctx.fillText(stamp.text, stamp.x + stamp.w / 2, stamp.y + stamp.h / 2);
-        }
+        renderRedactionRect({ x: stamp.x, y: stamp.y, w: stamp.w, h: stamp.h }, stamp.text, style);
         return;
     }
-    paintManual(stamp, stamp.text);
+    paintManual(stamp, stamp.text, style);
 }
 
 function getBaseDisplaySize() {
@@ -1978,6 +2181,7 @@ async function run(){
     if(!sourceImage) throw new Error("先に画像を選択してください。");
     const target=normalize(targetText.value);
     if(!target) throw new Error("黒塗りする文字を入力してください。");
+    saveTargetHistoryEntry(targetText.value);
 
     manualStamps.length=0; manualHistory.length=0; selectedManualIndex=-1; editMode=null; ocrBaseCanvas=null; redrawFromBase();
     const worker=await getWorker(getOcrLanguage(target));
@@ -2062,6 +2266,7 @@ async function run(){
       manualStamps.push({
         x:rect.x, y:rect.y, w:rect.w, h:rect.h,
         text:overlayName.checked?overlayText.value:"",
+        style:getCurrentRedactionStyle(),
         kind:"ocr"
       });
     }
@@ -2313,6 +2518,7 @@ async function diagnoseOCR(){
     if(!sourceImage)throw new Error("先に画像を選択してください。");
     const target=normalize(targetText.value);
     if(!target)throw new Error("黒塗りする文字を入力してください。");
+    saveTargetHistoryEntry(targetText.value);
     const totalStarted=performance.now();
     const worker=await getWorker(getOcrLanguage(target));
     canvas.hidden=false; canvas.style.display="block";
@@ -2650,6 +2856,7 @@ function placeStampAt(point) {
         w: last.w,
         h: last.h,
         text: overlayName.checked ? overlayText.value : "",
+        style: getCurrentRedactionStyle(),
         kind: "manual"
     };
 
@@ -2658,7 +2865,7 @@ function placeStampAt(point) {
 
     pushManualHistory();
     manualStamps.push(stamp);
-    paintManual(stamp, stamp.text);
+    paintManual(stamp, stamp.text, stamp.style);
     updateUndoButton();
     saveBtn.disabled = false;
     status(`スタンプを追加しました。\n追加済み：${manualStamps.length}箇所`);
@@ -2685,10 +2892,10 @@ function finishStamp(point) {
         return;
     }
 
-    const stamp = { x, y, w, h, text: overlayName.checked ? overlayText.value : "", kind: "manual" };
+    const stamp = { x, y, w, h, text: overlayName.checked ? overlayText.value : "", style: getCurrentRedactionStyle(), kind: "manual" };
     pushManualHistory();
     manualStamps.push(stamp);
-    paintManual(stamp, stamp.text);
+    paintManual(stamp, stamp.text, stamp.style);
     updateUndoButton();
     saveBtn.disabled = false;
     status(`${manualDrawMode?.value === "trace" ? "なぞり式" : "手動"}黒塗りを追加しました。\n追加済み：${manualStamps.length}箇所`);
@@ -2839,12 +3046,18 @@ canvasWrap.addEventListener("pointerdown", event => {
     editMode = null;
     renderManualSelection();
 
-    // V86.1: 自由矩形・なぞり式とも、Xは指の実位置、Yは画面px基準の同じオフセットを使う。
-    dragStart = manualDrawMode?.value === "trace"
-        ? getTraceManualPoint(event)
-        : getManualPoint(event, true);
+    const isStampPlacement = stampMode.checked && getLastManualStamp();
 
-    if (stampMode.checked && getLastManualStamp()) {
+    // V87:
+    // スタンプ配置は「ここに置きたい」というタップ位置を最優先し、オフセットを使わない。
+    // 通常の手動描画だけY方向のオフセットを使う。
+    dragStart = isStampPlacement
+        ? getRawManualPoint(event)
+        : (manualDrawMode?.value === "trace"
+            ? getTraceManualPoint(event)
+            : getManualPoint(event, true));
+
+    if (isStampPlacement) {
         stampTapStart = { x: event.clientX, y: event.clientY };
         isDragging = false;
         const last = getLastManualStamp();
@@ -2896,7 +3109,7 @@ canvasWrap.addEventListener("pointermove", event => {
     }
 
     if (stampMode.checked && stampTapStart && getLastManualStamp()) {
-        const point = getManualPoint(event, true);
+        const point = getRawManualPoint(event);
         const last = getLastManualStamp();
         updateSelection(
             { x: point.x - last.w / 2, y: point.y - last.h / 2 },
@@ -2943,7 +3156,7 @@ function endPointer(event) {
 
     if (stampMode.checked && stampTapStart && getLastManualStamp()) {
         const moved = Math.hypot(event.clientX - stampTapStart.x, event.clientY - stampTapStart.y);
-        const point = getManualPoint(event);
+        const point = getRawManualPoint(event);
         stampTapStart = null;
         selection.hidden = true;
         dragStart = null;
@@ -3012,6 +3225,7 @@ document.addEventListener("keydown", event => {
 });
 
 manualDrawMode?.addEventListener("change", () => {
+    savePreferences();
     selection.hidden = true;
     hideManualDeleteButton();
     dragStart = null;
@@ -3027,6 +3241,21 @@ stampMode.addEventListener("change", () => {
     } else if (manualStamps.length) {
         status("スタンプモードONです。\n画像をタップすると、直前の手動黒塗りと同じサイズで黒塗りします。");
     }
+});
+
+
+redactionMode?.addEventListener("change", () => {
+    updateRedactionStyleUI();
+    savePreferences();
+    const label = redactionMode.selectedOptions?.[0]?.textContent || "黒塗り";
+    status(`隠し方を「${label}」にしました。`);
+});
+redactionColor?.addEventListener("input", savePreferences);
+overlayText?.addEventListener("input", savePreferences);
+overlayName?.addEventListener("change", savePreferences);
+manualDrawMode?.addEventListener("change", savePreferences);
+targetText?.addEventListener("keydown", event => {
+    if (event.key === "Enter") saveTargetHistoryEntry(targetText.value);
 });
 
 zoomOutBtn.addEventListener("click", () => setZoom(zoom - 0.25));
@@ -3065,6 +3294,7 @@ fileInput.addEventListener("change", async () => {
         ocrDebugLayer.hidden = true;
         ocrDebugLayer.innerHTML = "";
         sourceImage = await loadImage(file);
+        buildSourceCanvas();
         fileName = (file.name.replace(/\.[^.]+$/, "") || "redacted") + "_redacted.png";
         manualStamps.length = 0;
         manualHistory.length = 0;
