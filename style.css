@@ -264,3 +264,25 @@ body.help-dialog-open{
   height:38px;
   padding:4px;
 }
+
+
+/* V87.1: 手動ヘルプの?を小さくして誤タップを減らす */
+.help-button{
+  flex:0 0 28px;
+  width:28px;
+  min-width:28px;
+  height:28px;
+  font-size:15px;
+  line-height:28px;
+}
+@media (max-width: 600px) {
+  .help-button{
+    flex:0 0 28px !important;
+    width:28px !important;
+    min-width:28px !important;
+    height:28px !important;
+    padding:0 !important;
+    font-size:15px !important;
+    line-height:28px !important;
+  }
+}

@@ -37,8 +37,6 @@ const zoomLabel = $("zoomLabel");
 
 // V86.1: 手動描画の初期モードは「なぞり式」。
 if (manualDrawMode) manualDrawMode.value = "trace";
-loadPreferences();
-renderTargetHistory();
 
 if (!ENABLE_DIAGNOSTIC) {
     diagnoseBtn.hidden = true;
@@ -3283,6 +3281,11 @@ resetBtn.addEventListener("click", () => {
 
 manualBtn.addEventListener("click", startManualMode);
 manualDoneBtn.addEventListener("click", stopManualMode);
+
+// V87.1: 保存設定/履歴は定数とヘルパー定義が済んでから初期化する。
+// V87ではTDZ中のSETTINGS_STORAGE_KEYを参照して初期化が止まることがあった。
+loadPreferences();
+renderTargetHistory();
 
 fileInput.addEventListener("change", async () => {
     const file = fileInput.files?.[0];
