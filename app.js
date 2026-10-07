@@ -2536,7 +2536,7 @@ candidates.sort((a,b)=>b.score-a.score);
   };
 }
 
-// ===== V90.1 実験：コントラスト補正＋イタリック多段テンプレート診断 =====
+// ===== V90.2 実験：コントラスト補正＋イタリック多段テンプレート診断 =====
 // 真緒のような画数の多い文字も考慮し、
 // コントラスト補正後の画像に対して
 // 1) テンプレート高さ 30 / 32 / 34px
@@ -2547,11 +2547,11 @@ const ITALIC_VARIANT_HEIGHTS = [32, 34];
 const ITALIC_VARIANT_SKEWS = [0.00];
 const ITALIC_COARSE_STEP = 6;
 const ITALIC_REFINE_STEP = 2;
-const ITALIC_COARSE_LIMIT = 6;
-const ITALIC_FINAL_LIMIT = 4;
-const ITALIC_RESCUE_SCORE_MIN = 0.64;
-const ITALIC_RESCUE_FG_MIN = 0.50;
-const ITALIC_RESCUE_BG_MIN = 0.94;
+const ITALIC_COARSE_LIMIT = 10;
+const ITALIC_FINAL_LIMIT = 6;
+const ITALIC_RESCUE_SCORE_MIN = 0.62;
+const ITALIC_RESCUE_FG_MIN = 0.47;
+const ITALIC_RESCUE_BG_MIN = 0.93;
 const ITALIC_RESCUE_MAX_NEW = 3;
 
 function buildTextTemplateStyled(text, opts={}){
@@ -2726,8 +2726,8 @@ function searchContrastItalicVariant(gray, sw, sh, tpl, config={}){
   const coarseKept=dedupeTemplateCandidates(coarse, ITALIC_COARSE_LIMIT);
   const refined=[];
   for(const seed of coarseKept){
-    const x0=Math.max(searchXStart, seed.x-6), x1=Math.min(searchXEnd, seed.x+6);
-    const y0=Math.max(searchYStart, seed.y-6), y1=Math.min(searchYEnd, seed.y+6);
+    const x0=Math.max(searchXStart, seed.x-10), x1=Math.min(searchXEnd, seed.x+10);
+    const y0=Math.max(searchYStart, seed.y-10), y1=Math.min(searchYEnd, seed.y+10);
     for(let y=y0;y<=y1;y+=ITALIC_REFINE_STEP){
       for(let x=x0;x<=x1;x+=ITALIC_REFINE_STEP){
         const s=scoreItalicCandidate(gray, sw, x, y, tpl, config);
@@ -2749,9 +2749,9 @@ function italicVariantDiagnosticSearch(source, text){
     for(const skew of ITALIC_VARIANT_SKEWS){
       const tpl=buildTextTemplateStyled(text,{italic:true,targetHeight:h,skew});
       const searched=searchContrastItalicVariant(contrast.gray, contrast.sw, contrast.sh, tpl, {
-        grayTextMin:95, grayTextMax:235, grayBgMax:82,
-        coarseThreshold:0.60, coarseBgMin:0.44,
-        finalThreshold:0.63, finalBgMin:0.46
+        grayTextMin:95, grayTextMax:235, grayBgMax:84,
+        coarseThreshold:0.57, coarseBgMin:0.42,
+        finalThreshold:0.60, finalBgMin:0.44
       });
       searched.label=`H${h} / skew ${skew.toFixed(2)}`;
       searched.key=`h${h}_s${Math.round(skew*100)}`;
@@ -2804,7 +2804,7 @@ function collectItalicRescueCandidates(source, text, existingBoxes=[]){
   return {result, accepted};
 }
 
-// ===== /V90.1 実験 =====
+// ===== /V90.2 実験 =====
 
 // ===== /V83 実験 =====
 
@@ -2931,7 +2931,7 @@ async function diagnoseOCR(){
     lines.push(`候補：${templateResult.candidates?.length||0}件（白pass ${templateResult.rawCount||0}件 / 白背景除外${templateResult.bgRejectedCount||0}件 / グレーpass ${templateResult.grayScorePassCount||0}件）`);
     (templateResult.candidates||[]).slice(0,20).forEach((c,i)=>lines.push(`  候補${i+1}: score ${c.score.toFixed(3)} / 形状${c.fgScore.toFixed(3)} / 背景${c.bgScore.toFixed(3)} / (${c.x},${c.y},w${c.w},h${c.h})`));
     lines.push(`※ V86ではまだ黒塗りには使用しません。緑枠はCanvasテンプレート検索の候補です。`);
-    lines.push("",`===== V90.1 コントラスト＋イタリック救出診断 =====`);
+    lines.push("",`===== V90.2 コントラスト＋イタリック救出診断 =====`);
     lines.push(`方式：コントラスト補正 → イタリックテンプレート / 粗探索${ITALIC_COARSE_STEP}px → 局所再探索${ITALIC_REFINE_STEP}px`);
     lines.push(`テンプレートバリエーション：高さ ${ITALIC_VARIANT_HEIGHTS.join("/")}px × 傾き ${ITALIC_VARIANT_SKEWS.map(v=>v.toFixed(2)).join("/")}`);
     const firstVariant=italicVariantResult.variants?.[0];
@@ -2942,7 +2942,7 @@ async function diagnoseOCR(){
     }
     lines.push(`最終候補：${italicVariantResult.merged?.length||0}件`);
     (italicVariantResult.merged||[]).slice(0,10).forEach((c,i)=>lines.push(`  統合候補${i+1}: score ${c.score.toFixed(3)} / 形状${c.fgScore.toFixed(3)} / 背景${c.bgScore.toFixed(3)} / ${c.label} / (${c.x},${c.y},w${c.w},h${c.h})`));
-    lines.push(`※ V90.1では、実績のあった高さ32/34px・skew 0.00だけに絞り、既存OCRと重複しない高スコア候補は本番の補助黒塗りにも使用します。オレンジ枠がこの方式の候補です。`);
+    lines.push(`※ V90.2では、実績のあった高さ32/34px・skew 0.00を維持しつつ、粗候補数・局所再探索範囲・採用閾値を少し緩めています。既存OCRと重複しない高スコア候補は本番の補助黒塗りにも使用します。オレンジ枠がこの方式の候補です。`);
 
 
     lines.push("",`===== V82.1 誤認識救出診断（かな）＋候補bbox仮表示 =====`);
@@ -3072,7 +3072,7 @@ async function diagnoseOCR(){
       box.style.left=`${tr.left+c.x*tr.scaleX}px`; box.style.top=`${tr.top+c.y*tr.scaleY}px`;
       box.style.width=`${c.w*tr.scaleX}px`; box.style.height=`${c.h*tr.scaleY}px`;
       const label=document.createElement('span'); label.className='ocr-debug-label';
-      label.textContent=`V90.1 ${c.key} ${c.score.toFixed(2)}`;
+      label.textContent=`V90.2 ${c.key} ${c.score.toFixed(2)}`;
       box.appendChild(label); ocrDebugLayer.appendChild(box);
     }
 
