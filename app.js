@@ -1617,7 +1617,7 @@ async function collectOcrResults(worker,target){
     stats.primaryMs=performance.now()-primaryStarted;
   }
 
-  // V90.11 速度・安定性優先:
+  // V90.12 速度・安定性優先:
   // primary HITが0件でも、二値化180/220/反転の「全画面OCR 3連打」は行わない。
   // iPhone Safariでは縦長画像の2.5倍キャンバスが非常に大きくなり、
   // ここで複数の全画面OCRを連続実行するとメモリ圧迫・タブクラッシュの原因になる。
@@ -1734,6 +1734,26 @@ async function refineNearCandidates(worker, results, ocrCanvas, target, scale) {
   let fastRejected = 0;
   const MAX_REFINE_GROUPS = 8;
 
+  // V90.12:
+  // 3文字名は1文字誤認で67%まで落ちるため、「同一地点で2回」だけでなく、
+  // 画像内の別地点でも同じ誤認文字列が繰り返された場合を強い根拠として扱う。
+  // 同一group内の重複は1票にまとめ、別groupごとに1票だけ数える。
+  const threeCharGlobalCounts = new Map();
+  if ([...target].length === 3) {
+    for (const g of groups) {
+      const seenInGroup = new Set();
+      for (const c of g.candidates) {
+        if ([...c.candidate].length !== 3) continue;
+        if (editDistance(target, c.candidate) !== 1) continue;
+        if (c.similarity < 0.66) continue;
+        seenInGroup.add(c.candidate);
+      }
+      for (const name of seenInGroup) {
+        threeCharGlobalCounts.set(name, (threeCharGlobalCounts.get(name) || 0) + 1);
+      }
+    }
+  }
+
   // V36: 再OCRより先に「かなり強い近似候補」を救出する。
   // 今回のように Tesseract が「ゆーざー」を「めーざー」と読むケースでは、
   // 4文字中3文字が同じ位置に残るため、局所OCRを何度回しても同じ誤読を
@@ -1762,7 +1782,12 @@ async function refineNearCandidates(worker, results, ocrCanvas, target, scale) {
         counts.set(c.candidate, (counts.get(c.candidate) || 0) + 1);
       }
       strong = distanceOne
-        .filter(c => c.recoveryDistance === 1 && c.similarity >= 0.66 && (counts.get(c.candidate) || 0) >= 2)
+        .filter(c => {
+          if (c.recoveryDistance !== 1 || c.similarity < 0.66) return false;
+          const sameSpotCount = counts.get(c.candidate) || 0;
+          const globalSpotCount = threeCharGlobalCounts.get(c.candidate) || 0;
+          return sameSpotCount >= 2 || globalSpotCount >= 2;
+        })
         .sort((a,b) => b.similarity - a.similarity);
     } else {
       strong = distanceOne
@@ -1804,7 +1829,8 @@ async function refineNearCandidates(worker, results, ocrCanvas, target, scale) {
       candidateCount: group.candidates.length,
       strongCandidateCount: strong.length,
       distinctStrongCandidates: distinctCandidates.size,
-      threeCharConsensus: tlen === 3
+      threeCharConsensus: tlen === 3,
+      threeCharGlobalSpotCount: tlen === 3 ? (threeCharGlobalCounts.get(best.candidate) || 0) : 0
     };
   }
 
@@ -2064,7 +2090,7 @@ const TEMPLATE_GRAY_BG_MAX=75;
 const TEMPLATE_GRAY_SCORE_THRESHOLD=0.70;
 const TEMPLATE_GRAY_MIN_BG_SCORE=0.50;
 
-// ===== V90.11 実験：コントラスト補正＋イタリック多段テンプレート診断 =====
+// ===== V90.12 実験：コントラスト補正＋イタリック多段テンプレート診断 =====
 // 真緒のような画数の多い文字も考慮し、
 // コントラスト補正後の画像に対して
 // 1) テンプレート高さ 30 / 32 / 34px
@@ -2352,7 +2378,7 @@ function collectItalicRescueCandidates(source, text, existingBoxes=[]){
   return {result, accepted};
 }
 
-// ===== /V90.11 実験 =====
+// ===== /V90.12 実験 =====
 
 // ===== /V83 実験 =====
 
@@ -2415,7 +2441,7 @@ async function diagnoseOCR(){
     }
     if(acceptedNear.length){
       for(const x of acceptedNear){
-        lines.push(`近似候補救出：「${target}」として採用 / OCR候補「${x.candidate}」 / 編集距離${x.recoveryDistance} / 類似度${Math.round(x.similarity*100)}% / 同地点候補${x.candidateCount}件 / 強候補${x.strongCandidateCount}件${x.threeCharConsensus?" / 3文字・同一誤認2回以上":""}`);
+        lines.push(`近似候補救出：「${target}」として採用 / OCR候補「${x.candidate}」 / 編集距離${x.recoveryDistance} / 類似度${Math.round(x.similarity*100)}% / 同地点候補${x.candidateCount}件 / 強候補${x.strongCandidateCount}件${x.threeCharConsensus?` / 3文字救出・同誤認${x.threeCharGlobalSpotCount||0}地点`:""}`);
       }
     }
     if(!refined.length && !acceptedNear.length) lines.push('再OCR・近似候補救出で対象文字を確認できた候補地点はありません。');
@@ -2471,7 +2497,7 @@ async function diagnoseOCR(){
     lines.push(`色抽出OCR：${stats.colorHitCount||0}件 / ${(stats.colorMs/1000).toFixed(2)}秒`);
     lines.push(`※ V68の全領域走査方式を診断用にも使用。V70本体では、この局所OCRのHITを追加の黒塗り候補として統合します。`);
 
-    lines.push("",`===== V90.11 コントラスト＋イタリック救出診断 =====`);
+    lines.push("",`===== V90.12 コントラスト＋イタリック救出診断 =====`);
     lines.push(`方式：コントラスト補正 → イタリックテンプレート / 粗探索${ITALIC_COARSE_STEP}px → 局所再探索${ITALIC_REFINE_STEP}px`);
     lines.push(`テンプレートバリエーション：高さ ${ITALIC_VARIANT_HEIGHTS.join("/")}px × 傾き ${ITALIC_VARIANT_SKEWS.map(v=>v.toFixed(2)).join("/")}`);
     const firstVariant=italicVariantResult.variants?.[0];
@@ -2484,7 +2510,7 @@ async function diagnoseOCR(){
     (italicVariantResult.merged||[]).slice(0,10).forEach((c,i)=>lines.push(`  統合候補${i+1}: score ${c.score.toFixed(3)} / 形状${c.fgScore.toFixed(3)} / 背景${c.bgScore.toFixed(3)} / ${c.label} / (${c.x},${c.y},w${c.w},h${c.h})`));
     lines.push(`本番採用候補：${italicProductionPreview.accepted.length}件 / 条件 score≥${ITALIC_RESCUE_SCORE_MIN.toFixed(2)}・形状≥${ITALIC_RESCUE_FG_MIN.toFixed(2)}・背景≥${ITALIC_RESCUE_BG_MIN.toFixed(2)}`);
     (italicProductionPreview.accepted||[]).slice(0,10).forEach((c,i)=>lines.push(`  本番候補${i+1}: score ${c.score.toFixed(3)} / 形状${c.fgScore.toFixed(3)} / 背景${c.bgScore.toFixed(3)} / (${c.x},${c.y},w${c.w},h${c.h})`));
-    lines.push(`※ V90.11では、3文字名で「1文字だけ誤認」した候補（例：コカゲ→コカグ）は、同じ地点で同一誤認が2回以上出た場合に限って近似候補救出します。オレンジ枠は本番採用候補だけです。`);
+    lines.push(`※ V90.12では、3文字名の1文字誤認（例：コカゲ→コカグ）は、同じ地点で複数回または画像内の別地点で同じ誤認が2地点以上出た場合に近似候補救出します。オレンジ枠は本番採用候補だけです。`);
 
 
     lines.push('', `===== V76 局所OCR・順序維持ロバスト一致実験 =====`);
@@ -2559,7 +2585,7 @@ async function diagnoseOCR(){
       box.style.left=`${tr.left+c.x*tr.scaleX}px`; box.style.top=`${tr.top+c.y*tr.scaleY}px`;
       box.style.width=`${c.w*tr.scaleX}px`; box.style.height=`${c.h*tr.scaleY}px`;
       const label=document.createElement('span'); label.className='ocr-debug-label';
-      label.textContent=`V90.11 本番候補 ${c.score.toFixed(2)}`;
+      label.textContent=`V90.12 本番候補 ${c.score.toFixed(2)}`;
       box.appendChild(label); ocrDebugLayer.appendChild(box);
     }
 
