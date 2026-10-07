@@ -295,6 +295,8 @@ function normalize(text) {
 const OCR_EDGE_PAD = 1; // bbox外へ少しだけ足す左右余白。V90.5で過剰な黒塗りを抑えるため縮小。
 const OCR_MIN_PADDING = 2; // 最低限のパディング。V90.5で3px→2pxへ微調整。
 const OCR_PADDING_RATIO = 0.06; // 文字サイズに対するパディング比率。V90.5で8%→6%。
+const OCR_SYMBOL_MAX_WIDTH_HEIGHT_RATIO = 2.2; // 1文字bboxとして妥当とみなす幅/高さの上限
+const OCR_ESTIMATED_CHAR_GAP = 4; // 片方の文字bboxだけ妥当な時に、隣の文字位置を補う仮定ギャップ
 const OCR_FIRST_SYMBOL_MIN_HEIGHT_RATIO = 0.25; // 1文字目bboxが極端に薄い時だけ補正
 const OCR_FIRST_SYMBOL_MAX_WIDTH_RATIO = 0.6; // 2文字目に対して1文字目の幅が極端に狭い時だけ補正
 const OCR_RESCUE_EXTRA = 14; // 近似候補救出だけ左右に追加する余白(px)
@@ -315,44 +317,69 @@ function getOcrPaintBox(box, symbols = []) {
         const first = symbols[0]?.bbox;
         const second = symbols[1]?.bbox;
 
-        // V86:
-        // 完全一致HITで対象文字ごとのsymbol bboxが取れている場合は、
-        // 「単語bbox」よりもまず対象文字自身のunionを信用する。
-        // これで
-        // ・1文字だけ残る（最終boxが細すぎる）
-        // ・隣の文字まで消す（単語bboxが広すぎる）
-        // の両方を抑える。
-        const validBoxes = symbols
-            .map(s => s?.bbox)
-            .filter(b => b && Number.isFinite(b.x0) && Number.isFinite(b.x1) && Number.isFinite(b.y0) && Number.isFinite(b.y1) && b.x1 > b.x0 && b.y1 > b.y0);
+        const symbolEntries = symbols
+            .map((s, idx) => ({ idx, bbox: s?.bbox }))
+            .filter(e => {
+                const b = e.bbox;
+                return b && Number.isFinite(b.x0) && Number.isFinite(b.x1) && Number.isFinite(b.y0) && Number.isFinite(b.y1) && b.x1 > b.x0 && b.y1 > b.y0;
+            })
+            .map(e => ({
+                ...e,
+                w: e.bbox.x1 - e.bbox.x0,
+                h: e.bbox.y1 - e.bbox.y0
+            }));
 
-        if (validBoxes.length >= 2) {
-            const sx0 = Math.min(...validBoxes.map(b => b.x0));
-            const sy0 = Math.min(...validBoxes.map(b => b.y0));
-            const sx1 = Math.max(...validBoxes.map(b => b.x1));
-            const sy1 = Math.max(...validBoxes.map(b => b.y1));
+        const plausibleEntries = symbolEntries.filter(e =>
+            e.h >= box.h * 0.45 &&
+            e.w <= box.h * OCR_SYMBOL_MAX_WIDTH_HEIGHT_RATIO
+        );
+
+        // 完全一致HITで対象文字ごとのsymbol bboxが取れている場合は、
+        // まず「対象文字自身のunion」を優先する。
+        if (plausibleEntries.length >= 2) {
+            const sx0 = Math.min(...plausibleEntries.map(e => e.bbox.x0));
+            const sy0 = Math.min(...plausibleEntries.map(e => e.bbox.y0));
+            const sx1 = Math.max(...plausibleEntries.map(e => e.bbox.x1));
+            const sy1 = Math.max(...plausibleEntries.map(e => e.bbox.y1));
             const sw = sx1 - sx0;
             const sh = sy1 - sy0;
-
-            // 幅/高さが明らかに壊れていない時だけunionへ寄せる。
-            // 高さ基準の上限を設け、隣接文字を巻き込んだ異常bboxは除外する。
             const plausibleSymbolUnion = sw > 0 && sh > 0 &&
                 sh >= box.h * 0.45 &&
-                sw <= box.h * Math.max(1, validBoxes.length) * 2.2;
-
+                sw <= box.h * Math.max(1, plausibleEntries.length) * 2.2;
             if (plausibleSymbolUnion) {
                 out.x = sx0;
                 out.y = Math.min(out.y, sy0);
                 out.w = sw;
                 out.h = Math.max(out.y + out.h, sy1) - out.y;
             }
+        } else if (symbols.length === 2 && plausibleEntries.length === 1) {
+            // 2文字のうち片方だけbboxが妥当な時は、妥当な方の幅を基準に
+            // もう片方の位置を控えめに補い、「に変身」など右側の文字の巻き込みを抑える。
+            const good = plausibleEntries[0];
+            const estWidth = Math.max(good.w * 0.95, Math.min(good.h * 1.35, Math.max(good.w, good.h * 0.8)));
+            const gap = OCR_ESTIMATED_CHAR_GAP;
+            const top = Math.min(out.y, good.bbox.y0);
+            const bottom = Math.max(out.y + out.h, good.bbox.y1);
+            if (good.idx === 1) {
+                const estX1 = good.bbox.x0 - gap;
+                const estX0 = Math.max(0, estX1 - estWidth);
+                out.x = estX0;
+                out.y = top;
+                out.w = Math.max(1, good.bbox.x1 - estX0);
+                out.h = bottom - top;
+            } else {
+                const estX0 = good.bbox.x1 + gap;
+                const estX1 = estX0 + estWidth;
+                out.x = Math.min(out.x, good.bbox.x0);
+                out.y = top;
+                out.w = Math.max(1, estX1 - out.x);
+                out.h = bottom - top;
+            }
         }
 
         if (first) {
             const firstHeight = Math.max(0, first.y1 - first.y0);
             if (firstHeight / box.h < OCR_FIRST_SYMBOL_MIN_HEIGHT_RATIO) {
-                // 高さが極端に薄い＝bboxが文字の一部しか捉えていない可能性が高い。
-                // 左端をその分広げる（右端はそのまま、対象外の文字を巻き込まない）。
                 const extra = Math.max(0, box.h - firstHeight);
                 out.x = Math.max(0, Math.min(out.x, first.x0) - extra);
                 out.w = (Math.max(box.x + box.w, out.x + out.w)) - out.x;
@@ -361,16 +388,9 @@ function getOcrPaintBox(box, symbols = []) {
             if (symbols.length === 2 && second) {
                 const firstWidth = Math.max(0, first.x1 - first.x0);
                 const secondWidth = Math.max(0, second.x1 - second.x0);
-                // secondWidthを「1文字目の本来の幅」の基準として使う前に、
-                // それ自体が1文字ぶんとして妥当な幅かを確認する。文字の高さに対して
-                // 幅が異常に大きい場合、Tesseractがその文字自体を隣接文字と
-                // 巻き込んで誤検出している（＝基準にできない）ため、widthを
-                // 使った補正はスキップする（変に広げるより何もしない方が安全）。
                 const secondPlausible = secondWidth > 0 && secondWidth <= box.h * 1.6;
                 if (secondPlausible && firstWidth / secondWidth < OCR_FIRST_SYMBOL_MAX_WIDTH_RATIO) {
-                    // 1文字目の幅だけが極端に狭い＝右端の検出漏れの可能性が高い。
-                    // box全体の左端を、1文字目の本来の開始位置まで広げる。
-                    const expectedWidth = secondWidth; // 2文字目と同程度の幅があったはず
+                    const expectedWidth = secondWidth;
                     const missing = Math.max(0, expectedWidth - firstWidth);
                     const rightEdge = Math.max(box.x + box.w, out.x + out.w);
                     out.x = Math.max(0, Math.min(out.x, first.x0) - missing);
@@ -378,12 +398,6 @@ function getOcrPaintBox(box, symbols = []) {
                 }
             }
 
-            // 「？」などの記号の直後の文字だけ、bboxが不自然に右へズレて
-            // 報告されるケースが繰り返し確認されている（記号自体の認識位置は
-            // 合っているのに、直後の文字が1文字分ほど右にズレる）。
-            // 直前の生シンボル（正規化で消える記号も含む）との隙間が
-            // 通常のカーニングよりあきらかに大きい場合は、位置ズレを疑って
-            // 直前シンボルの右端まで左端を戻す。
             const prev = symbols[0]?.prevRawBbox;
             if (prev) {
                 const gap = first.x0 - prev.x1;
@@ -395,12 +409,6 @@ function getOcrPaintBox(box, symbols = []) {
                         out.w = rightEdge - newX0;
                     }
                 }
-                // paddingが直前の文字（「？」など）まで侵食しないよう、
-                // 直前シンボルの右端を絶対に超えない境界として持っておく。
-                // ただし、prevRawBbox自体が（ローカル再OCR時など）誤って
-                // 対象文字の右端より右に来てしまうと、境界線が本体を
-                // 追い越してbox幅が潰れる（＝縦棒になる）ため、
-                // 境界が対象boxの右端より十分左にある時だけ採用する。
                 const candidateBoundary = prev.x1 + 1;
                 if (candidateBoundary < (out.x + out.w) - 4) {
                     out._leftBoundary = candidateBoundary;
@@ -408,11 +416,6 @@ function getOcrPaintBox(box, symbols = []) {
             }
         }
 
-        // 最終保険：文字数に対してboxの幅があきらかに広すぎる場合
-        // （＝どこかのsymbol自体のbboxがガタっと壊れている可能性が高い）は、
-        // 左端はそのままに、幅を「1文字あたり高さの2倍」程度まで切り詰める。
-        // 隠したい本体（1文字目）は左端にあるはずなので、切り詰めても
-        // 対象自体が露出することはなく、余計な巻き込みだけを防げる。
         const maxPlausibleWidth = out.h * Math.max(1, symbols.length) * 2;
         if (out.w > maxPlausibleWidth) {
             out.w = maxPlausibleWidth;
@@ -453,23 +456,23 @@ function paintOcr(box, text = "", symbols = [], rescue = false, style = null) {
     return rect;
 }
 
-function paintManual(box, text = "", style = null) {
+function paintManual(box, style = null) {
     const padding = Math.max(4, Math.round(Math.min(box.w, box.h) * 0.12));
     const verticalPadding = padding + 2;
     const left = Math.max(0, box.x - padding - 6);
     const top = Math.max(0, box.y - verticalPadding);
     const width = box.w + padding;
     const height = box.h + verticalPadding * 2;
-    renderRedactionRect({ x: left, y: top, w: width, h: height }, text, style);
+    renderRedactionRect({ x: left, y: top, w: width, h: height }, style);
 }
 
 function paintStamp(stamp) {
     const style = getStampRedactionStyle(stamp);
     if (stamp.kind === "ocr") {
-        renderRedactionRect({ x: stamp.x, y: stamp.y, w: stamp.w, h: stamp.h }, stamp.text, style);
+        renderRedactionRect({ x: stamp.x, y: stamp.y, w: stamp.w, h: stamp.h }, style);
         return;
     }
-    paintManual(stamp, stamp.text, style);
+    paintManual(stamp, style);
 }
 
 function getBaseDisplaySize() {
@@ -1964,7 +1967,7 @@ async function run(){
     }
 
 
-    // V90.5: 通常OCR/局所OCRで拾えなかった場所だけ、
+    // V90.6: 通常OCR/局所OCRで拾えなかった場所だけ、
     // コントラスト補正→イタリックテンプレートを補助候補として追加する。
     status("OCR中…\nイタリック文字の取りこぼしを補助確認しています。");
     const italicRescue = collectItalicRescueCandidates(sourceImage, target, paintBoxes);
@@ -2025,7 +2028,7 @@ const TEMPLATE_GRAY_BG_MAX=75;
 const TEMPLATE_GRAY_SCORE_THRESHOLD=0.70;
 const TEMPLATE_GRAY_MIN_BG_SCORE=0.50;
 
-// ===== V90.5 実験：コントラスト補正＋イタリック多段テンプレート診断 =====
+// ===== V90.6 実験：コントラスト補正＋イタリック多段テンプレート診断 =====
 // 真緒のような画数の多い文字も考慮し、
 // コントラスト補正後の画像に対して
 // 1) テンプレート高さ 30 / 32 / 34px
@@ -2313,7 +2316,7 @@ function collectItalicRescueCandidates(source, text, existingBoxes=[]){
   return {result, accepted};
 }
 
-// ===== /V90.5 実験 =====
+// ===== /V90.6 実験 =====
 
 // ===== /V83 実験 =====
 
@@ -2431,7 +2434,7 @@ async function diagnoseOCR(){
     lines.push(`色抽出OCR：${stats.colorHitCount||0}件 / ${(stats.colorMs/1000).toFixed(2)}秒`);
     lines.push(`※ V68の全領域走査方式を診断用にも使用。V70本体では、この局所OCRのHITを追加の黒塗り候補として統合します。`);
 
-    lines.push("",`===== V90.5 コントラスト＋イタリック救出診断 =====`);
+    lines.push("",`===== V90.6 コントラスト＋イタリック救出診断 =====`);
     lines.push(`方式：コントラスト補正 → イタリックテンプレート / 粗探索${ITALIC_COARSE_STEP}px → 局所再探索${ITALIC_REFINE_STEP}px`);
     lines.push(`テンプレートバリエーション：高さ ${ITALIC_VARIANT_HEIGHTS.join("/")}px × 傾き ${ITALIC_VARIANT_SKEWS.map(v=>v.toFixed(2)).join("/")}`);
     const firstVariant=italicVariantResult.variants?.[0];
@@ -2442,7 +2445,7 @@ async function diagnoseOCR(){
     }
     lines.push(`最終候補：${italicVariantResult.merged?.length||0}件`);
     (italicVariantResult.merged||[]).slice(0,10).forEach((c,i)=>lines.push(`  統合候補${i+1}: score ${c.score.toFixed(3)} / 形状${c.fgScore.toFixed(3)} / 背景${c.bgScore.toFixed(3)} / ${c.label} / (${c.x},${c.y},w${c.w},h${c.h})`));
-    lines.push(`※ V90.5では、イタリック救出を本番の自動黒塗り補助として継続使用しつつ、OCR黒塗りの余白を少しだけ縮めています。通常格子＋3pxずらし格子＋X/Y末尾保証は維持しています。オレンジ枠がこの方式の候補です。`);
+    lines.push(`※ V90.6では、イタリック救出を本番の自動黒塗り補助として継続使用しつつ、OCR黒塗りのサイズ推定をさらに調整しています。2文字のうち片方のsymbol bboxだけが壊れている場合は、妥当な方を基準に幅を控えめに推定します。オレンジ枠がこの方式の候補です。`);
 
 
     lines.push('', `===== V76 局所OCR・順序維持ロバスト一致実験 =====`);
@@ -2506,7 +2509,7 @@ async function diagnoseOCR(){
       box.style.left=`${tr.left+c.x*tr.scaleX}px`; box.style.top=`${tr.top+c.y*tr.scaleY}px`;
       box.style.width=`${c.w*tr.scaleX}px`; box.style.height=`${c.h*tr.scaleY}px`;
       const label=document.createElement('span'); label.className='ocr-debug-label';
-      label.textContent=`V90.5 ${c.key} ${c.score.toFixed(2)}`;
+      label.textContent=`V90.6 ${c.key} ${c.score.toFixed(2)}`;
       box.appendChild(label); ocrDebugLayer.appendChild(box);
     }
 
