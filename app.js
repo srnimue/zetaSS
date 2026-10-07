@@ -2523,411 +2523,17 @@ candidates.sort((a,b)=>b.score-a.score);
   };
 }
 
-// ===== V88 実験：Gemini案ベースの高速テンプレートマッチング診断 =====
-// OCRを使わず、指定文字をCanvas上で描画したテンプレートとスクショのピクセルを
-// 直接比較して候補位置を探す。まだ診断専用で、本番黒塗りには使わない。
-// 以前のV83系の知見を踏まえ、即黒塗りではなく「候補bboxを返す」形にしている。
-const GEMINI_TEMPLATE_FONT_STACK='-apple-system, BlinkMacSystemFont, "Helvetica Neue", "Hiragino Sans", "Yu Gothic", sans-serif';
-const GEMINI_TEMPLATE_DEFAULT_FONT_SIZE=15;
-const GEMINI_TEMPLATE_SCAN_STEP=2;
-const GEMINI_TEMPLATE_SAMPLE_STEP=2;
-const GEMINI_TEMPLATE_COLOR_DIFF=100;
-const GEMINI_TEMPLATE_BG_SCORE_MIN=0.52;
-const GEMINI_TEMPLATE_RESULT_LIMIT=20;
-
-function clampValue(v,min,max){ return Math.max(min,Math.min(max,v)); }
-
-function estimateGeminiFontSize(results, scale){
-  const heights=[];
-  for(const r of results||[]){
-    for(const m of r.matches||[]){
-      for(const s of m.symbols||[]){
-        if(s?.bbox){
-          const h=(s.bbox.y1-s.bbox.y0)*scale;
-          if(Number.isFinite(h) && h>=10 && h<=64) heights.push(h);
-        }
-      }
-    }
-  }
-  if(!heights.length) return GEMINI_TEMPLATE_DEFAULT_FONT_SIZE;
-  const avg=heights.reduce((a,b)=>a+b,0)/heights.length;
-  return clampValue(Math.round(avg*0.95), 12, 28);
-}
-
-function buildGeminiTemplate(text, fontSize, fontColor){
-  const tmp=document.createElement('canvas');
-  const tctx=tmp.getContext('2d',{willReadFrequently:true});
-  tctx.font=`${fontSize}px ${GEMINI_TEMPLATE_FONT_STACK}`;
-  const metrics=tctx.measureText(text);
-  const width=Math.max(1,Math.ceil(metrics.width)+8);
-  const height=Math.max(1,Math.ceil(fontSize*1.35)+8);
-  tmp.width=width; tmp.height=height;
-
-  const g=tmp.getContext('2d',{willReadFrequently:true});
-  g.clearRect(0,0,width,height);
-  g.font=`${fontSize}px ${GEMINI_TEMPLATE_FONT_STACK}`;
-  g.fillStyle=fontColor;
-  g.textBaseline='top';
-  g.fillText(text,4,2);
-
-  const data=g.getImageData(0,0,width,height).data;
-  const fgSamples=[], bgSamples=[];
-  for(let y=0;y<height;y+=GEMINI_TEMPLATE_SAMPLE_STEP){
-    for(let x=0;x<width;x+=GEMINI_TEMPLATE_SAMPLE_STEP){
-      const i=(y*width+x)*4;
-      const alpha=data[i+3];
-      if(alpha>0){
-        fgSamples.push({x,y,r:data[i],g:data[i+1],b:data[i+2]});
-      }else{
-        bgSamples.push({x,y});
-      }
-    }
-  }
-  const bgStride=Math.max(1,Math.ceil(bgSamples.length/180));
-  const sampledBg=[];
-  for(let i=0;i<bgSamples.length;i+=bgStride) sampledBg.push(bgSamples[i]);
-
-  return {canvas:tmp,width,height,fgSamples,bgSamples:sampledBg,fontSize,fontColor};
-}
-
-function runGeminiTemplatePass(mainData, grayData, mainW, mainH, tpl, pass){
-  const candidates=[];
-  const searchYStart=Math.floor(mainH*TEMPLATE_SEARCH_TOP_RATIO);
-  const searchYEnd=Math.max(searchYStart, mainH - tpl.height);
-  const searchXStart=Math.floor(mainW*TEMPLATE_SEARCH_LEFT_RATIO);
-  const searchXEnd=Math.max(searchXStart, mainW - tpl.width - Math.floor(mainW*TEMPLATE_SEARCH_RIGHT_RATIO));
-
-  const rowHas=new Uint8Array(mainH);
-  const lumMin=pass.lumMin, lumMax=pass.lumMax;
-  for(let y=searchYStart;y<=Math.min(mainH-1, searchYEnd + tpl.height); y++){
-    let count=0;
-    for(let x=searchXStart;x<=searchXEnd;x+=3){
-      const v=grayData[y*mainW+x];
-      if(v>=lumMin && v<=lumMax){
-        if(++count>=6) break;
-      }
-    }
-    if(count>=6) rowHas[y]=1;
-  }
-
-  let coarsePass=0;
-  for(let y=searchYStart; y<=searchYEnd; y+=GEMINI_TEMPLATE_SCAN_STEP){
-    let rowOk=false;
-    for(let yy=0; yy<tpl.height; yy+=Math.max(2,GEMINI_TEMPLATE_SCAN_STEP)){
-      if(rowHas[y+yy]){ rowOk=true; break; }
-    }
-    if(!rowOk) continue;
-
-    for(let x=searchXStart; x<=searchXEnd; x+=GEMINI_TEMPLATE_SCAN_STEP){
-      let matchCount=0, totalCheck=0, bgGood=0, bgTotal=0;
-
-      for(const p of tpl.fgSamples){
-        totalCheck++;
-        const mIndex=((y+p.y)*mainW+(x+p.x))*4;
-        const diff=Math.abs(mainData[mIndex]-p.r)+Math.abs(mainData[mIndex+1]-p.g)+Math.abs(mainData[mIndex+2]-p.b);
-        if(diff < pass.colorDiff) matchCount++;
-      }
-
-      const score=totalCheck ? (matchCount / totalCheck) : 0;
-      if(score < pass.threshold) continue;
-      coarsePass++;
-
-      for(const p of tpl.bgSamples){
-        bgTotal++;
-        const lum=grayData[(y+p.y)*mainW+(x+p.x)];
-        if(pass.bgMode === 'dark'){
-          if(lum <= pass.bgCutoff) bgGood++;
-        }else{
-          if(lum >= pass.bgCutoff) bgGood++;
-        }
-      }
-      const bgScore=bgTotal ? (bgGood / bgTotal) : 0;
-      if(bgScore < pass.bgScoreMin) continue;
-
-      candidates.push({
-        x,y,w:tpl.width,h:tpl.height,
-        score,bgScore,pass:pass.name,fontSize:tpl.fontSize,fontColor:tpl.fontColor
-      });
-
-      // 重複候補を増やしすぎないため、ひとつ見つかったら横方向を少し飛ばす。
-      x += Math.max(0, tpl.width - GEMINI_TEMPLATE_SCAN_STEP);
-    }
-  }
-
-  return {
-    candidates,
-    coarsePass,
-    searchXStart, searchXEnd, searchYStart, searchYEnd
-  };
-}
-
-function geminiTemplateSearch(source, text, results=[], scale=1){
-  const sw=source.naturalWidth||source.width, sh=source.naturalHeight||source.height;
-  const sc=document.createElement('canvas'); sc.width=sw; sc.height=sh;
-  const sg=sc.getContext('2d',{willReadFrequently:true});
-  sg.drawImage(source,0,0,sw,sh);
-  const mainData=sg.getImageData(0,0,sw,sh).data;
-  const grayData=new Uint8Array(sw*sh);
-  for(let i=0,p=0;i<mainData.length;i+=4,p++){
-    grayData[p]=Math.round(mainData[i]*.299 + mainData[i+1]*.587 + mainData[i+2]*.114);
-  }
-
-  const fontSize=estimateGeminiFontSize(results, scale);
-  const passes=[
-    {name:'white', fontColor:'#ffffff', threshold:0.86, colorDiff:GEMINI_TEMPLATE_COLOR_DIFF, bgMode:'dark', bgCutoff:112, bgScoreMin:GEMINI_TEMPLATE_BG_SCORE_MIN, lumMin:170, lumMax:255},
-    {name:'gray',  fontColor:'#b8b8b8', threshold:0.84, colorDiff:GEMINI_TEMPLATE_COLOR_DIFF+10, bgMode:'dark', bgCutoff:82,  bgScoreMin:0.50, lumMin:95,  lumMax:210},
-    {name:'black', fontColor:'#111111', threshold:0.86, colorDiff:GEMINI_TEMPLATE_COLOR_DIFF, bgMode:'light',bgCutoff:150, bgScoreMin:0.55, lumMin:0,   lumMax:85}
-  ];
-
-  const allCandidates=[];
-  const passStats=[];
-  let rangeMemo=null;
-  for(const pass of passes){
-    const tpl=buildGeminiTemplate(text, fontSize, pass.fontColor);
-    if(!tpl.width || !tpl.height || tpl.width>=sw || tpl.height>=sh){
-      passStats.push({name:pass.name,tpl,coarsePass:0,accepted:0});
-      continue;
-    }
-    const result=runGeminiTemplatePass(mainData, grayData, sw, sh, tpl, pass);
-    rangeMemo = rangeMemo || result;
-    passStats.push({name:pass.name,tpl,coarsePass:result.coarsePass,accepted:result.candidates.length});
-    allCandidates.push(...result.candidates);
-  }
-
-  allCandidates.sort((a,b)=> (b.score + b.bgScore*0.15) - (a.score + a.bgScore*0.15));
-  const kept=[];
-  for(const c of allCandidates){
-    const dup=kept.some(k=>{
-      const ix=Math.max(0, Math.min(c.x+c.w,k.x+k.w)-Math.max(c.x,k.x));
-      const iy=Math.max(0, Math.min(c.y+c.h,k.y+k.h)-Math.max(c.y,k.y));
-      return ix*iy > Math.min(c.w*c.h, k.w*k.h) * 0.35;
-    });
-    if(!dup) kept.push(c);
-    if(kept.length>=GEMINI_TEMPLATE_RESULT_LIMIT) break;
-  }
-
-  return {
-    fontSize,
-    step:GEMINI_TEMPLATE_SCAN_STEP,
-    sampleStep:GEMINI_TEMPLATE_SAMPLE_STEP,
-    candidates:kept,
-    rawCandidates:allCandidates.length,
-    passStats,
-    searchXStart:rangeMemo?.searchXStart||0,
-    searchXEnd:rangeMemo?.searchXEnd||sw,
-    searchYStart:rangeMemo?.searchYStart||0,
-    searchYEnd:rangeMemo?.searchYEnd||sh
-  };
-}
-
-// ===== V88.1 実験：二値化＋モルフォロジー比較診断 =====
-// Gemini案の「背景0 / 文字1」の二値パターン比較を試す。
-// A: 二値化のみ
-// B: テンプレートだけ1px膨張
-// C: テンプレート＋スキャン対象の両方を1px膨張
-// まだ診断専用で、本番黒塗りには使わない。
-const MORPH_SCAN_STEP = 2;
-const MORPH_RESULT_LIMIT = 24;
-const MORPH_FG_MIN = 0.72;
-const MORPH_BG_MIN = 0.80;
-const MORPH_SCORE_MIN = 0.79;
-
-function dilateBinaryMask(src, w, h){
-  const out = new Uint8Array(w*h);
-  for(let y=0;y<h;y++){
-    for(let x=0;x<w;x++){
-      const i=y*w+x;
-      if(!src[i]) continue;
-      for(let dy=-1;dy<=1;dy++){
-        const yy=y+dy;
-        if(yy<0||yy>=h) continue;
-        for(let dx=-1;dx<=1;dx++){
-          const xx=x+dx;
-          if(xx<0||xx>=w) continue;
-          out[yy*w+xx]=1;
-        }
-      }
-    }
-  }
-  return out;
-}
-
-function buildMorphTemplate(text){
-  // V86系の比率維持テンプレート（目標文字高32px）を使い、
-  // アルファ値から「文字1 / 背景0」の二値パターンにする。
-  const base = buildTextTemplate(text);
-  if(!base?.canvas || !base.w || !base.h) return null;
-  const g = base.canvas.getContext('2d',{willReadFrequently:true});
-  const d = g.getImageData(0,0,base.w,base.h).data;
-  const mask = new Uint8Array(base.w*base.h);
-  for(let i=0,p=0;i<d.length;i+=4,p++){
-    mask[p] = d[i+3] >= 70 ? 1 : 0;
-  }
-  return {
-    w:base.w,
-    h:base.h,
-    mask,
-    dilated:dilateBinaryMask(mask,base.w,base.h)
-  };
-}
-
-function buildSourceBinaryMasks(source){
-  const sw=source.naturalWidth||source.width, sh=source.naturalHeight||source.height;
-  const c=document.createElement('canvas');
-  c.width=sw; c.height=sh;
-  const g=c.getContext('2d',{willReadFrequently:true});
-  g.drawImage(source,0,0,sw,sh);
-  const d=g.getImageData(0,0,sw,sh).data;
-  const gray=new Uint8Array(sw*sh);
-  const white=new Uint8Array(sw*sh);
-  const grayText=new Uint8Array(sw*sh);
-
-  for(let i=0,p=0;i<d.length;i+=4,p++){
-    const lum=Math.round(d[i]*.299+d[i+1]*.587+d[i+2]*.114);
-    gray[p]=lum;
-    // 白文字向け
-    white[p]=lum>=155?1:0;
-    // グレー文字も拾うため少し低い閾値
-    grayText[p]=lum>=95?1:0;
-  }
-
-  return {
-    sw,sh,gray,
-    white,
-    whiteDilated:dilateBinaryMask(white,sw,sh),
-    grayText,
-    grayDilated:dilateBinaryMask(grayText,sw,sh)
-  };
-}
-
-function scoreBinaryPattern(sourceMask, sw, tplMask, tw, th, x, y){
-  let fgHit=0, fgTotal=0, bgHit=0, bgTotal=0;
-  for(let ty=0;ty<th;ty++){
-    const srcRow=(y+ty)*sw+x;
-    const tplRow=ty*tw;
-    for(let tx=0;tx<tw;tx++){
-      const t=tplMask[tplRow+tx];
-      const s=sourceMask[srcRow+tx];
-      if(t){
-        fgTotal++;
-        if(s) fgHit++;
-      }else{
-        bgTotal++;
-        if(!s) bgHit++;
-      }
-    }
-  }
-  const fgScore=fgTotal?fgHit/fgTotal:0;
-  const bgScore=bgTotal?bgHit/bgTotal:0;
-  const score=fgScore*0.58 + bgScore*0.42;
-  return {score,fgScore,bgScore};
-}
-
-function morphTemplateSearch(source,text){
-  const tpl=buildMorphTemplate(text);
-  if(!tpl) return {candidates:[], variants:[], tpl:null};
-
-  const src=buildSourceBinaryMasks(source);
-  const {sw,sh}=src;
-
-  const searchYStart=Math.floor(sh*TEMPLATE_SEARCH_TOP_RATIO);
-  const searchYEnd=Math.max(searchYStart,sh-tpl.h);
-  const searchXStart=Math.floor(sw*TEMPLATE_SEARCH_LEFT_RATIO);
-  const searchXEnd=Math.max(searchXStart,sw-tpl.w-Math.floor(sw*TEMPLATE_SEARCH_RIGHT_RATIO));
-
-  const variants=[
-    {name:'binary-white', label:'二値化のみ/白', sourceMask:src.white, tplMask:tpl.mask, color:'#8a5cff'},
-    {name:'tpl-dilate-white', label:'テンプレ1px膨張/白', sourceMask:src.white, tplMask:tpl.dilated, color:'#ff8a00'},
-    {name:'both-dilate-white', label:'両方1px膨張/白', sourceMask:src.whiteDilated, tplMask:tpl.dilated, color:'#d946ef'},
-    {name:'binary-gray', label:'二値化のみ/グレー', sourceMask:src.grayText, tplMask:tpl.mask, color:'#4f46e5'},
-    {name:'tpl-dilate-gray', label:'テンプレ1px膨張/グレー', sourceMask:src.grayText, tplMask:tpl.dilated, color:'#f97316'},
-    {name:'both-dilate-gray', label:'両方1px膨張/グレー', sourceMask:src.grayDilated, tplMask:tpl.dilated, color:'#c026d3'}
-  ];
-
-  const all=[];
-  const stats=[];
-
-  for(const variant of variants){
-    const found=[];
-    let tested=0, scorePass=0;
-
-    for(let y=searchYStart;y<=searchYEnd;y+=MORPH_SCAN_STEP){
-      for(let x=searchXStart;x<=searchXEnd;x+=MORPH_SCAN_STEP){
-        tested++;
-        const s=scoreBinaryPattern(variant.sourceMask,sw,variant.tplMask,tpl.w,tpl.h,x,y);
-        if(s.score < MORPH_SCORE_MIN || s.fgScore < MORPH_FG_MIN || s.bgScore < MORPH_BG_MIN) continue;
-        scorePass++;
-
-        // 背景が暗いチャット領域を優先。外周4点の平均が明るすぎる場所は除外。
-        const cx=Math.min(sw-1,Math.max(0,x+Math.floor(tpl.w/2)));
-        const cy=Math.min(sh-1,Math.max(0,y+Math.floor(tpl.h/2)));
-        const samples=[
-          src.gray[y*sw+x],
-          src.gray[y*sw+Math.min(sw-1,x+tpl.w-1)],
-          src.gray[Math.min(sh-1,y+tpl.h-1)*sw+x],
-          src.gray[Math.min(sh-1,y+tpl.h-1)*sw+Math.min(sw-1,x+tpl.w-1)],
-          src.gray[cy*sw+cx]
-        ];
-        const mean=samples.reduce((a,b)=>a+b,0)/samples.length;
-        if(mean>190) continue;
-
-        found.push({x,y,w:tpl.w,h:tpl.h,...s,variant:variant.name,label:variant.label,color:variant.color});
-      }
-    }
-
-    found.sort((a,b)=>b.score-a.score);
-    const kept=[];
-    for(const c of found){
-      const dup=kept.some(k=>{
-        const ix=Math.max(0,Math.min(c.x+c.w,k.x+k.w)-Math.max(c.x,k.x));
-        const iy=Math.max(0,Math.min(c.y+c.h,k.y+k.h)-Math.max(c.y,k.y));
-        return ix*iy > Math.min(c.w*c.h,k.w*k.h)*0.35;
-      });
-      if(!dup) kept.push(c);
-      if(kept.length>=MORPH_RESULT_LIMIT) break;
-    }
-
-    stats.push({name:variant.name,label:variant.label,tested,scorePass,kept:kept.length});
-    all.push(...kept);
-  }
-
-  // 異なるvariantで同じ場所に出た候補は、最高スコアだけ残す。
-  all.sort((a,b)=>b.score-a.score);
-  const merged=[];
-  for(const c of all){
-    const dup=merged.some(k=>{
-      const ix=Math.max(0,Math.min(c.x+c.w,k.x+k.w)-Math.max(c.x,k.x));
-      const iy=Math.max(0,Math.min(c.y+c.h,k.y+k.h)-Math.max(c.y,k.y));
-      return ix*iy > Math.min(c.w*c.h,k.w*k.h)*0.40;
-    });
-    if(!dup) merged.push(c);
-    if(merged.length>=MORPH_RESULT_LIMIT) break;
-  }
-
-  return {
-    tpl,
-    candidates:merged,
-    stats,
-    step:MORPH_SCAN_STEP,
-    searchXStart,searchXEnd,searchYStart,searchYEnd,
-    thresholds:{score:MORPH_SCORE_MIN,fg:MORPH_FG_MIN,bg:MORPH_BG_MIN}
-  };
-}
-
-// ===== V88.2 実験：コントラスト補正＋イタリックテンプレート診断 =====
-// 地の文（黒背景＋グレー文字＋イタリック）を想定し、
-// 1) 通常テンプレート / 元画像
-// 2) イタリックテンプレート / 元画像
-// 3) コントラスト補正後画像 / イタリックテンプレート
-// の3系統を診断専用で比較する。
-
+// ===== V89 実験：イタリック寄せ・軽量診断 =====
+// V88/V88.1系の重い実験は採用せず、当たりが出た
+// 「イタリックテンプレート」と「コントラスト補正→イタリック」の
+// 2系統だけを診断専用で比較する。
 function buildTextTemplateStyled(text, opts={}){
   const italic = !!opts.italic;
-  const color = opts.color || '#fff';
-  const style = italic ? 'italic ' : '';
+  const color = opts.color || '#ffffff';
+  const fontStyle = italic ? 'italic ' : '';
   const m=document.createElement('canvas');
   const mc=m.getContext('2d');
-  mc.font=`${style}400 ${TEMPLATE_BASE_FONT_SIZE}px ${TEMPLATE_FONT_STACK}`;
+  mc.font=`${fontStyle}400 ${TEMPLATE_BASE_FONT_SIZE}px ${TEMPLATE_FONT_STACK}`;
   const met=mc.measureText(text);
   const rawW=Math.ceil(met.width)+18;
   const rawH=Math.ceil(TEMPLATE_BASE_FONT_SIZE*1.9);
@@ -2935,7 +2541,7 @@ function buildTextTemplateStyled(text, opts={}){
 
   const g=m.getContext('2d',{willReadFrequently:true});
   g.clearRect(0,0,rawW,rawH);
-  g.font=`${style}400 ${TEMPLATE_BASE_FONT_SIZE}px ${TEMPLATE_FONT_STACK}`;
+  g.font=`${fontStyle}400 ${TEMPLATE_BASE_FONT_SIZE}px ${TEMPLATE_FONT_STACK}`;
   g.fillStyle=color;
   g.textBaseline='alphabetic';
   g.fillText(text,8,TEMPLATE_BASE_FONT_SIZE+2);
@@ -2948,7 +2554,7 @@ function buildTextTemplateStyled(text, opts={}){
       if(y<minY)minY=y; if(y>maxY)maxY=y;
     }
   }
-  if(maxX<minX||maxY<minY) return {w:0,h:0,samples:[],bgSamples:[],italic,fontSize:TEMPLATE_BASE_FONT_SIZE};
+  if(maxX<minX||maxY<minY) return {w:0,h:0,samples:[],bgSamples:[],fontSize:TEMPLATE_BASE_FONT_SIZE,italic};
 
   const cropW=maxX-minX+1, cropH=maxY-minY+1;
   const targetH=TEMPLATE_TARGET_HEIGHT;
@@ -2966,11 +2572,12 @@ function buildTextTemplateStyled(text, opts={}){
   const fg=[], bg=[];
   for(let y=0;y<targetH;y++) for(let x=0;x<targetW;x++){
     const a=rd[(y*targetW+x)*4+3];
-    if(a>=90) fg.push({x,y,a:a/255});
-    else if(a<=20) bg.push({x,y});
+    if(a>=95) fg.push({x,y});
+    else if(a<=15) bg.push({x,y});
   }
-  const fgStride=Math.max(1,Math.ceil(fg.length/260));
-  const bgStride=Math.max(1,Math.ceil(bg.length/220));
+  // 速度優先でサンプル数を間引く
+  const fgStride=Math.max(1,Math.ceil(fg.length/170));
+  const bgStride=Math.max(1,Math.ceil(bg.length/150));
   const fgSamples=[], bgSamples=[];
   for(let i=0;i<fg.length;i+=fgStride) fgSamples.push(fg[i]);
   for(let i=0;i<bg.length;i+=bgStride) bgSamples.push(bg[i]);
@@ -2995,90 +2602,43 @@ function createGrayFromSource(source, contrastBoost=false){
   for(let i=0,p=0;i<d.length;i+=4,p++){
     let v=Math.round(d[i]*.299+d[i+1]*.587+d[i+2]*.114);
     if(contrastBoost){
-      v=Math.max(0,Math.min(255,Math.round((v-128)*1.55+128)));
+      v=Math.max(0,Math.min(255,Math.round((v-128)*1.50+128)));
     }
     gray[p]=v;
   }
   return {gray, sw, sh};
 }
 
-function searchTemplateOnGray(gray, sw, sh, tpl, config={}){
+function searchItalicGrayCandidates(gray, sw, sh, tpl, config={}){
   if(!tpl?.w || tpl.w>=sw || tpl.h>=sh){
-    return {tpl, candidates:[], rawCount:0, bgRejectedCount:0, grayScorePassCount:0, searchXStart:0, searchXEnd:sw, searchYStart:0, searchYEnd:sh};
+    return {tpl,candidates:[],grayScorePassCount:0,searchXStart:0,searchXEnd:sw,searchYStart:0,searchYEnd:sh,step:(config.step||TEMPLATE_STEP)};
   }
-
   const searchYStart=Math.floor(sh*TEMPLATE_SEARCH_TOP_RATIO);
   const searchYEnd=Math.max(searchYStart,sh-tpl.h);
   const searchXStart=Math.floor(sw*TEMPLATE_SEARCH_LEFT_RATIO);
   const searchXEnd=Math.max(searchXStart,sw-tpl.w-Math.floor(sw*TEMPLATE_SEARCH_RIGHT_RATIO));
 
-  const minBrightness=config.minBrightness ?? TEMPLATE_MIN_BRIGHTNESS;
-  const whiteBgMin=config.whiteBgMin ?? TEMPLATE_MIN_BG_SCORE;
-  const whiteScoreThreshold=config.whiteScoreThreshold ?? TEMPLATE_SCORE_THRESHOLD;
-  const grayTextMin=config.grayTextMin ?? TEMPLATE_GRAY_TEXT_MIN;
-  const grayTextMax=config.grayTextMax ?? TEMPLATE_GRAY_TEXT_MAX;
-  const grayBgMax=config.grayBgMax ?? TEMPLATE_GRAY_BG_MAX;
-  const grayScoreThreshold=config.grayScoreThreshold ?? TEMPLATE_GRAY_SCORE_THRESHOLD;
-  const grayMinBgScore=config.grayMinBgScore ?? TEMPLATE_GRAY_MIN_BG_SCORE;
+  const grayTextMin=config.grayTextMin ?? 90;
+  const grayTextMax=config.grayTextMax ?? 220;
+  const grayBgMax=config.grayBgMax ?? 82;
+  const grayScoreThreshold=config.grayScoreThreshold ?? 0.69;
+  const grayMinBgScore=config.grayMinBgScore ?? 0.50;
   const step=config.step ?? TEMPLATE_STEP;
 
-  const rowHasWhite=new Uint8Array(sh);
-  for(let y=searchYStart;y<=Math.min(sh-1,searchYEnd+tpl.h);y++){
-    let count=0;
-    for(let x=searchXStart;x<=searchXEnd;x+=3){
-      if(gray[y*sw+x]>=minBrightness){ if(++count>=8) break; }
-    }
-    if(count>=8) rowHasWhite[y]=1;
-  }
-
-  const candidates=[];
-  let rawCount=0, bgRejectedCount=0;
-
-  for(let y=searchYStart;y<=searchYEnd;y+=step){
-    let rowOk=false;
-    for(let yy=0;yy<tpl.h;yy+=Math.max(2,step)){
-      if(rowHasWhite[y+yy]){ rowOk=true; break; }
-    }
-    if(!rowOk) continue;
-
-    for(let x=searchXStart;x<=searchXEnd;x+=step){
-      let fgGood=0, fgTotal=0, bgGood=0, bgTotal=0;
-      for(const p of tpl.samples){
-        const v=gray[(y+p.y)*sw+(x+p.x)];
-        if(v>=minBrightness) fgGood++;
-        fgTotal++;
-      }
-      for(const p of tpl.bgSamples){
-        const v=gray[(y+p.y)*sw+(x+p.x)];
-        if(v<minBrightness) bgGood++;
-        bgTotal++;
-      }
-      const fgScore=fgTotal?fgGood/fgTotal:0;
-      const bgScore=bgTotal?bgGood/bgTotal:0;
-      const score=fgScore*TEMPLATE_FG_WEIGHT+bgScore*TEMPLATE_BG_WEIGHT;
-      if(score>=whiteScoreThreshold){
-        rawCount++;
-        if(bgScore>=whiteBgMin){
-          candidates.push({x,y,w:tpl.w,h:tpl.h,score,fgScore,bgScore,pass:'white'});
-        }else{
-          bgRejectedCount++;
-        }
-      }
-    }
-  }
-
+  // 粗い行判定：グレー帯がある行だけ探索
   const rowHasGray=new Uint8Array(sh);
   for(let y=searchYStart;y<=Math.min(sh-1,searchYEnd+tpl.h);y++){
     let count=0;
-    for(let x=searchXStart;x<=searchXEnd;x+=3){
+    for(let x=searchXStart;x<=searchXEnd;x+=4){
       const v=gray[y*sw+x];
       if(v>=grayTextMin && v<=grayTextMax){
-        if(++count>=6) break;
+        if(++count>=5) break;
       }
     }
-    if(count>=6) rowHasGray[y]=1;
+    if(count>=5) rowHasGray[y]=1;
   }
 
+  const candidates=[];
   let grayScorePassCount=0;
   for(let y=searchYStart;y<=searchYEnd;y+=step){
     let rowOk=false;
@@ -3090,13 +2650,13 @@ function searchTemplateOnGray(gray, sw, sh, tpl, config={}){
     for(let x=searchXStart;x<=searchXEnd;x+=step){
       let fgHit=0, fgTotal=0, bgHit=0, bgTotal=0;
       for(const p of tpl.samples){
-        const v=gray[(y+p.y)*sw+(x+p.x)];
-        if(v>=grayTextMin && v<=grayTextMax) fgHit++;
+        const lum=gray[(y+p.y)*sw+(x+p.x)];
+        if(lum>=grayTextMin && lum<=grayTextMax) fgHit++;
         fgTotal++;
       }
       for(const p of tpl.bgSamples){
-        const v=gray[(y+p.y)*sw+(x+p.x)];
-        if(v<=grayBgMax) bgHit++;
+        const lum=gray[(y+p.y)*sw+(x+p.x)];
+        if(lum<=grayBgMax) bgHit++;
         bgTotal++;
       }
       const fgScore=fgTotal?fgHit/fgTotal:0;
@@ -3120,32 +2680,24 @@ function searchTemplateOnGray(gray, sw, sh, tpl, config={}){
       return ix*iy > Math.min(c.w*c.h, k.w*k.h) * 0.35;
     });
     if(!dup) deduped.push(c);
-    if(deduped.length>=20) break;
+    if(deduped.length>=12) break;
   }
 
-  return {tpl, candidates:deduped, rawCount, bgRejectedCount, grayScorePassCount, searchXStart, searchXEnd, searchYStart, searchYEnd, step};
+  return {tpl,candidates:deduped,grayScorePassCount,searchXStart,searchXEnd,searchYStart,searchYEnd,step};
 }
 
-function contrastItalicDiagnosticSearch(source, text){
+function italicFocusedDiagnosticSearch(source, text){
   const original=createGrayFromSource(source,false);
   const contrast=createGrayFromSource(source,true);
 
   const variants=[
-    {
-      key:'normal',
-      label:'通常テンプレート / 元画像',
-      color:'#22c55e',
-      tpl:buildTextTemplateStyled(text,{italic:false}),
-      grayInfo:original,
-      config:{}
-    },
     {
       key:'italic',
       label:'イタリックテンプレート / 元画像',
       color:'#0ea5e9',
       tpl:buildTextTemplateStyled(text,{italic:true}),
       grayInfo:original,
-      config:{ grayTextMin:80, grayTextMax:220, grayBgMax:88, grayScoreThreshold:0.68, grayMinBgScore:0.48 }
+      config:{grayTextMin:80, grayTextMax:220, grayBgMax:88, grayScoreThreshold:0.68, grayMinBgScore:0.48, step:4}
     },
     {
       key:'contrastItalic',
@@ -3153,13 +2705,13 @@ function contrastItalicDiagnosticSearch(source, text){
       color:'#f59e0b',
       tpl:buildTextTemplateStyled(text,{italic:true}),
       grayInfo:contrast,
-      config:{ minBrightness:172, whiteBgMin:0.70, whiteScoreThreshold:0.73, grayTextMin:95, grayTextMax:235, grayBgMax:82, grayScoreThreshold:0.66, grayMinBgScore:0.46 }
+      config:{grayTextMin:95, grayTextMax:235, grayBgMax:82, grayScoreThreshold:0.64, grayMinBgScore:0.46, step:4}
     }
   ];
 
   const results=[];
   for(const v of variants){
-    const searched=searchTemplateOnGray(v.grayInfo.gray,v.grayInfo.sw,v.grayInfo.sh,v.tpl,v.config);
+    const searched=searchItalicGrayCandidates(v.grayInfo.gray,v.grayInfo.sw,v.grayInfo.sh,v.tpl,v.config);
     searched.label=v.label;
     searched.color=v.color;
     searched.key=v.key;
@@ -3169,11 +2721,7 @@ function contrastItalicDiagnosticSearch(source, text){
   }
   return results;
 }
-// ===== /V88.2 実験 =====
-
-// ===== /V88.1 実験 =====
-
-// ===== /V88 実験 =====
+// ===== /V89 実験 =====
 
 // ===== /V83 実験 =====
 
@@ -3195,9 +2743,7 @@ async function diagnoseOCR(){
     const ocrStarted=performance.now();
     const {results,scale,ocrCanvas,stats}=await collectOcrResults(worker,target);
     const templateResult=templateSearch(sourceImage,target);
-    const geminiTemplateResult=geminiTemplateSearch(sourceImage,target,results,scale);
-    const morphTemplateResult=morphTemplateSearch(sourceImage,target);
-    const contrastItalicResults=contrastItalicDiagnosticSearch(sourceImage,target);
+    const italicFocusedResults=italicFocusedDiagnosticSearch(sourceImage,target);
     const ocrElapsed=performance.now()-ocrStarted;
     const refineStarted=performance.now();
     const refine=await refineNearCandidates(worker,results,ocrCanvas,target,scale);
@@ -3302,33 +2848,15 @@ async function diagnoseOCR(){
     lines.push(`候補：${templateResult.candidates?.length||0}件（白pass ${templateResult.rawCount||0}件 / 白背景除外${templateResult.bgRejectedCount||0}件 / グレーpass ${templateResult.grayScorePassCount||0}件）`);
     (templateResult.candidates||[]).slice(0,20).forEach((c,i)=>lines.push(`  候補${i+1}: score ${c.score.toFixed(3)} / 形状${c.fgScore.toFixed(3)} / 背景${c.bgScore.toFixed(3)} / (${c.x},${c.y},w${c.w},h${c.h})`));
     lines.push(`※ V86ではまだ黒塗りには使用しません。緑枠はCanvasテンプレート検索の候補です。`);
-
-    lines.push("",`===== V88 Gemini式テンプレートマッチング診断 =====`);
-    lines.push(`対象文字：${target} / 推定フォントサイズ：${geminiTemplateResult.fontSize}px / 探索間隔：${geminiTemplateResult.step}px / サンプル間隔：${geminiTemplateResult.sampleStep}px`);
-    lines.push(`探索範囲：x=${geminiTemplateResult.searchXStart||0}〜${geminiTemplateResult.searchXEnd||0} / y=${geminiTemplateResult.searchYStart||0}〜${geminiTemplateResult.searchYEnd||0}（左10%のアイコン列＋上部12%を除外）`);
-    const passSummary=(geminiTemplateResult.passStats||[]).map(p=>`${p.name}:${p.tpl?.width||0}x${p.tpl?.height||0}px / 粗候補${p.coarsePass||0}件 / 採用${p.accepted||0}件`).join(" / ");
-    lines.push(`パス：${passSummary||"なし"}`);
-    lines.push(`候補：${geminiTemplateResult.candidates?.length||0}件（生候補合計 ${geminiTemplateResult.rawCandidates||0}件 / 重複除外後）`);
-    (geminiTemplateResult.candidates||[]).slice(0,20).forEach((c,i)=>lines.push(`  候補${i+1}: score ${c.score.toFixed(3)} / 背景${c.bgScore.toFixed(3)} / ${c.pass} / font ${c.fontSize}px / (${c.x},${c.y},w${c.w},h${c.h})`));
-    lines.push(`※ V88ではGemini案ベースの高速ピクセル比較を診断専用で試しています。青枠はこの方式の候補です。`);
-
-    lines.push("",`===== V88.1 二値化＋モルフォロジー診断 =====`);
-    lines.push(`対象文字：${target} / テンプレート：${morphTemplateResult.tpl?.w||0}x${morphTemplateResult.tpl?.h||0}px / 探索間隔：${morphTemplateResult.step||MORPH_SCAN_STEP}px`);
-    lines.push(`閾値：総合${morphTemplateResult.thresholds?.score||MORPH_SCORE_MIN} / 文字${morphTemplateResult.thresholds?.fg||MORPH_FG_MIN} / 背景${morphTemplateResult.thresholds?.bg||MORPH_BG_MIN}`);
-    lines.push(`探索範囲：x=${morphTemplateResult.searchXStart||0}〜${morphTemplateResult.searchXEnd||0} / y=${morphTemplateResult.searchYStart||0}〜${morphTemplateResult.searchYEnd||0}`);
-    (morphTemplateResult.stats||[]).forEach(s=>lines.push(`  ${s.label}: 判定${s.tested}点 / 閾値通過${s.scorePass}件 / 重複整理後${s.kept}件`));
-    lines.push(`最終候補：${morphTemplateResult.candidates?.length||0}件`);
-    (morphTemplateResult.candidates||[]).slice(0,20).forEach((c,i)=>lines.push(`  候補${i+1}: score ${c.score.toFixed(3)} / 文字${c.fgScore.toFixed(3)} / 背景${c.bgScore.toFixed(3)} / ${c.label} / (${c.x},${c.y},w${c.w},h${c.h})`));
-    lines.push(`※ V88.1では黒塗りには使用しません。紫〜オレンジ系の枠が二値化＋膨張比較の候補です。`);
-    lines.push("",`===== V88.2 コントラスト補正＋イタリック診断 =====`);
-    for(const r of (contrastItalicResults||[])){
+    lines.push("",`===== V89 イタリック寄せ軽量診断 =====`);
+    for(const r of (italicFocusedResults||[])){
       lines.push(`【${r.label}】`);
       lines.push(`テンプレート：${r.tpl?.w||0}x${r.tpl?.h||0}px / 探索間隔：${r.step||TEMPLATE_STEP}px / italic:${r.italic ? "yes" : "no"} / contrast:${r.contrast ? "yes" : "no"}`);
       lines.push(`探索範囲：x=${r.searchXStart||0}〜${r.searchXEnd||0} / y=${r.searchYStart||0}〜${r.searchYEnd||0}`);
-      lines.push(`候補：${r.candidates?.length||0}件（白pass ${r.rawCount||0}件 / 白背景除外${r.bgRejectedCount||0}件 / グレーpass ${r.grayScorePassCount||0}件）`);
+      lines.push(`候補：${r.candidates?.length||0}件（グレーpass ${r.grayScorePassCount||0}件）`);
       (r.candidates||[]).slice(0,10).forEach((c,i)=>lines.push(`  候補${i+1}: score ${c.score.toFixed(3)} / 形状${c.fgScore.toFixed(3)} / 背景${c.bgScore.toFixed(3)} / ${c.pass} / (${c.x},${c.y},w${c.w},h${c.h})`));
     }
-    lines.push(`※ V88.2では、通常テンプレ・イタリックテンプレ・コントラスト補正＋イタリックの3系統を診断専用で比較します。黄緑 / 水色 / オレンジ枠がこの方式の候補です。`);
+    lines.push(`※ V89では、重いV88/V88.1実験は外し、イタリック系2パスだけを診断専用で比較します。水色 / オレンジ枠がこの方式の候補です。`);
 
 
     lines.push("",`===== V82.1 誤認識救出診断（かな）＋候補bbox仮表示 =====`);
@@ -3441,45 +2969,25 @@ async function diagnoseOCR(){
       if(seen.some(o=>Math.abs(o.x0-m.x0)<3&&Math.abs(o.y0-m.y0)<3&&Math.abs(o.x1-m.x1)<3&&Math.abs(o.y1-m.y1)<3))continue;
       seen.push(m); const box=document.createElement('div'); box.className='ocr-debug-box'; box.style.borderColor='#22aa55'; box.style.left=`${tr.left+m.x0*tr.scaleX}px`; box.style.top=`${tr.top+m.y0*tr.scaleY}px`; box.style.width=`${(m.x1-m.x0)*tr.scaleX}px`; box.style.height=`${(m.y1-m.y0)*tr.scaleY}px`; const label=document.createElement('span'); label.className='ocr-debug-label'; label.textContent=`${r.mode}: ${target}`; box.appendChild(label); ocrDebugLayer.appendChild(box);
     }
-    // V83/V86: Canvasテンプレート候補を緑枠で表示。黒塗りには使用しない。
+    // V83: Canvasテンプレート候補を緑枠で表示。黒塗りには使用しない。
     for(const c of (templateResult.candidates||[])){
       const box=document.createElement('div');
       box.className='ocr-debug-box'; box.style.borderColor='#00aa66';
       box.style.left=`${tr.left+c.x*tr.scaleX}px`; box.style.top=`${tr.top+c.y*tr.scaleY}px`;
       box.style.width=`${c.w*tr.scaleX}px`; box.style.height=`${c.h*tr.scaleY}px`;
       const label=document.createElement('span'); label.className='ocr-debug-label';
-      label.textContent=`V86: ${target} ${c.score.toFixed(2)}`; box.appendChild(label); ocrDebugLayer.appendChild(box);
+      label.textContent=`V83: ${target} ${c.score.toFixed(2)}`; box.appendChild(label); ocrDebugLayer.appendChild(box);
     }
 
-    // V88: Gemini案ベースの高速テンプレート候補を青枠で表示。黒塗りには使用しない。
-    for(const c of (geminiTemplateResult.candidates||[])){
-      const box=document.createElement('div');
-      box.className='ocr-debug-box'; box.style.borderColor='#2c7dff';
-      box.style.left=`${tr.left+c.x*tr.scaleX}px`; box.style.top=`${tr.top+c.y*tr.scaleY}px`;
-      box.style.width=`${c.w*tr.scaleX}px`; box.style.height=`${c.h*tr.scaleY}px`;
-      const label=document.createElement('span'); label.className='ocr-debug-label';
-      label.textContent=`V88: ${target} ${c.score.toFixed(2)} ${c.pass}`; box.appendChild(label); ocrDebugLayer.appendChild(box);
-    }
-
-    // V88.1: 二値化＋モルフォロジー候補を紫〜オレンジ系の枠で表示。
-    for(const c of (morphTemplateResult.candidates||[])){
-      const box=document.createElement('div');
-      box.className='ocr-debug-box'; box.style.borderColor=c.color||'#8a5cff';
-      box.style.left=`${tr.left+c.x*tr.scaleX}px`; box.style.top=`${tr.top+c.y*tr.scaleY}px`;
-      box.style.width=`${c.w*tr.scaleX}px`; box.style.height=`${c.h*tr.scaleY}px`;
-      const label=document.createElement('span'); label.className='ocr-debug-label';
-      label.textContent=`V88.1 ${c.label} ${c.score.toFixed(2)}`; box.appendChild(label); ocrDebugLayer.appendChild(box);
-    }
-
-    // V88.2: コントラスト補正＋イタリック診断候補を黄緑 / 水色 / オレンジで表示。
-    for(const r of (contrastItalicResults||[])){
+    // V89: イタリック寄せ軽量診断候補を水色 / オレンジで表示。
+    for(const r of (italicFocusedResults||[])){
       for(const c of (r.candidates||[])){
         const box=document.createElement('div');
-        box.className='ocr-debug-box'; box.style.borderColor=r.color||'#22c55e';
+        box.className='ocr-debug-box'; box.style.borderColor=r.color||'#0ea5e9';
         box.style.left=`${tr.left+c.x*tr.scaleX}px`; box.style.top=`${tr.top+c.y*tr.scaleY}px`;
         box.style.width=`${c.w*tr.scaleX}px`; box.style.height=`${c.h*tr.scaleY}px`;
         const label=document.createElement('span'); label.className='ocr-debug-label';
-        label.textContent=`V88.2 ${r.key} ${c.score.toFixed(2)} ${c.pass}`;
+        label.textContent=`V89 ${r.key} ${c.score.toFixed(2)} ${c.pass}`;
         box.appendChild(label); ocrDebugLayer.appendChild(box);
       }
     }
