@@ -2523,28 +2523,45 @@ candidates.sort((a,b)=>b.score-a.score);
   };
 }
 
-// ===== V89 実験：イタリック寄せ・軽量診断 =====
-// V88/V88.1系の重い実験は採用せず、当たりが出た
-// 「イタリックテンプレート」と「コントラスト補正→イタリック」の
-// 2系統だけを診断専用で比較する。
+// ===== V90 実験：コントラスト補正＋イタリック多段テンプレート診断 =====
+// 真緒のような画数の多い文字も考慮し、
+// コントラスト補正後の画像に対して
+// 1) テンプレート高さ 30 / 32 / 34px
+// 2) 傾き補正 0.00 / 0.08 / 0.16
+// を少数バリエーションで試す。
+// 全画面は粗探索(step 6)だけ行い、良さそうな候補の周辺だけ局所再探索(step 2)する。
+const ITALIC_VARIANT_HEIGHTS = [30, 32, 34];
+const ITALIC_VARIANT_SKEWS = [0.00, 0.08, 0.16];
+const ITALIC_COARSE_STEP = 6;
+const ITALIC_REFINE_STEP = 2;
+const ITALIC_COARSE_LIMIT = 6;
+const ITALIC_FINAL_LIMIT = 4;
+
 function buildTextTemplateStyled(text, opts={}){
-  const italic = !!opts.italic;
+  const italic = opts.italic !== false;
   const color = opts.color || '#ffffff';
   const fontStyle = italic ? 'italic ' : '';
-  const m=document.createElement('canvas');
-  const mc=m.getContext('2d');
-  mc.font=`${fontStyle}400 ${TEMPLATE_BASE_FONT_SIZE}px ${TEMPLATE_FONT_STACK}`;
-  const met=mc.measureText(text);
-  const rawW=Math.ceil(met.width)+18;
-  const rawH=Math.ceil(TEMPLATE_BASE_FONT_SIZE*1.9);
-  m.width=rawW; m.height=rawH;
+  const targetH = opts.targetHeight || TEMPLATE_TARGET_HEIGHT;
+  const skew = Number.isFinite(opts.skew) ? opts.skew : 0;
+  const marginX = 18 + Math.ceil(Math.abs(skew) * TEMPLATE_BASE_FONT_SIZE * 3);
+  const rawH = Math.ceil(TEMPLATE_BASE_FONT_SIZE * 2.1);
+  const probe=document.createElement('canvas');
+  const probeCtx=probe.getContext('2d');
+  probeCtx.font=`${fontStyle}400 ${TEMPLATE_BASE_FONT_SIZE}px ${TEMPLATE_FONT_STACK}`;
+  const met=probeCtx.measureText(text);
+  const rawW=Math.ceil(met.width)+marginX*2;
 
+  const m=document.createElement('canvas');
+  m.width=rawW; m.height=rawH;
   const g=m.getContext('2d',{willReadFrequently:true});
   g.clearRect(0,0,rawW,rawH);
+  g.save();
+  g.setTransform(1, 0, skew, 1, 0, 0);
   g.font=`${fontStyle}400 ${TEMPLATE_BASE_FONT_SIZE}px ${TEMPLATE_FONT_STACK}`;
   g.fillStyle=color;
   g.textBaseline='alphabetic';
-  g.fillText(text,8,TEMPLATE_BASE_FONT_SIZE+2);
+  g.fillText(text, marginX, TEMPLATE_BASE_FONT_SIZE+4);
+  g.restore();
 
   const d=g.getImageData(0,0,rawW,rawH).data;
   let minX=rawW,minY=rawH,maxX=-1,maxY=-1;
@@ -2554,10 +2571,9 @@ function buildTextTemplateStyled(text, opts={}){
       if(y<minY)minY=y; if(y>maxY)maxY=y;
     }
   }
-  if(maxX<minX||maxY<minY) return {w:0,h:0,samples:[],bgSamples:[],fontSize:TEMPLATE_BASE_FONT_SIZE,italic};
+  if(maxX<minX||maxY<minY) return {w:0,h:0,samples:[],bgSamples:[],fontSize:TEMPLATE_BASE_FONT_SIZE,italic,skew,targetHeight:targetH};
 
   const cropW=maxX-minX+1, cropH=maxY-minY+1;
-  const targetH=TEMPLATE_TARGET_HEIGHT;
   const scale=targetH/cropH;
   const targetW=Math.max(1,Math.round(cropW*scale));
 
@@ -2573,11 +2589,11 @@ function buildTextTemplateStyled(text, opts={}){
   for(let y=0;y<targetH;y++) for(let x=0;x<targetW;x++){
     const a=rd[(y*targetW+x)*4+3];
     if(a>=95) fg.push({x,y});
-    else if(a<=15) bg.push({x,y});
+    else if(a<=12) bg.push({x,y});
   }
-  // 速度優先でサンプル数を間引く
-  const fgStride=Math.max(1,Math.ceil(fg.length/170));
-  const bgStride=Math.max(1,Math.ceil(bg.length/150));
+
+  const fgStride=Math.max(1,Math.ceil(fg.length/165));
+  const bgStride=Math.max(1,Math.ceil(bg.length/145));
   const fgSamples=[], bgSamples=[];
   for(let i=0;i<fg.length;i+=fgStride) fgSamples.push(fg[i]);
   for(let i=0;i<bg.length;i+=bgStride) bgSamples.push(bg[i]);
@@ -2588,7 +2604,7 @@ function buildTextTemplateStyled(text, opts={}){
     rawW:cropW,rawH:cropH,
     fontSize:TEMPLATE_BASE_FONT_SIZE,
     targetHeight:targetH,
-    italic
+    italic, skew
   };
 }
 
@@ -2602,126 +2618,145 @@ function createGrayFromSource(source, contrastBoost=false){
   for(let i=0,p=0;i<d.length;i+=4,p++){
     let v=Math.round(d[i]*.299+d[i+1]*.587+d[i+2]*.114);
     if(contrastBoost){
-      v=Math.max(0,Math.min(255,Math.round((v-128)*1.50+128)));
+      v=Math.max(0,Math.min(255,Math.round((v-128)*1.52+128)));
     }
     gray[p]=v;
   }
   return {gray, sw, sh};
 }
 
-function searchItalicGrayCandidates(gray, sw, sh, tpl, config={}){
+function dedupeTemplateCandidates(list, limit=ITALIC_FINAL_LIMIT){
+  list.sort((a,b)=>b.score-a.score);
+  const out=[];
+  for(const c of list){
+    const dup=out.some(k=>{
+      const ix=Math.max(0, Math.min(c.x+c.w,k.x+k.w)-Math.max(c.x,k.x));
+      const iy=Math.max(0, Math.min(c.y+c.h,k.y+k.h)-Math.max(c.y,k.y));
+      return ix*iy > Math.min(c.w*c.h, k.w*k.h) * 0.35;
+    });
+    if(!dup) out.push(c);
+    if(out.length>=limit) break;
+  }
+  return out;
+}
+
+function scoreItalicCandidate(gray, sw, x, y, tpl, config){
+  let fgHit=0, fgTotal=0, bgHit=0, bgTotal=0;
+  const grayTextMin=config.grayTextMin ?? 95;
+  const grayTextMax=config.grayTextMax ?? 235;
+  const grayBgMax=config.grayBgMax ?? 82;
+  for(const p of tpl.samples){
+    const lum=gray[(y+p.y)*sw+(x+p.x)];
+    if(lum>=grayTextMin && lum<=grayTextMax) fgHit++;
+    fgTotal++;
+  }
+  for(const p of tpl.bgSamples){
+    const lum=gray[(y+p.y)*sw+(x+p.x)];
+    if(lum<=grayBgMax) bgHit++;
+    bgTotal++;
+  }
+  const fgScore=fgTotal?fgHit/fgTotal:0;
+  const bgScore=bgTotal?bgHit/bgTotal:0;
+  const score=fgScore*TEMPLATE_FG_WEIGHT+bgScore*TEMPLATE_BG_WEIGHT;
+  return {score, fgScore, bgScore};
+}
+
+function searchContrastItalicVariant(gray, sw, sh, tpl, config={}){
   if(!tpl?.w || tpl.w>=sw || tpl.h>=sh){
-    return {tpl,candidates:[],grayScorePassCount:0,searchXStart:0,searchXEnd:sw,searchYStart:0,searchYEnd:sh,step:(config.step||TEMPLATE_STEP)};
+    return {tpl, coarsePassCount:0, candidates:[], searchXStart:0, searchXEnd:sw, searchYStart:0, searchYEnd:sh};
   }
   const searchYStart=Math.floor(sh*TEMPLATE_SEARCH_TOP_RATIO);
-  const searchYEnd=Math.max(searchYStart,sh-tpl.h);
+  const searchYEnd=Math.max(searchYStart, sh - tpl.h);
   const searchXStart=Math.floor(sw*TEMPLATE_SEARCH_LEFT_RATIO);
-  const searchXEnd=Math.max(searchXStart,sw-tpl.w-Math.floor(sw*TEMPLATE_SEARCH_RIGHT_RATIO));
+  const searchXEnd=Math.max(searchXStart, sw - tpl.w - Math.floor(sw*TEMPLATE_SEARCH_RIGHT_RATIO));
+  const grayTextMin=config.grayTextMin ?? 95;
+  const grayTextMax=config.grayTextMax ?? 235;
+  const coarseThreshold=config.coarseThreshold ?? 0.60;
+  const coarseBgMin=config.coarseBgMin ?? 0.44;
+  const finalThreshold=config.finalThreshold ?? 0.63;
+  const finalBgMin=config.finalBgMin ?? 0.46;
 
-  const grayTextMin=config.grayTextMin ?? 90;
-  const grayTextMax=config.grayTextMax ?? 220;
-  const grayBgMax=config.grayBgMax ?? 82;
-  const grayScoreThreshold=config.grayScoreThreshold ?? 0.69;
-  const grayMinBgScore=config.grayMinBgScore ?? 0.50;
-  const step=config.step ?? TEMPLATE_STEP;
-
-  // 粗い行判定：グレー帯がある行だけ探索
   const rowHasGray=new Uint8Array(sh);
-  for(let y=searchYStart;y<=Math.min(sh-1,searchYEnd+tpl.h);y++){
+  for(let y=searchYStart;y<=Math.min(sh-1, searchYEnd+tpl.h);y++){
     let count=0;
-    for(let x=searchXStart;x<=searchXEnd;x+=4){
+    for(let x=searchXStart;x<=searchXEnd;x+=5){
       const v=gray[y*sw+x];
       if(v>=grayTextMin && v<=grayTextMax){
-        if(++count>=5) break;
+        if(++count>=4) break;
       }
     }
-    if(count>=5) rowHasGray[y]=1;
+    if(count>=4) rowHasGray[y]=1;
   }
 
-  const candidates=[];
-  let grayScorePassCount=0;
-  for(let y=searchYStart;y<=searchYEnd;y+=step){
+  const coarse=[];
+  let coarsePassCount=0;
+  for(let y=searchYStart;y<=searchYEnd;y+=ITALIC_COARSE_STEP){
     let rowOk=false;
-    for(let yy=0;yy<tpl.h;yy+=Math.max(2,step)){
+    for(let yy=0;yy<tpl.h;yy+=Math.max(2,ITALIC_COARSE_STEP)){
       if(rowHasGray[y+yy]){ rowOk=true; break; }
     }
     if(!rowOk) continue;
 
-    for(let x=searchXStart;x<=searchXEnd;x+=step){
-      let fgHit=0, fgTotal=0, bgHit=0, bgTotal=0;
-      for(const p of tpl.samples){
-        const lum=gray[(y+p.y)*sw+(x+p.x)];
-        if(lum>=grayTextMin && lum<=grayTextMax) fgHit++;
-        fgTotal++;
+    for(let x=searchXStart;x<=searchXEnd;x+=ITALIC_COARSE_STEP){
+      const s=scoreItalicCandidate(gray, sw, x, y, tpl, config);
+      if(s.score>=coarseThreshold && s.bgScore>=coarseBgMin){
+        coarsePassCount++;
+        coarse.push({x,y,w:tpl.w,h:tpl.h,...s});
       }
-      for(const p of tpl.bgSamples){
-        const lum=gray[(y+p.y)*sw+(x+p.x)];
-        if(lum<=grayBgMax) bgHit++;
-        bgTotal++;
-      }
-      const fgScore=fgTotal?fgHit/fgTotal:0;
-      const bgScore=bgTotal?bgHit/bgTotal:0;
-      const score=fgScore*TEMPLATE_FG_WEIGHT+bgScore*TEMPLATE_BG_WEIGHT;
-      if(score>=grayScoreThreshold){
-        grayScorePassCount++;
-        if(bgScore>=grayMinBgScore){
-          candidates.push({x,y,w:tpl.w,h:tpl.h,score,fgScore,bgScore,pass:'gray'});
+    }
+  }
+
+  const coarseKept=dedupeTemplateCandidates(coarse, ITALIC_COARSE_LIMIT);
+  const refined=[];
+  for(const seed of coarseKept){
+    const x0=Math.max(searchXStart, seed.x-6), x1=Math.min(searchXEnd, seed.x+6);
+    const y0=Math.max(searchYStart, seed.y-6), y1=Math.min(searchYEnd, seed.y+6);
+    for(let y=y0;y<=y1;y+=ITALIC_REFINE_STEP){
+      for(let x=x0;x<=x1;x+=ITALIC_REFINE_STEP){
+        const s=scoreItalicCandidate(gray, sw, x, y, tpl, config);
+        if(s.score>=finalThreshold && s.bgScore>=finalBgMin){
+          refined.push({x,y,w:tpl.w,h:tpl.h,...s});
         }
       }
     }
   }
 
-  candidates.sort((a,b)=>b.score-a.score);
-  const deduped=[];
-  for(const c of candidates){
-    const dup=deduped.some(k=>{
-      const ix=Math.max(0, Math.min(c.x+c.w,k.x+k.w)-Math.max(c.x,k.x));
-      const iy=Math.max(0, Math.min(c.y+c.h,k.y+k.h)-Math.max(c.y,k.y));
-      return ix*iy > Math.min(c.w*c.h, k.w*k.h) * 0.35;
-    });
-    if(!dup) deduped.push(c);
-    if(deduped.length>=12) break;
-  }
-
-  return {tpl,candidates:deduped,grayScorePassCount,searchXStart,searchXEnd,searchYStart,searchYEnd,step};
+  const finalCandidates=dedupeTemplateCandidates(refined, ITALIC_FINAL_LIMIT);
+  return {tpl, coarsePassCount, candidates:finalCandidates, searchXStart, searchXEnd, searchYStart, searchYEnd};
 }
 
-function italicFocusedDiagnosticSearch(source, text){
-  const original=createGrayFromSource(source,false);
+function italicVariantDiagnosticSearch(source, text){
   const contrast=createGrayFromSource(source,true);
-
-  const variants=[
-    {
-      key:'italic',
-      label:'イタリックテンプレート / 元画像',
-      color:'#0ea5e9',
-      tpl:buildTextTemplateStyled(text,{italic:true}),
-      grayInfo:original,
-      config:{grayTextMin:80, grayTextMax:220, grayBgMax:88, grayScoreThreshold:0.68, grayMinBgScore:0.48, step:4}
-    },
-    {
-      key:'contrastItalic',
-      label:'コントラスト補正 → イタリックテンプレート',
-      color:'#f59e0b',
-      tpl:buildTextTemplateStyled(text,{italic:true}),
-      grayInfo:contrast,
-      config:{grayTextMin:95, grayTextMax:235, grayBgMax:82, grayScoreThreshold:0.64, grayMinBgScore:0.46, step:4}
+  const variants=[];
+  for(const h of ITALIC_VARIANT_HEIGHTS){
+    for(const skew of ITALIC_VARIANT_SKEWS){
+      const tpl=buildTextTemplateStyled(text,{italic:true,targetHeight:h,skew});
+      const searched=searchContrastItalicVariant(contrast.gray, contrast.sw, contrast.sh, tpl, {
+        grayTextMin:95, grayTextMax:235, grayBgMax:82,
+        coarseThreshold:0.60, coarseBgMin:0.44,
+        finalThreshold:0.63, finalBgMin:0.46
+      });
+      searched.label=`H${h} / skew ${skew.toFixed(2)}`;
+      searched.key=`h${h}_s${Math.round(skew*100)}`;
+      searched.color='#f59e0b';
+      searched.italic=true;
+      searched.contrast=true;
+      searched.targetHeight=h;
+      searched.skew=skew;
+      variants.push(searched);
     }
-  ];
-
-  const results=[];
-  for(const v of variants){
-    const searched=searchItalicGrayCandidates(v.grayInfo.gray,v.grayInfo.sw,v.grayInfo.sh,v.tpl,v.config);
-    searched.label=v.label;
-    searched.color=v.color;
-    searched.key=v.key;
-    searched.italic=!!v.tpl?.italic;
-    searched.contrast = v.key === 'contrastItalic';
-    results.push(searched);
   }
-  return results;
+
+  const mergedRaw=[];
+  for(const v of variants){
+    for(const c of (v.candidates||[])){
+      mergedRaw.push({...c, label:v.label, key:v.key, color:v.color, targetHeight:v.targetHeight, skew:v.skew});
+    }
+  }
+  const merged=dedupeTemplateCandidates(mergedRaw, 12);
+  return {variants, merged};
 }
-// ===== /V89 実験 =====
+// ===== /V90 実験 =====
 
 // ===== /V83 実験 =====
 
@@ -2743,7 +2778,7 @@ async function diagnoseOCR(){
     const ocrStarted=performance.now();
     const {results,scale,ocrCanvas,stats}=await collectOcrResults(worker,target);
     const templateResult=templateSearch(sourceImage,target);
-    const italicFocusedResults=italicFocusedDiagnosticSearch(sourceImage,target);
+    const italicVariantResult=italicVariantDiagnosticSearch(sourceImage,target);
     const ocrElapsed=performance.now()-ocrStarted;
     const refineStarted=performance.now();
     const refine=await refineNearCandidates(worker,results,ocrCanvas,target,scale);
@@ -2848,15 +2883,18 @@ async function diagnoseOCR(){
     lines.push(`候補：${templateResult.candidates?.length||0}件（白pass ${templateResult.rawCount||0}件 / 白背景除外${templateResult.bgRejectedCount||0}件 / グレーpass ${templateResult.grayScorePassCount||0}件）`);
     (templateResult.candidates||[]).slice(0,20).forEach((c,i)=>lines.push(`  候補${i+1}: score ${c.score.toFixed(3)} / 形状${c.fgScore.toFixed(3)} / 背景${c.bgScore.toFixed(3)} / (${c.x},${c.y},w${c.w},h${c.h})`));
     lines.push(`※ V86ではまだ黒塗りには使用しません。緑枠はCanvasテンプレート検索の候補です。`);
-    lines.push("",`===== V89 イタリック寄せ軽量診断 =====`);
-    for(const r of (italicFocusedResults||[])){
-      lines.push(`【${r.label}】`);
-      lines.push(`テンプレート：${r.tpl?.w||0}x${r.tpl?.h||0}px / 探索間隔：${r.step||TEMPLATE_STEP}px / italic:${r.italic ? "yes" : "no"} / contrast:${r.contrast ? "yes" : "no"}`);
-      lines.push(`探索範囲：x=${r.searchXStart||0}〜${r.searchXEnd||0} / y=${r.searchYStart||0}〜${r.searchYEnd||0}`);
-      lines.push(`候補：${r.candidates?.length||0}件（グレーpass ${r.grayScorePassCount||0}件）`);
-      (r.candidates||[]).slice(0,10).forEach((c,i)=>lines.push(`  候補${i+1}: score ${c.score.toFixed(3)} / 形状${c.fgScore.toFixed(3)} / 背景${c.bgScore.toFixed(3)} / ${c.pass} / (${c.x},${c.y},w${c.w},h${c.h})`));
+    lines.push("",`===== V90 コントラスト＋イタリック多段診断 =====`);
+    lines.push(`方式：コントラスト補正 → イタリックテンプレート / 粗探索${ITALIC_COARSE_STEP}px → 局所再探索${ITALIC_REFINE_STEP}px`);
+    lines.push(`テンプレートバリエーション：高さ ${ITALIC_VARIANT_HEIGHTS.join("/")}px × 傾き ${ITALIC_VARIANT_SKEWS.map(v=>v.toFixed(2)).join("/")}`);
+    const firstVariant=italicVariantResult.variants?.[0];
+    lines.push(`探索範囲：x=${firstVariant?.searchXStart||0}〜${firstVariant?.searchXEnd||0} / y=${firstVariant?.searchYStart||0}〜${firstVariant?.searchYEnd||0}`);
+    for(const v of (italicVariantResult.variants||[])){
+      lines.push(`【${v.label}】 テンプレート:${v.tpl?.w||0}x${v.tpl?.h||0}px / 粗候補${v.coarsePassCount||0}件 / 最終${v.candidates?.length||0}件`);
+      (v.candidates||[]).slice(0,3).forEach((c,i)=>lines.push(`  候補${i+1}: score ${c.score.toFixed(3)} / 形状${c.fgScore.toFixed(3)} / 背景${c.bgScore.toFixed(3)} / (${c.x},${c.y},w${c.w},h${c.h})`));
     }
-    lines.push(`※ V89では、重いV88/V88.1実験は外し、イタリック系2パスだけを診断専用で比較します。水色 / オレンジ枠がこの方式の候補です。`);
+    lines.push(`最終候補：${italicVariantResult.merged?.length||0}件`);
+    (italicVariantResult.merged||[]).slice(0,10).forEach((c,i)=>lines.push(`  統合候補${i+1}: score ${c.score.toFixed(3)} / 形状${c.fgScore.toFixed(3)} / 背景${c.bgScore.toFixed(3)} / ${c.label} / (${c.x},${c.y},w${c.w},h${c.h})`));
+    lines.push(`※ V90では、由良/真緒のような字形差に対応するため、高さと傾きの少数バリエーションを比較します。オレンジ枠がこの方式の候補です。`);
 
 
     lines.push("",`===== V82.1 誤認識救出診断（かな）＋候補bbox仮表示 =====`);
@@ -2979,17 +3017,15 @@ async function diagnoseOCR(){
       label.textContent=`V83: ${target} ${c.score.toFixed(2)}`; box.appendChild(label); ocrDebugLayer.appendChild(box);
     }
 
-    // V89: イタリック寄せ軽量診断候補を水色 / オレンジで表示。
-    for(const r of (italicFocusedResults||[])){
-      for(const c of (r.candidates||[])){
-        const box=document.createElement('div');
-        box.className='ocr-debug-box'; box.style.borderColor=r.color||'#0ea5e9';
-        box.style.left=`${tr.left+c.x*tr.scaleX}px`; box.style.top=`${tr.top+c.y*tr.scaleY}px`;
-        box.style.width=`${c.w*tr.scaleX}px`; box.style.height=`${c.h*tr.scaleY}px`;
-        const label=document.createElement('span'); label.className='ocr-debug-label';
-        label.textContent=`V89 ${r.key} ${c.score.toFixed(2)} ${c.pass}`;
-        box.appendChild(label); ocrDebugLayer.appendChild(box);
-      }
+    // V90: コントラスト＋イタリック多段診断候補をオレンジ枠で表示。
+    for(const c of (italicVariantResult.merged||[])){
+      const box=document.createElement('div');
+      box.className='ocr-debug-box'; box.style.borderColor=c.color||'#f59e0b';
+      box.style.left=`${tr.left+c.x*tr.scaleX}px`; box.style.top=`${tr.top+c.y*tr.scaleY}px`;
+      box.style.width=`${c.w*tr.scaleX}px`; box.style.height=`${c.h*tr.scaleY}px`;
+      const label=document.createElement('span'); label.className='ocr-debug-label';
+      label.textContent=`V90 ${c.key} ${c.score.toFixed(2)}`;
+      box.appendChild(label); ocrDebugLayer.appendChild(box);
     }
 
     // V82.1: かな誤認識候補は黒塗りせず、画像上に赤枠だけ表示。
