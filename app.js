@@ -292,9 +292,9 @@ function normalize(text) {
         .toLowerCase();
 }
 
-const OCR_EDGE_PAD = 2; // 対象文字の字形がbboxから少しはみ出す場合の左右余白(px)
-const OCR_MIN_PADDING = 3; // 最低限のパディング(px)。文字が小さくても黒塗りが欠けないように。
-const OCR_PADDING_RATIO = 0.08; // 文字サイズに対するパディング比率
+const OCR_EDGE_PAD = 1; // bbox外へ少しだけ足す左右余白。V90.5で過剰な黒塗りを抑えるため縮小。
+const OCR_MIN_PADDING = 2; // 最低限のパディング。V90.5で3px→2pxへ微調整。
+const OCR_PADDING_RATIO = 0.06; // 文字サイズに対するパディング比率。V90.5で8%→6%。
 const OCR_FIRST_SYMBOL_MIN_HEIGHT_RATIO = 0.25; // 1文字目bboxが極端に薄い時だけ補正
 const OCR_FIRST_SYMBOL_MAX_WIDTH_RATIO = 0.6; // 2文字目に対して1文字目の幅が極端に狭い時だけ補正
 const OCR_RESCUE_EXTRA = 14; // 近似候補救出だけ左右に追加する余白(px)
@@ -1964,7 +1964,7 @@ async function run(){
     }
 
 
-    // V90.4: 通常OCR/局所OCRで拾えなかった場所だけ、
+    // V90.5: 通常OCR/局所OCRで拾えなかった場所だけ、
     // コントラスト補正→イタリックテンプレートを補助候補として追加する。
     status("OCR中…\nイタリック文字の取りこぼしを補助確認しています。");
     const italicRescue = collectItalicRescueCandidates(sourceImage, target, paintBoxes);
@@ -2025,7 +2025,7 @@ const TEMPLATE_GRAY_BG_MAX=75;
 const TEMPLATE_GRAY_SCORE_THRESHOLD=0.70;
 const TEMPLATE_GRAY_MIN_BG_SCORE=0.50;
 
-// ===== V90.4 実験：コントラスト補正＋イタリック多段テンプレート診断 =====
+// ===== V90.5 実験：コントラスト補正＋イタリック多段テンプレート診断 =====
 // 真緒のような画数の多い文字も考慮し、
 // コントラスト補正後の画像に対して
 // 1) テンプレート高さ 30 / 32 / 34px
@@ -2313,7 +2313,7 @@ function collectItalicRescueCandidates(source, text, existingBoxes=[]){
   return {result, accepted};
 }
 
-// ===== /V90.4 実験 =====
+// ===== /V90.5 実験 =====
 
 // ===== /V83 実験 =====
 
@@ -2431,7 +2431,7 @@ async function diagnoseOCR(){
     lines.push(`色抽出OCR：${stats.colorHitCount||0}件 / ${(stats.colorMs/1000).toFixed(2)}秒`);
     lines.push(`※ V68の全領域走査方式を診断用にも使用。V70本体では、この局所OCRのHITを追加の黒塗り候補として統合します。`);
 
-    lines.push("",`===== V90.4 コントラスト＋イタリック救出診断 =====`);
+    lines.push("",`===== V90.5 コントラスト＋イタリック救出診断 =====`);
     lines.push(`方式：コントラスト補正 → イタリックテンプレート / 粗探索${ITALIC_COARSE_STEP}px → 局所再探索${ITALIC_REFINE_STEP}px`);
     lines.push(`テンプレートバリエーション：高さ ${ITALIC_VARIANT_HEIGHTS.join("/")}px × 傾き ${ITALIC_VARIANT_SKEWS.map(v=>v.toFixed(2)).join("/")}`);
     const firstVariant=italicVariantResult.variants?.[0];
@@ -2442,7 +2442,7 @@ async function diagnoseOCR(){
     }
     lines.push(`最終候補：${italicVariantResult.merged?.length||0}件`);
     (italicVariantResult.merged||[]).slice(0,10).forEach((c,i)=>lines.push(`  統合候補${i+1}: score ${c.score.toFixed(3)} / 形状${c.fgScore.toFixed(3)} / 背景${c.bgScore.toFixed(3)} / ${c.label} / (${c.x},${c.y},w${c.w},h${c.h})`));
-    lines.push(`※ V90.4では、このイタリック救出を本番の自動黒塗り補助として継続使用します。通常格子＋3pxずらし格子＋X/Y末尾保証で取りこぼしを抑えています。オレンジ枠がこの方式の候補です。`);
+    lines.push(`※ V90.5では、イタリック救出を本番の自動黒塗り補助として継続使用しつつ、OCR黒塗りの余白を少しだけ縮めています。通常格子＋3pxずらし格子＋X/Y末尾保証は維持しています。オレンジ枠がこの方式の候補です。`);
 
 
     lines.push('', `===== V76 局所OCR・順序維持ロバスト一致実験 =====`);
@@ -2499,16 +2499,6 @@ async function diagnoseOCR(){
       if(seen.some(o=>Math.abs(o.x0-m.x0)<3&&Math.abs(o.y0-m.y0)<3&&Math.abs(o.x1-m.x1)<3&&Math.abs(o.y1-m.y1)<3))continue;
       seen.push(m); const box=document.createElement('div'); box.className='ocr-debug-box'; box.style.borderColor='#22aa55'; box.style.left=`${tr.left+m.x0*tr.scaleX}px`; box.style.top=`${tr.top+m.y0*tr.scaleY}px`; box.style.width=`${(m.x1-m.x0)*tr.scaleX}px`; box.style.height=`${(m.y1-m.y0)*tr.scaleY}px`; const label=document.createElement('span'); label.className='ocr-debug-label'; label.textContent=`${r.mode}: ${target}`; box.appendChild(label); ocrDebugLayer.appendChild(box);
     }
-    // V83: Canvasテンプレート候補を緑枠で表示。黒塗りには使用しない。
-    for(const c of (templateResult.candidates||[])){
-      const box=document.createElement('div');
-      box.className='ocr-debug-box'; box.style.borderColor='#00aa66';
-      box.style.left=`${tr.left+c.x*tr.scaleX}px`; box.style.top=`${tr.top+c.y*tr.scaleY}px`;
-      box.style.width=`${c.w*tr.scaleX}px`; box.style.height=`${c.h*tr.scaleY}px`;
-      const label=document.createElement('span'); label.className='ocr-debug-label';
-      label.textContent=`V83: ${target} ${c.score.toFixed(2)}`; box.appendChild(label); ocrDebugLayer.appendChild(box);
-    }
-
     // V90: コントラスト＋イタリック多段診断候補をオレンジ枠で表示。
     for(const c of (italicVariantResult.merged||[])){
       const box=document.createElement('div');
@@ -2516,7 +2506,7 @@ async function diagnoseOCR(){
       box.style.left=`${tr.left+c.x*tr.scaleX}px`; box.style.top=`${tr.top+c.y*tr.scaleY}px`;
       box.style.width=`${c.w*tr.scaleX}px`; box.style.height=`${c.h*tr.scaleY}px`;
       const label=document.createElement('span'); label.className='ocr-debug-label';
-      label.textContent=`V90.4 ${c.key} ${c.score.toFixed(2)}`;
+      label.textContent=`V90.5 ${c.key} ${c.score.toFixed(2)}`;
       box.appendChild(label); ocrDebugLayer.appendChild(box);
     }
 
