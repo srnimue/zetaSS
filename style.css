@@ -377,3 +377,16 @@ body.help-dialog-open{
 .option-panel .redaction-style-controls{
   margin-bottom:0;
 }
+
+
+/* V90.14: オプションのプルダウン高さを統一 */
+.manual-draw-controls select,
+.redaction-style-controls select{
+  height:38px !important;
+  min-height:38px !important;
+  padding-top:6px;
+  padding-bottom:6px;
+}
+.standalone-stamp{
+  margin:10px 0 2px;
+}

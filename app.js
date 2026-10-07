@@ -68,7 +68,7 @@ let panLastCenter = null;
  // ズーム倍率が変わっても、指から見た描画位置の距離を一定にする。
 const TOUCH_Y_OFFSET_SCREEN_PX = -40;
 const MANUAL_HIT_RADIUS_PX = 30; // 画面表示上の当たり判定。新規描画より既存編集を優先。
-const TRACE_FIXED_HEIGHT = 32; // なぞり式の矩形高さ（元画像canvas座標px）
+const TRACE_DISPLAY_HEIGHT_PX = 32; // なぞり式の基準高さ（100%表示時のCSS px）
 const SETTINGS_STORAGE_KEY = "zetaSS.settings.v87";
 const TARGET_HISTORY_STORAGE_KEY = "zetaSS.targetHistory.v87";
 const MAX_TARGET_HISTORY = 5;
@@ -1617,7 +1617,7 @@ async function collectOcrResults(worker,target){
     stats.primaryMs=performance.now()-primaryStarted;
   }
 
-  // V90.12 速度・安定性優先:
+  // V90.14 速度・安定性優先:
   // primary HITが0件でも、二値化180/220/反転の「全画面OCR 3連打」は行わない。
   // iPhone Safariでは縦長画像の2.5倍キャンバスが非常に大きくなり、
   // ここで複数の全画面OCRを連続実行するとメモリ圧迫・タブクラッシュの原因になる。
@@ -2032,7 +2032,8 @@ async function run(){
     // V90.7: 通常OCR/局所OCRで拾えなかった場所だけ、
     // コントラスト補正→イタリックテンプレートを補助候補として追加する。
     status("OCR中…\nイタリック文字の取りこぼしを補助確認しています。");
-    const italicRescue = collectItalicRescueCandidates(sourceImage, target, paintBoxes);
+    const italicVariantHeights = chooseItalicVariantHeights(regionScan.detected);
+    const italicRescue = collectItalicRescueCandidates(sourceImage, target, paintBoxes, italicVariantHeights);
     for (const c of italicRescue.accepted) {
       paintBoxes.push({
         x:c.x, y:c.y, w:c.w, h:c.h,
@@ -2090,14 +2091,14 @@ const TEMPLATE_GRAY_BG_MAX=75;
 const TEMPLATE_GRAY_SCORE_THRESHOLD=0.70;
 const TEMPLATE_GRAY_MIN_BG_SCORE=0.50;
 
-// ===== V90.12 実験：コントラスト補正＋イタリック多段テンプレート診断 =====
+// ===== V90.14 実験：コントラスト補正＋イタリック多段テンプレート診断 =====
 // 真緒のような画数の多い文字も考慮し、
 // コントラスト補正後の画像に対して
 // 1) テンプレート高さ 30 / 32 / 34px
 // 2) 傾き補正 0.00 / 0.08 / 0.16
 // を少数バリエーションで試す。
 // 全画面は粗探索(step 6)だけ行い、良さそうな候補の周辺だけ局所再探索(step 2)する。
-const ITALIC_VARIANT_HEIGHTS = [32, 34];
+const ITALIC_VARIANT_HEIGHTS = [32, 34]; // 推定不能時の既定値
 const ITALIC_VARIANT_SKEWS = [0.00];
 const ITALIC_COARSE_STEP = 6;
 const ITALIC_REFINE_STEP = 2;
@@ -2108,6 +2109,30 @@ const ITALIC_RESCUE_SCORE_MIN = 0.62;
 const ITALIC_RESCUE_FG_MIN = 0.47;
 const ITALIC_RESCUE_BG_MIN = 0.93;
 const ITALIC_RESCUE_MAX_NEW = 3;
+
+
+function chooseItalicVariantHeights(detected){
+  const heights=(detected?.regions||[])
+    .map(r=>r?.h)
+    .filter(h=>Number.isFinite(h) && h>=28 && h<=100)
+    .sort((a,b)=>a-b);
+  if(!heights.length) return [...ITALIC_VARIANT_HEIGHTS];
+
+  // 文字領域は上下余白込みなので、実文字高さはおよそ6割強として推定。
+  // 外れ値に引っ張られないよう中央値を使う。
+  const mid=Math.floor(heights.length/2);
+  const median=heights.length%2 ? heights[mid] : (heights[mid-1]+heights[mid])/2;
+  let estimated=Math.round(median*0.64);
+  estimated=Math.max(28,Math.min(48,estimated));
+
+  // これまで実績のある32/34帯なら従来値をそのまま使う。
+  if(estimated>=31 && estimated<=35) return [32,34];
+
+  // 推定値の前後2pxだけ。候補数は常に2つに抑え、速度を増やしすぎない。
+  const a=Math.max(28,Math.min(48,estimated-2));
+  const b=Math.max(28,Math.min(48,estimated+2));
+  return a===b ? [a] : [a,b];
+}
 
 function buildTextTemplateStyled(text, opts={}){
   const italic = opts.italic !== false;
@@ -2316,10 +2341,10 @@ function searchContrastItalicVariant(gray, sw, sh, tpl, config={}){
   return {tpl, coarsePassCount, candidates:finalCandidates, searchXStart, searchXEnd, searchYStart, searchYEnd};
 }
 
-function italicVariantDiagnosticSearch(source, text){
+function italicVariantDiagnosticSearch(source, text, variantHeights=ITALIC_VARIANT_HEIGHTS){
   const contrast=createGrayFromSource(source,true);
   const variants=[];
-  for(const h of ITALIC_VARIANT_HEIGHTS){
+  for(const h of variantHeights){
     for(const skew of ITALIC_VARIANT_SKEWS){
       const tpl=buildTextTemplateStyled(text,{italic:true,targetHeight:h,skew});
       const searched=searchContrastItalicVariant(contrast.gray, contrast.sw, contrast.sh, tpl, {
@@ -2348,8 +2373,8 @@ function italicVariantDiagnosticSearch(source, text){
   return {variants, merged};
 }
 
-function collectItalicRescueCandidates(source, text, existingBoxes=[]){
-  const result=italicVariantDiagnosticSearch(source,text);
+function collectItalicRescueCandidates(source, text, existingBoxes=[], variantHeights=ITALIC_VARIANT_HEIGHTS){
+  const result=italicVariantDiagnosticSearch(source,text,variantHeights);
   const accepted=[];
 
   function overlapsExisting(c){
@@ -2378,7 +2403,7 @@ function collectItalicRescueCandidates(source, text, existingBoxes=[]){
   return {result, accepted};
 }
 
-// ===== /V90.12 実験 =====
+// ===== /V90.14 実験 =====
 
 // ===== /V83 実験 =====
 
@@ -2399,8 +2424,10 @@ async function diagnoseOCR(){
     status("OCR診断中…\n認識条件を比較しています。画像表示は維持します。");
     const ocrStarted=performance.now();
     const {results,scale,ocrCanvas,stats}=await collectOcrResults(worker,target);
-    const italicVariantResult=italicVariantDiagnosticSearch(sourceImage,target);
-    const italicProductionPreview=collectItalicRescueCandidates(sourceImage,target,[]);
+    const diagnosticTextRegions=detectTextLikeRegions(canvas);
+    const diagnosticItalicHeights=chooseItalicVariantHeights(diagnosticTextRegions);
+    const italicVariantResult=italicVariantDiagnosticSearch(sourceImage,target,diagnosticItalicHeights);
+    const italicProductionPreview=collectItalicRescueCandidates(sourceImage,target,[],diagnosticItalicHeights);
     const ocrElapsed=performance.now()-ocrStarted;
     const refineStarted=performance.now();
     const refine=await refineNearCandidates(worker,results,ocrCanvas,target,scale);
@@ -2497,9 +2524,9 @@ async function diagnoseOCR(){
     lines.push(`色抽出OCR：${stats.colorHitCount||0}件 / ${(stats.colorMs/1000).toFixed(2)}秒`);
     lines.push(`※ V68の全領域走査方式を診断用にも使用。V70本体では、この局所OCRのHITを追加の黒塗り候補として統合します。`);
 
-    lines.push("",`===== V90.12 コントラスト＋イタリック救出診断 =====`);
+    lines.push("",`===== V90.14 コントラスト＋イタリック救出診断 =====`);
     lines.push(`方式：コントラスト補正 → イタリックテンプレート / 粗探索${ITALIC_COARSE_STEP}px → 局所再探索${ITALIC_REFINE_STEP}px`);
-    lines.push(`テンプレートバリエーション：高さ ${ITALIC_VARIANT_HEIGHTS.join("/")}px × 傾き ${ITALIC_VARIANT_SKEWS.map(v=>v.toFixed(2)).join("/")}`);
+    lines.push(`テンプレートバリエーション：高さ ${diagnosticItalicHeights.join("/")}px（文字領域から自動推定）× 傾き ${ITALIC_VARIANT_SKEWS.map(v=>v.toFixed(2)).join("/")}`);
     const firstVariant=italicVariantResult.variants?.[0];
     lines.push(`探索範囲：x=${firstVariant?.searchXStart||0}〜${firstVariant?.searchXEnd||0} / y=${firstVariant?.searchYStart||0}〜${firstVariant?.searchYEnd||0}`);
     for(const v of (italicVariantResult.variants||[])){
@@ -2585,7 +2612,7 @@ async function diagnoseOCR(){
       box.style.left=`${tr.left+c.x*tr.scaleX}px`; box.style.top=`${tr.top+c.y*tr.scaleY}px`;
       box.style.width=`${c.w*tr.scaleX}px`; box.style.height=`${c.h*tr.scaleY}px`;
       const label=document.createElement('span'); label.className='ocr-debug-label';
-      label.textContent=`V90.12 本番候補 ${c.score.toFixed(2)}`;
+      label.textContent=`V90.14 本番候補 ${c.score.toFixed(2)}`;
       box.appendChild(label); ocrDebugLayer.appendChild(box);
     }
 
@@ -2630,10 +2657,19 @@ function updateSelection(start, current) {
     selection.style.height = `${h * transform.scaleY}px`;
 }
 
+function getTraceCanvasHeight() {
+    if (!canvas.width || !canvas.height) return TRACE_DISPLAY_HEIGHT_PX;
+    const base = getBaseDisplaySize();
+    const baseScaleY = Math.max(0.0001, base.height / canvas.height);
+    // 画像が縮小表示されているほど、元画像側では太い矩形にする。
+    // zoom値は使わないので、拡大表示しても文字との相対サイズは変わらない。
+    return Math.max(24, Math.min(96, TRACE_DISPLAY_HEIGHT_PX / baseScaleY));
+}
+
 function getTraceRect(start, current) {
     const x = Math.min(start.x, current.x);
     const w = Math.abs(current.x - start.x);
-    const h = TRACE_FIXED_HEIGHT;
+    const h = getTraceCanvasHeight();
     // Yは開始地点を基準に固定。指が上下にぶれても黒塗りが蛇行しない。
     const y = Math.max(0, Math.min(canvas.height - h, start.y - h / 2));
     return { x, y, w, h };
@@ -3055,7 +3091,7 @@ manualDrawMode?.addEventListener("change", () => {
     hideManualDeleteButton();
     dragStart = null;
     isDragging = false;
-    const label = manualDrawMode.value === "trace" ? `なぞり式（高さ${TRACE_FIXED_HEIGHT}px固定）` : "自由矩形";
+    const label = manualDrawMode.value === "trace" ? "なぞり式（表示サイズに自動調整）" : "自由矩形";
     status(`手動の描画方法を「${label}」にしました。`);
 });
 
