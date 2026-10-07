@@ -2260,6 +2260,18 @@ async function run(){
       }
     }
 
+
+    // V90.1: 通常OCR/局所OCRで拾えなかった場所だけ、
+    // コントラスト補正→イタリックテンプレートを補助候補として追加する。
+    status("OCR中…\nイタリック文字の取りこぼしを補助確認しています。");
+    const italicRescue = collectItalicRescueCandidates(sourceImage, target, paintBoxes);
+    for (const c of italicRescue.accepted) {
+      paintBoxes.push({
+        x:c.x, y:c.y, w:c.w, h:c.h,
+        symbols:[], source:"イタリック救出", rescue:false
+      });
+    }
+
     // V86:
     // V70の文脈救出は「ちゃん」「さん」など一般的な語尾に反応して
     // 別の名前や無関係な位置を黒塗りしてしまう誤爆が確認されたため、
@@ -2288,8 +2300,9 @@ async function run(){
     }
     redrawFromBase();
     saveBtn.disabled=false; manualBtn.disabled=false;
-    const localAdded = Math.max(0, paintBoxes.length - matches.length);
-    status(`黒塗り完了：${manualStamps.length}箇所\n通常OCR：${matches.length}箇所 / 追加局所OCR：${localAdded}箇所`);
+    const italicAdded = italicRescue?.accepted?.length || 0;
+    const localAdded = Math.max(0, paintBoxes.length - matches.length - italicAdded);
+    status(`黒塗り完了：${manualStamps.length}箇所\n通常OCR：${matches.length}箇所 / 追加局所OCR：${localAdded}箇所 / イタリック救出：${italicAdded}箇所`);
   }catch(error){status("OCRでエラーが発生しました。下のエラー詳細を確認してください。",error);}
 }
 
@@ -2523,19 +2536,23 @@ candidates.sort((a,b)=>b.score-a.score);
   };
 }
 
-// ===== V90 実験：コントラスト補正＋イタリック多段テンプレート診断 =====
+// ===== V90.1 実験：コントラスト補正＋イタリック多段テンプレート診断 =====
 // 真緒のような画数の多い文字も考慮し、
 // コントラスト補正後の画像に対して
 // 1) テンプレート高さ 30 / 32 / 34px
 // 2) 傾き補正 0.00 / 0.08 / 0.16
 // を少数バリエーションで試す。
 // 全画面は粗探索(step 6)だけ行い、良さそうな候補の周辺だけ局所再探索(step 2)する。
-const ITALIC_VARIANT_HEIGHTS = [30, 32, 34];
-const ITALIC_VARIANT_SKEWS = [0.00, 0.08, 0.16];
+const ITALIC_VARIANT_HEIGHTS = [32, 34];
+const ITALIC_VARIANT_SKEWS = [0.00];
 const ITALIC_COARSE_STEP = 6;
 const ITALIC_REFINE_STEP = 2;
 const ITALIC_COARSE_LIMIT = 6;
 const ITALIC_FINAL_LIMIT = 4;
+const ITALIC_RESCUE_SCORE_MIN = 0.64;
+const ITALIC_RESCUE_FG_MIN = 0.50;
+const ITALIC_RESCUE_BG_MIN = 0.94;
+const ITALIC_RESCUE_MAX_NEW = 3;
 
 function buildTextTemplateStyled(text, opts={}){
   const italic = opts.italic !== false;
@@ -2756,7 +2773,38 @@ function italicVariantDiagnosticSearch(source, text){
   const merged=dedupeTemplateCandidates(mergedRaw, 12);
   return {variants, merged};
 }
-// ===== /V90 実験 =====
+
+function collectItalicRescueCandidates(source, text, existingBoxes=[]){
+  const result=italicVariantDiagnosticSearch(source,text);
+  const accepted=[];
+
+  function overlapsExisting(c){
+    return existingBoxes.some(o=>{
+      const ox=o.x ?? o.x0 ?? 0;
+      const oy=o.y ?? o.y0 ?? 0;
+      const ow=o.w ?? ((o.x1??0)-(o.x0??0));
+      const oh=o.h ?? ((o.y1??0)-(o.y0??0));
+      const ix0=Math.max(ox,c.x), iy0=Math.max(oy,c.y);
+      const ix1=Math.min(ox+ow,c.x+c.w), iy1=Math.min(oy+oh,c.y+c.h);
+      if(ix1<=ix0||iy1<=iy0) return false;
+      const inter=(ix1-ix0)*(iy1-iy0);
+      const minArea=Math.min(Math.max(1,ow*oh),c.w*c.h);
+      return inter/minArea>=0.35;
+    });
+  }
+
+  for(const c of (result.merged||[])){
+    if(c.score<ITALIC_RESCUE_SCORE_MIN) continue;
+    if(c.fgScore<ITALIC_RESCUE_FG_MIN) continue;
+    if(c.bgScore<ITALIC_RESCUE_BG_MIN) continue;
+    if(overlapsExisting(c)) continue;
+    accepted.push({...c, source:"イタリック救出"});
+    if(accepted.length>=ITALIC_RESCUE_MAX_NEW) break;
+  }
+  return {result, accepted};
+}
+
+// ===== /V90.1 実験 =====
 
 // ===== /V83 実験 =====
 
@@ -2883,7 +2931,7 @@ async function diagnoseOCR(){
     lines.push(`候補：${templateResult.candidates?.length||0}件（白pass ${templateResult.rawCount||0}件 / 白背景除外${templateResult.bgRejectedCount||0}件 / グレーpass ${templateResult.grayScorePassCount||0}件）`);
     (templateResult.candidates||[]).slice(0,20).forEach((c,i)=>lines.push(`  候補${i+1}: score ${c.score.toFixed(3)} / 形状${c.fgScore.toFixed(3)} / 背景${c.bgScore.toFixed(3)} / (${c.x},${c.y},w${c.w},h${c.h})`));
     lines.push(`※ V86ではまだ黒塗りには使用しません。緑枠はCanvasテンプレート検索の候補です。`);
-    lines.push("",`===== V90 コントラスト＋イタリック多段診断 =====`);
+    lines.push("",`===== V90.1 コントラスト＋イタリック救出診断 =====`);
     lines.push(`方式：コントラスト補正 → イタリックテンプレート / 粗探索${ITALIC_COARSE_STEP}px → 局所再探索${ITALIC_REFINE_STEP}px`);
     lines.push(`テンプレートバリエーション：高さ ${ITALIC_VARIANT_HEIGHTS.join("/")}px × 傾き ${ITALIC_VARIANT_SKEWS.map(v=>v.toFixed(2)).join("/")}`);
     const firstVariant=italicVariantResult.variants?.[0];
@@ -2894,7 +2942,7 @@ async function diagnoseOCR(){
     }
     lines.push(`最終候補：${italicVariantResult.merged?.length||0}件`);
     (italicVariantResult.merged||[]).slice(0,10).forEach((c,i)=>lines.push(`  統合候補${i+1}: score ${c.score.toFixed(3)} / 形状${c.fgScore.toFixed(3)} / 背景${c.bgScore.toFixed(3)} / ${c.label} / (${c.x},${c.y},w${c.w},h${c.h})`));
-    lines.push(`※ V90では、由良/真緒のような字形差に対応するため、高さと傾きの少数バリエーションを比較します。オレンジ枠がこの方式の候補です。`);
+    lines.push(`※ V90.1では、実績のあった高さ32/34px・skew 0.00だけに絞り、既存OCRと重複しない高スコア候補は本番の補助黒塗りにも使用します。オレンジ枠がこの方式の候補です。`);
 
 
     lines.push("",`===== V82.1 誤認識救出診断（かな）＋候補bbox仮表示 =====`);
@@ -3024,7 +3072,7 @@ async function diagnoseOCR(){
       box.style.left=`${tr.left+c.x*tr.scaleX}px`; box.style.top=`${tr.top+c.y*tr.scaleY}px`;
       box.style.width=`${c.w*tr.scaleX}px`; box.style.height=`${c.h*tr.scaleY}px`;
       const label=document.createElement('span'); label.className='ocr-debug-label';
-      label.textContent=`V90 ${c.key} ${c.score.toFixed(2)}`;
+      label.textContent=`V90.1 ${c.key} ${c.score.toFixed(2)}`;
       box.appendChild(label); ocrDebugLayer.appendChild(box);
     }
 
