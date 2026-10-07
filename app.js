@@ -2719,6 +2719,202 @@ function geminiTemplateSearch(source, text, results=[], scale=1){
     searchYEnd:rangeMemo?.searchYEnd||sh
   };
 }
+
+// ===== V88.1 実験：二値化＋モルフォロジー比較診断 =====
+// Gemini案の「背景0 / 文字1」の二値パターン比較を試す。
+// A: 二値化のみ
+// B: テンプレートだけ1px膨張
+// C: テンプレート＋スキャン対象の両方を1px膨張
+// まだ診断専用で、本番黒塗りには使わない。
+const MORPH_SCAN_STEP = 2;
+const MORPH_RESULT_LIMIT = 24;
+const MORPH_FG_MIN = 0.72;
+const MORPH_BG_MIN = 0.80;
+const MORPH_SCORE_MIN = 0.79;
+
+function dilateBinaryMask(src, w, h){
+  const out = new Uint8Array(w*h);
+  for(let y=0;y<h;y++){
+    for(let x=0;x<w;x++){
+      const i=y*w+x;
+      if(!src[i]) continue;
+      for(let dy=-1;dy<=1;dy++){
+        const yy=y+dy;
+        if(yy<0||yy>=h) continue;
+        for(let dx=-1;dx<=1;dx++){
+          const xx=x+dx;
+          if(xx<0||xx>=w) continue;
+          out[yy*w+xx]=1;
+        }
+      }
+    }
+  }
+  return out;
+}
+
+function buildMorphTemplate(text){
+  // V86系の比率維持テンプレート（目標文字高32px）を使い、
+  // アルファ値から「文字1 / 背景0」の二値パターンにする。
+  const base = buildTextTemplate(text);
+  if(!base?.canvas || !base.w || !base.h) return null;
+  const g = base.canvas.getContext('2d',{willReadFrequently:true});
+  const d = g.getImageData(0,0,base.w,base.h).data;
+  const mask = new Uint8Array(base.w*base.h);
+  for(let i=0,p=0;i<d.length;i+=4,p++){
+    mask[p] = d[i+3] >= 70 ? 1 : 0;
+  }
+  return {
+    w:base.w,
+    h:base.h,
+    mask,
+    dilated:dilateBinaryMask(mask,base.w,base.h)
+  };
+}
+
+function buildSourceBinaryMasks(source){
+  const sw=source.naturalWidth||source.width, sh=source.naturalHeight||source.height;
+  const c=document.createElement('canvas');
+  c.width=sw; c.height=sh;
+  const g=c.getContext('2d',{willReadFrequently:true});
+  g.drawImage(source,0,0,sw,sh);
+  const d=g.getImageData(0,0,sw,sh).data;
+  const gray=new Uint8Array(sw*sh);
+  const white=new Uint8Array(sw*sh);
+  const grayText=new Uint8Array(sw*sh);
+
+  for(let i=0,p=0;i<d.length;i+=4,p++){
+    const lum=Math.round(d[i]*.299+d[i+1]*.587+d[i+2]*.114);
+    gray[p]=lum;
+    // 白文字向け
+    white[p]=lum>=155?1:0;
+    // グレー文字も拾うため少し低い閾値
+    grayText[p]=lum>=95?1:0;
+  }
+
+  return {
+    sw,sh,gray,
+    white,
+    whiteDilated:dilateBinaryMask(white,sw,sh),
+    grayText,
+    grayDilated:dilateBinaryMask(grayText,sw,sh)
+  };
+}
+
+function scoreBinaryPattern(sourceMask, sw, tplMask, tw, th, x, y){
+  let fgHit=0, fgTotal=0, bgHit=0, bgTotal=0;
+  for(let ty=0;ty<th;ty++){
+    const srcRow=(y+ty)*sw+x;
+    const tplRow=ty*tw;
+    for(let tx=0;tx<tw;tx++){
+      const t=tplMask[tplRow+tx];
+      const s=sourceMask[srcRow+tx];
+      if(t){
+        fgTotal++;
+        if(s) fgHit++;
+      }else{
+        bgTotal++;
+        if(!s) bgHit++;
+      }
+    }
+  }
+  const fgScore=fgTotal?fgHit/fgTotal:0;
+  const bgScore=bgTotal?bgHit/bgTotal:0;
+  const score=fgScore*0.58 + bgScore*0.42;
+  return {score,fgScore,bgScore};
+}
+
+function morphTemplateSearch(source,text){
+  const tpl=buildMorphTemplate(text);
+  if(!tpl) return {candidates:[], variants:[], tpl:null};
+
+  const src=buildSourceBinaryMasks(source);
+  const {sw,sh}=src;
+
+  const searchYStart=Math.floor(sh*TEMPLATE_SEARCH_TOP_RATIO);
+  const searchYEnd=Math.max(searchYStart,sh-tpl.h);
+  const searchXStart=Math.floor(sw*TEMPLATE_SEARCH_LEFT_RATIO);
+  const searchXEnd=Math.max(searchXStart,sw-tpl.w-Math.floor(sw*TEMPLATE_SEARCH_RIGHT_RATIO));
+
+  const variants=[
+    {name:'binary-white', label:'二値化のみ/白', sourceMask:src.white, tplMask:tpl.mask, color:'#8a5cff'},
+    {name:'tpl-dilate-white', label:'テンプレ1px膨張/白', sourceMask:src.white, tplMask:tpl.dilated, color:'#ff8a00'},
+    {name:'both-dilate-white', label:'両方1px膨張/白', sourceMask:src.whiteDilated, tplMask:tpl.dilated, color:'#d946ef'},
+    {name:'binary-gray', label:'二値化のみ/グレー', sourceMask:src.grayText, tplMask:tpl.mask, color:'#4f46e5'},
+    {name:'tpl-dilate-gray', label:'テンプレ1px膨張/グレー', sourceMask:src.grayText, tplMask:tpl.dilated, color:'#f97316'},
+    {name:'both-dilate-gray', label:'両方1px膨張/グレー', sourceMask:src.grayDilated, tplMask:tpl.dilated, color:'#c026d3'}
+  ];
+
+  const all=[];
+  const stats=[];
+
+  for(const variant of variants){
+    const found=[];
+    let tested=0, scorePass=0;
+
+    for(let y=searchYStart;y<=searchYEnd;y+=MORPH_SCAN_STEP){
+      for(let x=searchXStart;x<=searchXEnd;x+=MORPH_SCAN_STEP){
+        tested++;
+        const s=scoreBinaryPattern(variant.sourceMask,sw,variant.tplMask,tpl.w,tpl.h,x,y);
+        if(s.score < MORPH_SCORE_MIN || s.fgScore < MORPH_FG_MIN || s.bgScore < MORPH_BG_MIN) continue;
+        scorePass++;
+
+        // 背景が暗いチャット領域を優先。外周4点の平均が明るすぎる場所は除外。
+        const cx=Math.min(sw-1,Math.max(0,x+Math.floor(tpl.w/2)));
+        const cy=Math.min(sh-1,Math.max(0,y+Math.floor(tpl.h/2)));
+        const samples=[
+          src.gray[y*sw+x],
+          src.gray[y*sw+Math.min(sw-1,x+tpl.w-1)],
+          src.gray[Math.min(sh-1,y+tpl.h-1)*sw+x],
+          src.gray[Math.min(sh-1,y+tpl.h-1)*sw+Math.min(sw-1,x+tpl.w-1)],
+          src.gray[cy*sw+cx]
+        ];
+        const mean=samples.reduce((a,b)=>a+b,0)/samples.length;
+        if(mean>190) continue;
+
+        found.push({x,y,w:tpl.w,h:tpl.h,...s,variant:variant.name,label:variant.label,color:variant.color});
+      }
+    }
+
+    found.sort((a,b)=>b.score-a.score);
+    const kept=[];
+    for(const c of found){
+      const dup=kept.some(k=>{
+        const ix=Math.max(0,Math.min(c.x+c.w,k.x+k.w)-Math.max(c.x,k.x));
+        const iy=Math.max(0,Math.min(c.y+c.h,k.y+k.h)-Math.max(c.y,k.y));
+        return ix*iy > Math.min(c.w*c.h,k.w*k.h)*0.35;
+      });
+      if(!dup) kept.push(c);
+      if(kept.length>=MORPH_RESULT_LIMIT) break;
+    }
+
+    stats.push({name:variant.name,label:variant.label,tested,scorePass,kept:kept.length});
+    all.push(...kept);
+  }
+
+  // 異なるvariantで同じ場所に出た候補は、最高スコアだけ残す。
+  all.sort((a,b)=>b.score-a.score);
+  const merged=[];
+  for(const c of all){
+    const dup=merged.some(k=>{
+      const ix=Math.max(0,Math.min(c.x+c.w,k.x+k.w)-Math.max(c.x,k.x));
+      const iy=Math.max(0,Math.min(c.y+c.h,k.y+k.h)-Math.max(c.y,k.y));
+      return ix*iy > Math.min(c.w*c.h,k.w*k.h)*0.40;
+    });
+    if(!dup) merged.push(c);
+    if(merged.length>=MORPH_RESULT_LIMIT) break;
+  }
+
+  return {
+    tpl,
+    candidates:merged,
+    stats,
+    step:MORPH_SCAN_STEP,
+    searchXStart,searchXEnd,searchYStart,searchYEnd,
+    thresholds:{score:MORPH_SCORE_MIN,fg:MORPH_FG_MIN,bg:MORPH_BG_MIN}
+  };
+}
+// ===== /V88.1 実験 =====
+
 // ===== /V88 実験 =====
 
 // ===== /V83 実験 =====
@@ -2742,6 +2938,7 @@ async function diagnoseOCR(){
     const {results,scale,ocrCanvas,stats}=await collectOcrResults(worker,target);
     const templateResult=templateSearch(sourceImage,target);
     const geminiTemplateResult=geminiTemplateSearch(sourceImage,target,results,scale);
+    const morphTemplateResult=morphTemplateSearch(sourceImage,target);
     const ocrElapsed=performance.now()-ocrStarted;
     const refineStarted=performance.now();
     const refine=await refineNearCandidates(worker,results,ocrCanvas,target,scale);
@@ -2855,6 +3052,15 @@ async function diagnoseOCR(){
     lines.push(`候補：${geminiTemplateResult.candidates?.length||0}件（生候補合計 ${geminiTemplateResult.rawCandidates||0}件 / 重複除外後）`);
     (geminiTemplateResult.candidates||[]).slice(0,20).forEach((c,i)=>lines.push(`  候補${i+1}: score ${c.score.toFixed(3)} / 背景${c.bgScore.toFixed(3)} / ${c.pass} / font ${c.fontSize}px / (${c.x},${c.y},w${c.w},h${c.h})`));
     lines.push(`※ V88ではGemini案ベースの高速ピクセル比較を診断専用で試しています。青枠はこの方式の候補です。`);
+
+    lines.push("",`===== V88.1 二値化＋モルフォロジー診断 =====`);
+    lines.push(`対象文字：${target} / テンプレート：${morphTemplateResult.tpl?.w||0}x${morphTemplateResult.tpl?.h||0}px / 探索間隔：${morphTemplateResult.step||MORPH_SCAN_STEP}px`);
+    lines.push(`閾値：総合${morphTemplateResult.thresholds?.score||MORPH_SCORE_MIN} / 文字${morphTemplateResult.thresholds?.fg||MORPH_FG_MIN} / 背景${morphTemplateResult.thresholds?.bg||MORPH_BG_MIN}`);
+    lines.push(`探索範囲：x=${morphTemplateResult.searchXStart||0}〜${morphTemplateResult.searchXEnd||0} / y=${morphTemplateResult.searchYStart||0}〜${morphTemplateResult.searchYEnd||0}`);
+    (morphTemplateResult.stats||[]).forEach(s=>lines.push(`  ${s.label}: 判定${s.tested}点 / 閾値通過${s.scorePass}件 / 重複整理後${s.kept}件`));
+    lines.push(`最終候補：${morphTemplateResult.candidates?.length||0}件`);
+    (morphTemplateResult.candidates||[]).slice(0,20).forEach((c,i)=>lines.push(`  候補${i+1}: score ${c.score.toFixed(3)} / 文字${c.fgScore.toFixed(3)} / 背景${c.bgScore.toFixed(3)} / ${c.label} / (${c.x},${c.y},w${c.w},h${c.h})`));
+    lines.push(`※ V88.1では黒塗りには使用しません。紫〜オレンジ系の枠が二値化＋膨張比較の候補です。`);
 
     lines.push("",`===== V82.1 誤認識救出診断（かな）＋候補bbox仮表示 =====`);
     const v81KanaRescue=findV81KanaRescue(results,target,scale);
@@ -2984,6 +3190,16 @@ async function diagnoseOCR(){
       box.style.width=`${c.w*tr.scaleX}px`; box.style.height=`${c.h*tr.scaleY}px`;
       const label=document.createElement('span'); label.className='ocr-debug-label';
       label.textContent=`V88: ${target} ${c.score.toFixed(2)} ${c.pass}`; box.appendChild(label); ocrDebugLayer.appendChild(box);
+    }
+
+    // V88.1: 二値化＋モルフォロジー候補を紫〜オレンジ系の枠で表示。
+    for(const c of (morphTemplateResult.candidates||[])){
+      const box=document.createElement('div');
+      box.className='ocr-debug-box'; box.style.borderColor=c.color||'#8a5cff';
+      box.style.left=`${tr.left+c.x*tr.scaleX}px`; box.style.top=`${tr.top+c.y*tr.scaleY}px`;
+      box.style.width=`${c.w*tr.scaleX}px`; box.style.height=`${c.h*tr.scaleY}px`;
+      const label=document.createElement('span'); label.className='ocr-debug-label';
+      label.textContent=`V88.1 ${c.label} ${c.score.toFixed(2)}`; box.appendChild(label); ocrDebugLayer.appendChild(box);
     }
 
     // V82.1: かな誤認識候補は黒塗りせず、画像上に赤枠だけ表示。
