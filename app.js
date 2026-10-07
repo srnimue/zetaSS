@@ -2536,7 +2536,7 @@ candidates.sort((a,b)=>b.score-a.score);
   };
 }
 
-// ===== V90.2 実験：コントラスト補正＋イタリック多段テンプレート診断 =====
+// ===== V90.3 実験：コントラスト補正＋イタリック多段テンプレート診断 =====
 // 真緒のような画数の多い文字も考慮し、
 // コントラスト補正後の画像に対して
 // 1) テンプレート高さ 30 / 32 / 34px
@@ -2547,6 +2547,7 @@ const ITALIC_VARIANT_HEIGHTS = [32, 34];
 const ITALIC_VARIANT_SKEWS = [0.00];
 const ITALIC_COARSE_STEP = 6;
 const ITALIC_REFINE_STEP = 2;
+const ITALIC_SECONDARY_OFFSET = 3;
 const ITALIC_COARSE_LIMIT = 10;
 const ITALIC_FINAL_LIMIT = 6;
 const ITALIC_RESCUE_SCORE_MIN = 0.62;
@@ -2678,6 +2679,16 @@ function scoreItalicCandidate(gray, sw, x, y, tpl, config){
   return {score, fgScore, bgScore};
 }
 
+
+function buildScanPositions(start, end, step, offset=0){
+  const arr=[];
+  for(let v=start+offset; v<=end; v+=step) arr.push(v);
+  if(!arr.length || arr[arr.length-1]!==end) arr.push(end);
+  const uniq=[...new Set(arr.filter(v=>v>=start && v<=end))];
+  uniq.sort((a,b)=>a-b);
+  return uniq;
+}
+
 function searchContrastItalicVariant(gray, sw, sh, tpl, config={}){
   if(!tpl?.w || tpl.w>=sw || tpl.h>=sh){
     return {tpl, coarsePassCount:0, candidates:[], searchXStart:0, searchXEnd:sw, searchYStart:0, searchYEnd:sh};
@@ -2707,14 +2718,23 @@ function searchContrastItalicVariant(gray, sw, sh, tpl, config={}){
 
   const coarse=[];
   let coarsePassCount=0;
-  for(let y=searchYStart;y<=searchYEnd;y+=ITALIC_COARSE_STEP){
+  const yPositions=[...new Set([
+    ...buildScanPositions(searchYStart, searchYEnd, ITALIC_COARSE_STEP, 0),
+    ...buildScanPositions(searchYStart, searchYEnd, ITALIC_COARSE_STEP, ITALIC_SECONDARY_OFFSET)
+  ])].sort((a,b)=>a-b);
+  const xPositions=[...new Set([
+    ...buildScanPositions(searchXStart, searchXEnd, ITALIC_COARSE_STEP, 0),
+    ...buildScanPositions(searchXStart, searchXEnd, ITALIC_COARSE_STEP, ITALIC_SECONDARY_OFFSET)
+  ])].sort((a,b)=>a-b);
+
+  for(const y of yPositions){
     let rowOk=false;
     for(let yy=0;yy<tpl.h;yy+=Math.max(2,ITALIC_COARSE_STEP)){
       if(rowHasGray[y+yy]){ rowOk=true; break; }
     }
     if(!rowOk) continue;
 
-    for(let x=searchXStart;x<=searchXEnd;x+=ITALIC_COARSE_STEP){
+    for(const x of xPositions){
       const s=scoreItalicCandidate(gray, sw, x, y, tpl, config);
       if(s.score>=coarseThreshold && s.bgScore>=coarseBgMin){
         coarsePassCount++;
@@ -2804,7 +2824,7 @@ function collectItalicRescueCandidates(source, text, existingBoxes=[]){
   return {result, accepted};
 }
 
-// ===== /V90.2 実験 =====
+// ===== /V90.3 実験 =====
 
 // ===== /V83 実験 =====
 
@@ -2931,7 +2951,7 @@ async function diagnoseOCR(){
     lines.push(`候補：${templateResult.candidates?.length||0}件（白pass ${templateResult.rawCount||0}件 / 白背景除外${templateResult.bgRejectedCount||0}件 / グレーpass ${templateResult.grayScorePassCount||0}件）`);
     (templateResult.candidates||[]).slice(0,20).forEach((c,i)=>lines.push(`  候補${i+1}: score ${c.score.toFixed(3)} / 形状${c.fgScore.toFixed(3)} / 背景${c.bgScore.toFixed(3)} / (${c.x},${c.y},w${c.w},h${c.h})`));
     lines.push(`※ V86ではまだ黒塗りには使用しません。緑枠はCanvasテンプレート検索の候補です。`);
-    lines.push("",`===== V90.2 コントラスト＋イタリック救出診断 =====`);
+    lines.push("",`===== V90.3 コントラスト＋イタリック救出診断 =====`);
     lines.push(`方式：コントラスト補正 → イタリックテンプレート / 粗探索${ITALIC_COARSE_STEP}px → 局所再探索${ITALIC_REFINE_STEP}px`);
     lines.push(`テンプレートバリエーション：高さ ${ITALIC_VARIANT_HEIGHTS.join("/")}px × 傾き ${ITALIC_VARIANT_SKEWS.map(v=>v.toFixed(2)).join("/")}`);
     const firstVariant=italicVariantResult.variants?.[0];
@@ -2942,7 +2962,7 @@ async function diagnoseOCR(){
     }
     lines.push(`最終候補：${italicVariantResult.merged?.length||0}件`);
     (italicVariantResult.merged||[]).slice(0,10).forEach((c,i)=>lines.push(`  統合候補${i+1}: score ${c.score.toFixed(3)} / 形状${c.fgScore.toFixed(3)} / 背景${c.bgScore.toFixed(3)} / ${c.label} / (${c.x},${c.y},w${c.w},h${c.h})`));
-    lines.push(`※ V90.2では、実績のあった高さ32/34px・skew 0.00を維持しつつ、粗候補数・局所再探索範囲・採用閾値を少し緩めています。既存OCRと重複しない高スコア候補は本番の補助黒塗りにも使用します。オレンジ枠がこの方式の候補です。`);
+    lines.push(`※ V90.3では、実績のあった高さ32/34px・skew 0.00を維持したまま、粗探索で通常格子に加えて3pxずらし格子も確認し、X/Y末尾位置も必ず探索するようにしています。既存OCRと重複しない高スコア候補は本番の補助黒塗りにも使用します。オレンジ枠がこの方式の候補です。`);
 
 
     lines.push("",`===== V82.1 誤認識救出診断（かな）＋候補bbox仮表示 =====`);
@@ -3072,7 +3092,7 @@ async function diagnoseOCR(){
       box.style.left=`${tr.left+c.x*tr.scaleX}px`; box.style.top=`${tr.top+c.y*tr.scaleY}px`;
       box.style.width=`${c.w*tr.scaleX}px`; box.style.height=`${c.h*tr.scaleY}px`;
       const label=document.createElement('span'); label.className='ocr-debug-label';
-      label.textContent=`V90.2 ${c.key} ${c.score.toFixed(2)}`;
+      label.textContent=`V90.3 ${c.key} ${c.score.toFixed(2)}`;
       box.appendChild(label); ocrDebugLayer.appendChild(box);
     }
 
