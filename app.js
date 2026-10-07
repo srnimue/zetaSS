@@ -1483,6 +1483,25 @@ async function recognizeVariant(worker,inputCanvas,target,mode,scale,offsetX=0,o
 // 表示用canvasは黒塗り実行後は既に黒塗り済みになっているため、そこから切り出すと
 // 「既に黒く塗られた場所」を再OCRすることになり、見つからず「変更なし」という
 // 誤った（一見正しく見える）結果になる。
+function exactHitNeedsRefine(box){
+    const symbols = box?.symbols || [];
+    if (symbols.length < 2 || !box?.h || !box?.w) return true;
+    const entries = symbols.map(s => s?.bbox).filter(b => b && Number.isFinite(b.x0) && Number.isFinite(b.x1) && Number.isFinite(b.y0) && Number.isFinite(b.y1) && b.x1>b.x0 && b.y1>b.y0).map(b => ({b,w:b.x1-b.x0,h:b.y1-b.y0}));
+    if (entries.length < 2) return true;
+    const plausible = entries.every(e => e.h >= box.h*0.40 && e.h <= box.h*1.35 && e.w > 0 && e.w <= box.h*OCR_SYMBOL_MAX_WIDTH_HEIGHT_RATIO);
+    if (!plausible) return true;
+    const sx0=Math.min(...entries.map(e=>e.b.x0)), sx1=Math.max(...entries.map(e=>e.b.x1));
+    const sy0=Math.min(...entries.map(e=>e.b.y0)), sy1=Math.max(...entries.map(e=>e.b.y1));
+    const sw=sx1-sx0, sh=sy1-sy0;
+    if (sw < box.w*0.45 || sw > box.w*1.35) return true;
+    if (sh < box.h*0.40 || sh > box.h*1.30) return true;
+    if (entries.length===2){
+        const ratio=Math.max(entries[0].w,entries[1].w)/Math.max(1,Math.min(entries[0].w,entries[1].w));
+        if (ratio>2.2) return true;
+    }
+    return false;
+}
+
 async function refineExactHitBox(worker, box, target) {
     const padX = Math.max(30, box.w);
     // 縦方向は広げすぎない。ここを広げすぎると、吹き出し内の次の行まで
@@ -1925,12 +1944,15 @@ async function run(){
       x:b.x0, y:b.y0, w:b.x1-b.x0, h:b.y1-b.y0, symbols:b.symbols||[], source:"OCR"
     }));
 
-    // 完全一致した箇所でも、周辺ノイズが少ない状態で高倍率再OCRし、
-    // 文字1つ分ズレるようなbboxの誤検出を取り直す。見つからなければ元のboxのまま。
-    status("OCR中…\n黒塗り位置を検証しています。");
+    // V90.8: 完全一致HITは、bboxが怪しい箇所だけ高倍率再OCRする。
+    let exactRefineAttempted = 0;
+    let exactRefineSkipped = 0;
     for(let i=0;i<paintBoxes.length;i++){
+      if (!exactHitNeedsRefine(paintBoxes[i])) { exactRefineSkipped++; continue; }
+      if (exactRefineAttempted === 0) status("OCR中…\n位置が怪しい箇所だけ再確認しています。");
       const refinedBox=await refineExactHitBox(worker,paintBoxes[i],target);
       paintBoxes[i]={...paintBoxes[i],...refinedBox};
+      exactRefineAttempted++;
     }
 
     // 通常OCRで拾えなかった候補だけ、V33の局所再OCRを実行。
@@ -2007,7 +2029,7 @@ async function run(){
     saveBtn.disabled=false; manualBtn.disabled=false;
     const italicAdded = italicRescue?.accepted?.length || 0;
     const localAdded = Math.max(0, paintBoxes.length - matches.length - italicAdded);
-    status(`黒塗り完了：${manualStamps.length}箇所\n通常OCR：${matches.length}箇所 / 追加局所OCR：${localAdded}箇所 / イタリック救出：${italicAdded}箇所`);
+    status(`黒塗り完了：${manualStamps.length}箇所\n通常OCR：${matches.length}箇所 / 追加局所OCR：${localAdded}箇所 / イタリック救出：${italicAdded}箇所\n位置再確認：${exactRefineAttempted}件 / 省略：${exactRefineSkipped}件`);
   }catch(error){status("OCRでエラーが発生しました。下のエラー詳細を確認してください。",error);}
 }
 
@@ -2034,7 +2056,7 @@ const TEMPLATE_GRAY_BG_MAX=75;
 const TEMPLATE_GRAY_SCORE_THRESHOLD=0.70;
 const TEMPLATE_GRAY_MIN_BG_SCORE=0.50;
 
-// ===== V90.7 実験：コントラスト補正＋イタリック多段テンプレート診断 =====
+// ===== V90.8 実験：コントラスト補正＋イタリック多段テンプレート診断 =====
 // 真緒のような画数の多い文字も考慮し、
 // コントラスト補正後の画像に対して
 // 1) テンプレート高さ 30 / 32 / 34px
@@ -2322,7 +2344,7 @@ function collectItalicRescueCandidates(source, text, existingBoxes=[]){
   return {result, accepted};
 }
 
-// ===== /V90.7 実験 =====
+// ===== /V90.8 実験 =====
 
 // ===== /V83 実験 =====
 
@@ -2440,7 +2462,7 @@ async function diagnoseOCR(){
     lines.push(`色抽出OCR：${stats.colorHitCount||0}件 / ${(stats.colorMs/1000).toFixed(2)}秒`);
     lines.push(`※ V68の全領域走査方式を診断用にも使用。V70本体では、この局所OCRのHITを追加の黒塗り候補として統合します。`);
 
-    lines.push("",`===== V90.7 コントラスト＋イタリック救出診断 =====`);
+    lines.push("",`===== V90.8 コントラスト＋イタリック救出診断 =====`);
     lines.push(`方式：コントラスト補正 → イタリックテンプレート / 粗探索${ITALIC_COARSE_STEP}px → 局所再探索${ITALIC_REFINE_STEP}px`);
     lines.push(`テンプレートバリエーション：高さ ${ITALIC_VARIANT_HEIGHTS.join("/")}px × 傾き ${ITALIC_VARIANT_SKEWS.map(v=>v.toFixed(2)).join("/")}`);
     const firstVariant=italicVariantResult.variants?.[0];
@@ -2525,7 +2547,7 @@ async function diagnoseOCR(){
       box.style.left=`${tr.left+c.x*tr.scaleX}px`; box.style.top=`${tr.top+c.y*tr.scaleY}px`;
       box.style.width=`${c.w*tr.scaleX}px`; box.style.height=`${c.h*tr.scaleY}px`;
       const label=document.createElement('span'); label.className='ocr-debug-label';
-      label.textContent=`V90.7 ${c.key} ${c.score.toFixed(2)}`;
+      label.textContent=`V90.8 ${c.key} ${c.score.toFixed(2)}`;
       box.appendChild(label); ocrDebugLayer.appendChild(box);
     }
 
