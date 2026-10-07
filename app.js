@@ -2913,6 +2913,264 @@ function morphTemplateSearch(source,text){
     thresholds:{score:MORPH_SCORE_MIN,fg:MORPH_FG_MIN,bg:MORPH_BG_MIN}
   };
 }
+
+// ===== V88.2 実験：コントラスト補正＋イタリックテンプレート診断 =====
+// 地の文（黒背景＋グレー文字＋イタリック）を想定し、
+// 1) 通常テンプレート / 元画像
+// 2) イタリックテンプレート / 元画像
+// 3) コントラスト補正後画像 / イタリックテンプレート
+// の3系統を診断専用で比較する。
+
+function buildTextTemplateStyled(text, opts={}){
+  const italic = !!opts.italic;
+  const color = opts.color || '#fff';
+  const style = italic ? 'italic ' : '';
+  const m=document.createElement('canvas');
+  const mc=m.getContext('2d');
+  mc.font=`${style}400 ${TEMPLATE_BASE_FONT_SIZE}px ${TEMPLATE_FONT_STACK}`;
+  const met=mc.measureText(text);
+  const rawW=Math.ceil(met.width)+18;
+  const rawH=Math.ceil(TEMPLATE_BASE_FONT_SIZE*1.9);
+  m.width=rawW; m.height=rawH;
+
+  const g=m.getContext('2d',{willReadFrequently:true});
+  g.clearRect(0,0,rawW,rawH);
+  g.font=`${style}400 ${TEMPLATE_BASE_FONT_SIZE}px ${TEMPLATE_FONT_STACK}`;
+  g.fillStyle=color;
+  g.textBaseline='alphabetic';
+  g.fillText(text,8,TEMPLATE_BASE_FONT_SIZE+2);
+
+  const d=g.getImageData(0,0,rawW,rawH).data;
+  let minX=rawW,minY=rawH,maxX=-1,maxY=-1;
+  for(let y=0;y<rawH;y++) for(let x=0;x<rawW;x++){
+    if(d[(y*rawW+x)*4+3]>=70){
+      if(x<minX)minX=x; if(x>maxX)maxX=x;
+      if(y<minY)minY=y; if(y>maxY)maxY=y;
+    }
+  }
+  if(maxX<minX||maxY<minY) return {w:0,h:0,samples:[],bgSamples:[],italic,fontSize:TEMPLATE_BASE_FONT_SIZE};
+
+  const cropW=maxX-minX+1, cropH=maxY-minY+1;
+  const targetH=TEMPLATE_TARGET_HEIGHT;
+  const scale=targetH/cropH;
+  const targetW=Math.max(1,Math.round(cropW*scale));
+
+  const resized=document.createElement('canvas');
+  resized.width=targetW; resized.height=targetH;
+  const rg=resized.getContext('2d',{willReadFrequently:true});
+  rg.imageSmoothingEnabled=true;
+  rg.clearRect(0,0,targetW,targetH);
+  rg.drawImage(m,minX,minY,cropW,cropH,0,0,targetW,targetH);
+
+  const rd=rg.getImageData(0,0,targetW,targetH).data;
+  const fg=[], bg=[];
+  for(let y=0;y<targetH;y++) for(let x=0;x<targetW;x++){
+    const a=rd[(y*targetW+x)*4+3];
+    if(a>=90) fg.push({x,y,a:a/255});
+    else if(a<=20) bg.push({x,y});
+  }
+  const fgStride=Math.max(1,Math.ceil(fg.length/260));
+  const bgStride=Math.max(1,Math.ceil(bg.length/220));
+  const fgSamples=[], bgSamples=[];
+  for(let i=0;i<fg.length;i+=fgStride) fgSamples.push(fg[i]);
+  for(let i=0;i<bg.length;i+=bgStride) bgSamples.push(bg[i]);
+
+  return {
+    canvas:resized,w:targetW,h:targetH,
+    samples:fgSamples,bgSamples,
+    rawW:cropW,rawH:cropH,
+    fontSize:TEMPLATE_BASE_FONT_SIZE,
+    targetHeight:targetH,
+    italic
+  };
+}
+
+function createGrayFromSource(source, contrastBoost=false){
+  const sw=source.naturalWidth||source.width, sh=source.naturalHeight||source.height;
+  const c=document.createElement('canvas'); c.width=sw; c.height=sh;
+  const g=c.getContext('2d',{willReadFrequently:true});
+  g.drawImage(source,0,0,sw,sh);
+  const img=g.getImageData(0,0,sw,sh), d=img.data;
+  const gray=new Uint8Array(sw*sh);
+  for(let i=0,p=0;i<d.length;i+=4,p++){
+    let v=Math.round(d[i]*.299+d[i+1]*.587+d[i+2]*.114);
+    if(contrastBoost){
+      v=Math.max(0,Math.min(255,Math.round((v-128)*1.55+128)));
+    }
+    gray[p]=v;
+  }
+  return {gray, sw, sh};
+}
+
+function searchTemplateOnGray(gray, sw, sh, tpl, config={}){
+  if(!tpl?.w || tpl.w>=sw || tpl.h>=sh){
+    return {tpl, candidates:[], rawCount:0, bgRejectedCount:0, grayScorePassCount:0, searchXStart:0, searchXEnd:sw, searchYStart:0, searchYEnd:sh};
+  }
+
+  const searchYStart=Math.floor(sh*TEMPLATE_SEARCH_TOP_RATIO);
+  const searchYEnd=Math.max(searchYStart,sh-tpl.h);
+  const searchXStart=Math.floor(sw*TEMPLATE_SEARCH_LEFT_RATIO);
+  const searchXEnd=Math.max(searchXStart,sw-tpl.w-Math.floor(sw*TEMPLATE_SEARCH_RIGHT_RATIO));
+
+  const minBrightness=config.minBrightness ?? TEMPLATE_MIN_BRIGHTNESS;
+  const whiteBgMin=config.whiteBgMin ?? TEMPLATE_MIN_BG_SCORE;
+  const whiteScoreThreshold=config.whiteScoreThreshold ?? TEMPLATE_SCORE_THRESHOLD;
+  const grayTextMin=config.grayTextMin ?? TEMPLATE_GRAY_TEXT_MIN;
+  const grayTextMax=config.grayTextMax ?? TEMPLATE_GRAY_TEXT_MAX;
+  const grayBgMax=config.grayBgMax ?? TEMPLATE_GRAY_BG_MAX;
+  const grayScoreThreshold=config.grayScoreThreshold ?? TEMPLATE_GRAY_SCORE_THRESHOLD;
+  const grayMinBgScore=config.grayMinBgScore ?? TEMPLATE_GRAY_MIN_BG_SCORE;
+  const step=config.step ?? TEMPLATE_STEP;
+
+  const rowHasWhite=new Uint8Array(sh);
+  for(let y=searchYStart;y<=Math.min(sh-1,searchYEnd+tpl.h);y++){
+    let count=0;
+    for(let x=searchXStart;x<=searchXEnd;x+=3){
+      if(gray[y*sw+x]>=minBrightness){ if(++count>=8) break; }
+    }
+    if(count>=8) rowHasWhite[y]=1;
+  }
+
+  const candidates=[];
+  let rawCount=0, bgRejectedCount=0;
+
+  for(let y=searchYStart;y<=searchYEnd;y+=step){
+    let rowOk=false;
+    for(let yy=0;yy<tpl.h;yy+=Math.max(2,step)){
+      if(rowHasWhite[y+yy]){ rowOk=true; break; }
+    }
+    if(!rowOk) continue;
+
+    for(let x=searchXStart;x<=searchXEnd;x+=step){
+      let fgGood=0, fgTotal=0, bgGood=0, bgTotal=0;
+      for(const p of tpl.samples){
+        const v=gray[(y+p.y)*sw+(x+p.x)];
+        if(v>=minBrightness) fgGood++;
+        fgTotal++;
+      }
+      for(const p of tpl.bgSamples){
+        const v=gray[(y+p.y)*sw+(x+p.x)];
+        if(v<minBrightness) bgGood++;
+        bgTotal++;
+      }
+      const fgScore=fgTotal?fgGood/fgTotal:0;
+      const bgScore=bgTotal?bgGood/bgTotal:0;
+      const score=fgScore*TEMPLATE_FG_WEIGHT+bgScore*TEMPLATE_BG_WEIGHT;
+      if(score>=whiteScoreThreshold){
+        rawCount++;
+        if(bgScore>=whiteBgMin){
+          candidates.push({x,y,w:tpl.w,h:tpl.h,score,fgScore,bgScore,pass:'white'});
+        }else{
+          bgRejectedCount++;
+        }
+      }
+    }
+  }
+
+  const rowHasGray=new Uint8Array(sh);
+  for(let y=searchYStart;y<=Math.min(sh-1,searchYEnd+tpl.h);y++){
+    let count=0;
+    for(let x=searchXStart;x<=searchXEnd;x+=3){
+      const v=gray[y*sw+x];
+      if(v>=grayTextMin && v<=grayTextMax){
+        if(++count>=6) break;
+      }
+    }
+    if(count>=6) rowHasGray[y]=1;
+  }
+
+  let grayScorePassCount=0;
+  for(let y=searchYStart;y<=searchYEnd;y+=step){
+    let rowOk=false;
+    for(let yy=0;yy<tpl.h;yy+=Math.max(2,step)){
+      if(rowHasGray[y+yy]){ rowOk=true; break; }
+    }
+    if(!rowOk) continue;
+
+    for(let x=searchXStart;x<=searchXEnd;x+=step){
+      let fgHit=0, fgTotal=0, bgHit=0, bgTotal=0;
+      for(const p of tpl.samples){
+        const v=gray[(y+p.y)*sw+(x+p.x)];
+        if(v>=grayTextMin && v<=grayTextMax) fgHit++;
+        fgTotal++;
+      }
+      for(const p of tpl.bgSamples){
+        const v=gray[(y+p.y)*sw+(x+p.x)];
+        if(v<=grayBgMax) bgHit++;
+        bgTotal++;
+      }
+      const fgScore=fgTotal?fgHit/fgTotal:0;
+      const bgScore=bgTotal?bgHit/bgTotal:0;
+      const score=fgScore*TEMPLATE_FG_WEIGHT+bgScore*TEMPLATE_BG_WEIGHT;
+      if(score>=grayScoreThreshold){
+        grayScorePassCount++;
+        if(bgScore>=grayMinBgScore){
+          candidates.push({x,y,w:tpl.w,h:tpl.h,score,fgScore,bgScore,pass:'gray'});
+        }
+      }
+    }
+  }
+
+  candidates.sort((a,b)=>b.score-a.score);
+  const deduped=[];
+  for(const c of candidates){
+    const dup=deduped.some(k=>{
+      const ix=Math.max(0, Math.min(c.x+c.w,k.x+k.w)-Math.max(c.x,k.x));
+      const iy=Math.max(0, Math.min(c.y+c.h,k.y+k.h)-Math.max(c.y,k.y));
+      return ix*iy > Math.min(c.w*c.h, k.w*k.h) * 0.35;
+    });
+    if(!dup) deduped.push(c);
+    if(deduped.length>=20) break;
+  }
+
+  return {tpl, candidates:deduped, rawCount, bgRejectedCount, grayScorePassCount, searchXStart, searchXEnd, searchYStart, searchYEnd, step};
+}
+
+function contrastItalicDiagnosticSearch(source, text){
+  const original=createGrayFromSource(source,false);
+  const contrast=createGrayFromSource(source,true);
+
+  const variants=[
+    {
+      key:'normal',
+      label:'通常テンプレート / 元画像',
+      color:'#22c55e',
+      tpl:buildTextTemplateStyled(text,{italic:false}),
+      grayInfo:original,
+      config:{}
+    },
+    {
+      key:'italic',
+      label:'イタリックテンプレート / 元画像',
+      color:'#0ea5e9',
+      tpl:buildTextTemplateStyled(text,{italic:true}),
+      grayInfo:original,
+      config:{ grayTextMin:80, grayTextMax:220, grayBgMax:88, grayScoreThreshold:0.68, grayMinBgScore:0.48 }
+    },
+    {
+      key:'contrastItalic',
+      label:'コントラスト補正 → イタリックテンプレート',
+      color:'#f59e0b',
+      tpl:buildTextTemplateStyled(text,{italic:true}),
+      grayInfo:contrast,
+      config:{ minBrightness:172, whiteBgMin:0.70, whiteScoreThreshold:0.73, grayTextMin:95, grayTextMax:235, grayBgMax:82, grayScoreThreshold:0.66, grayMinBgScore:0.46 }
+    }
+  ];
+
+  const results=[];
+  for(const v of variants){
+    const searched=searchTemplateOnGray(v.grayInfo.gray,v.grayInfo.sw,v.grayInfo.sh,v.tpl,v.config);
+    searched.label=v.label;
+    searched.color=v.color;
+    searched.key=v.key;
+    searched.italic=!!v.tpl?.italic;
+    searched.contrast = v.key === 'contrastItalic';
+    results.push(searched);
+  }
+  return results;
+}
+// ===== /V88.2 実験 =====
+
 // ===== /V88.1 実験 =====
 
 // ===== /V88 実験 =====
@@ -2939,6 +3197,7 @@ async function diagnoseOCR(){
     const templateResult=templateSearch(sourceImage,target);
     const geminiTemplateResult=geminiTemplateSearch(sourceImage,target,results,scale);
     const morphTemplateResult=morphTemplateSearch(sourceImage,target);
+    const contrastItalicResults=contrastItalicDiagnosticSearch(sourceImage,target);
     const ocrElapsed=performance.now()-ocrStarted;
     const refineStarted=performance.now();
     const refine=await refineNearCandidates(worker,results,ocrCanvas,target,scale);
@@ -3061,6 +3320,16 @@ async function diagnoseOCR(){
     lines.push(`最終候補：${morphTemplateResult.candidates?.length||0}件`);
     (morphTemplateResult.candidates||[]).slice(0,20).forEach((c,i)=>lines.push(`  候補${i+1}: score ${c.score.toFixed(3)} / 文字${c.fgScore.toFixed(3)} / 背景${c.bgScore.toFixed(3)} / ${c.label} / (${c.x},${c.y},w${c.w},h${c.h})`));
     lines.push(`※ V88.1では黒塗りには使用しません。紫〜オレンジ系の枠が二値化＋膨張比較の候補です。`);
+    lines.push("",`===== V88.2 コントラスト補正＋イタリック診断 =====`);
+    for(const r of (contrastItalicResults||[])){
+      lines.push(`【${r.label}】`);
+      lines.push(`テンプレート：${r.tpl?.w||0}x${r.tpl?.h||0}px / 探索間隔：${r.step||TEMPLATE_STEP}px / italic:${r.italic ? "yes" : "no"} / contrast:${r.contrast ? "yes" : "no"}`);
+      lines.push(`探索範囲：x=${r.searchXStart||0}〜${r.searchXEnd||0} / y=${r.searchYStart||0}〜${r.searchYEnd||0}`);
+      lines.push(`候補：${r.candidates?.length||0}件（白pass ${r.rawCount||0}件 / 白背景除外${r.bgRejectedCount||0}件 / グレーpass ${r.grayScorePassCount||0}件）`);
+      (r.candidates||[]).slice(0,10).forEach((c,i)=>lines.push(`  候補${i+1}: score ${c.score.toFixed(3)} / 形状${c.fgScore.toFixed(3)} / 背景${c.bgScore.toFixed(3)} / ${c.pass} / (${c.x},${c.y},w${c.w},h${c.h})`));
+    }
+    lines.push(`※ V88.2では、通常テンプレ・イタリックテンプレ・コントラスト補正＋イタリックの3系統を診断専用で比較します。黄緑 / 水色 / オレンジ枠がこの方式の候補です。`);
+
 
     lines.push("",`===== V82.1 誤認識救出診断（かな）＋候補bbox仮表示 =====`);
     const v81KanaRescue=findV81KanaRescue(results,target,scale);
@@ -3200,6 +3469,19 @@ async function diagnoseOCR(){
       box.style.width=`${c.w*tr.scaleX}px`; box.style.height=`${c.h*tr.scaleY}px`;
       const label=document.createElement('span'); label.className='ocr-debug-label';
       label.textContent=`V88.1 ${c.label} ${c.score.toFixed(2)}`; box.appendChild(label); ocrDebugLayer.appendChild(box);
+    }
+
+    // V88.2: コントラスト補正＋イタリック診断候補を黄緑 / 水色 / オレンジで表示。
+    for(const r of (contrastItalicResults||[])){
+      for(const c of (r.candidates||[])){
+        const box=document.createElement('div');
+        box.className='ocr-debug-box'; box.style.borderColor=r.color||'#22c55e';
+        box.style.left=`${tr.left+c.x*tr.scaleX}px`; box.style.top=`${tr.top+c.y*tr.scaleY}px`;
+        box.style.width=`${c.w*tr.scaleX}px`; box.style.height=`${c.h*tr.scaleY}px`;
+        const label=document.createElement('span'); label.className='ocr-debug-label';
+        label.textContent=`V88.2 ${r.key} ${c.score.toFixed(2)} ${c.pass}`;
+        box.appendChild(label); ocrDebugLayer.appendChild(box);
+      }
     }
 
     // V82.1: かな誤認識候補は黒塗りせず、画像上に赤枠だけ表示。
