@@ -1617,7 +1617,7 @@ async function collectOcrResults(worker,target){
     stats.primaryMs=performance.now()-primaryStarted;
   }
 
-  // V90.10 速度・安定性優先:
+  // V90.11 速度・安定性優先:
   // primary HITが0件でも、二値化180/220/反転の「全画面OCR 3連打」は行わない。
   // iPhone Safariでは縦長画像の2.5倍キャンバスが非常に大きくなり、
   // ここで複数の全画面OCRを連続実行するとメモリ圧迫・タブクラッシュの原因になる。
@@ -1744,34 +1744,46 @@ async function refineNearCandidates(worker, results, ocrCanvas, target, scale) {
     const sameLength = group.candidates.filter(c => [...c.candidate].length === tlen);
     if (!sameLength.length) return null;
 
-    // V37: 「めーざー」のような1文字誤認を明示的に救出する。
-    // exactChars は同じ文字が重複する「ー」をうまく評価できないため、
-    // ここでは文字列そのものの編集距離を基準にする。
-    const strong = sameLength
+    // 同じ文字数で編集距離1なら「1文字だけの誤認」。
+    // 4文字以上は従来どおり72%以上で即救出。
+    // 3文字は1文字誤認だけで類似度が67%まで落ちるため、
+    // 同じ誤認文字列が同一地点で2回以上出た時だけ安全側に救出する。
+    const distanceOne = sameLength
       .map(c => ({...c, recoveryDistance: editDistance(target, c.candidate)}))
-      .filter(c => c.recoveryDistance <= 1)
-      .filter(c => c.similarity >= 0.72)
-      .sort((a,b) => {
-        if (a.recoveryDistance !== b.recoveryDistance) return a.recoveryDistance - b.recoveryDistance;
-        return b.similarity - a.similarity;
-      });
+      .filter(c => c.recoveryDistance <= 1);
+
+    if (!distanceOne.length || tlen < 3) return null;
+
+    let strong = [];
+    if (tlen === 3) {
+      const counts = new Map();
+      for (const c of distanceOne) {
+        if (c.recoveryDistance !== 1 || c.similarity < 0.66) continue;
+        counts.set(c.candidate, (counts.get(c.candidate) || 0) + 1);
+      }
+      strong = distanceOne
+        .filter(c => c.recoveryDistance === 1 && c.similarity >= 0.66 && (counts.get(c.candidate) || 0) >= 2)
+        .sort((a,b) => b.similarity - a.similarity);
+    } else {
+      strong = distanceOne
+        .filter(c => c.similarity >= 0.72)
+        .sort((a,b) => {
+          if (a.recoveryDistance !== b.recoveryDistance) return a.recoveryDistance - b.recoveryDistance;
+          return b.similarity - a.similarity;
+        });
+    }
 
     if (!strong.length) return null;
 
     const best = strong[0];
     const distinctCandidates = new Set(strong.map(c => c.candidate));
-    const enoughSupport = strong.length >= 1;
-    const conservativeLengthRule = tlen >= 3;
-    if (!enoughSupport || !conservativeLengthRule) return null;
 
-    // V38: 黒塗りには「候補地点全体」ではなく、採用した近似候補自身のbboxを使う。
-    // group.box は同じ地点に集まった複数候補の外接矩形なので、これをそのまま
-    // 黒塗りすると周囲の文章まで巻き込んでしまう。
+    // 黒塗りには候補地点全体ではなく、採用した近似候補自身のbboxを使う。
     const units = best.units || [];
     const xs = units.flatMap(u => [u.bbox.x0, u.bbox.x1]);
     const ys = units.flatMap(u => [u.bbox.y0, u.bbox.y1]);
     if (!xs.length || !ys.length) return null;
-    // OCRキャンバスは元画像のscale倍なので、黒塗りへ渡す前に元画像座標へ戻す。
+
     const candidateBox = {
       x0: Math.min(...xs) / scale,
       y0: Math.min(...ys) / scale,
@@ -1791,7 +1803,8 @@ async function refineNearCandidates(worker, results, ocrCanvas, target, scale) {
       groupBox: group.box,
       candidateCount: group.candidates.length,
       strongCandidateCount: strong.length,
-      distinctStrongCandidates: distinctCandidates.size
+      distinctStrongCandidates: distinctCandidates.size,
+      threeCharConsensus: tlen === 3
     };
   }
 
@@ -2051,7 +2064,7 @@ const TEMPLATE_GRAY_BG_MAX=75;
 const TEMPLATE_GRAY_SCORE_THRESHOLD=0.70;
 const TEMPLATE_GRAY_MIN_BG_SCORE=0.50;
 
-// ===== V90.10 実験：コントラスト補正＋イタリック多段テンプレート診断 =====
+// ===== V90.11 実験：コントラスト補正＋イタリック多段テンプレート診断 =====
 // 真緒のような画数の多い文字も考慮し、
 // コントラスト補正後の画像に対して
 // 1) テンプレート高さ 30 / 32 / 34px
@@ -2339,7 +2352,7 @@ function collectItalicRescueCandidates(source, text, existingBoxes=[]){
   return {result, accepted};
 }
 
-// ===== /V90.10 実験 =====
+// ===== /V90.11 実験 =====
 
 // ===== /V83 実験 =====
 
@@ -2402,7 +2415,7 @@ async function diagnoseOCR(){
     }
     if(acceptedNear.length){
       for(const x of acceptedNear){
-        lines.push(`近似候補救出：「${target}」として採用 / OCR候補「${x.candidate}」 / 編集距離${x.recoveryDistance} / 類似度${Math.round(x.similarity*100)}% / 同地点候補${x.candidateCount}件 / 強候補${x.strongCandidateCount}件`);
+        lines.push(`近似候補救出：「${target}」として採用 / OCR候補「${x.candidate}」 / 編集距離${x.recoveryDistance} / 類似度${Math.round(x.similarity*100)}% / 同地点候補${x.candidateCount}件 / 強候補${x.strongCandidateCount}件${x.threeCharConsensus?" / 3文字・同一誤認2回以上":""}`);
       }
     }
     if(!refined.length && !acceptedNear.length) lines.push('再OCR・近似候補救出で対象文字を確認できた候補地点はありません。');
@@ -2458,7 +2471,7 @@ async function diagnoseOCR(){
     lines.push(`色抽出OCR：${stats.colorHitCount||0}件 / ${(stats.colorMs/1000).toFixed(2)}秒`);
     lines.push(`※ V68の全領域走査方式を診断用にも使用。V70本体では、この局所OCRのHITを追加の黒塗り候補として統合します。`);
 
-    lines.push("",`===== V90.10 コントラスト＋イタリック救出診断 =====`);
+    lines.push("",`===== V90.11 コントラスト＋イタリック救出診断 =====`);
     lines.push(`方式：コントラスト補正 → イタリックテンプレート / 粗探索${ITALIC_COARSE_STEP}px → 局所再探索${ITALIC_REFINE_STEP}px`);
     lines.push(`テンプレートバリエーション：高さ ${ITALIC_VARIANT_HEIGHTS.join("/")}px × 傾き ${ITALIC_VARIANT_SKEWS.map(v=>v.toFixed(2)).join("/")}`);
     const firstVariant=italicVariantResult.variants?.[0];
@@ -2471,7 +2484,7 @@ async function diagnoseOCR(){
     (italicVariantResult.merged||[]).slice(0,10).forEach((c,i)=>lines.push(`  統合候補${i+1}: score ${c.score.toFixed(3)} / 形状${c.fgScore.toFixed(3)} / 背景${c.bgScore.toFixed(3)} / ${c.label} / (${c.x},${c.y},w${c.w},h${c.h})`));
     lines.push(`本番採用候補：${italicProductionPreview.accepted.length}件 / 条件 score≥${ITALIC_RESCUE_SCORE_MIN.toFixed(2)}・形状≥${ITALIC_RESCUE_FG_MIN.toFixed(2)}・背景≥${ITALIC_RESCUE_BG_MIN.toFixed(2)}`);
     (italicProductionPreview.accepted||[]).slice(0,10).forEach((c,i)=>lines.push(`  本番候補${i+1}: score ${c.score.toFixed(3)} / 形状${c.fgScore.toFixed(3)} / 背景${c.bgScore.toFixed(3)} / (${c.x},${c.y},w${c.w},h${c.h})`));
-    lines.push(`※ V90.7では、イタリック救出を本番の自動黒塗り補助として継続使用しつつ、OCR黒塗りの左境界制約が1文字目bboxの内側に食い込まないよう補正しています。診断の緑枠も、実際に塗られる最終矩形に合わせて表示します。オレンジ枠がこの方式の候補です。`);
+    lines.push(`※ V90.11では、3文字名で「1文字だけ誤認」した候補（例：コカゲ→コカグ）は、同じ地点で同一誤認が2回以上出た場合に限って近似候補救出します。オレンジ枠は本番採用候補だけです。`);
 
 
     lines.push('', `===== V76 局所OCR・順序維持ロバスト一致実験 =====`);
@@ -2546,7 +2559,7 @@ async function diagnoseOCR(){
       box.style.left=`${tr.left+c.x*tr.scaleX}px`; box.style.top=`${tr.top+c.y*tr.scaleY}px`;
       box.style.width=`${c.w*tr.scaleX}px`; box.style.height=`${c.h*tr.scaleY}px`;
       const label=document.createElement('span'); label.className='ocr-debug-label';
-      label.textContent=`V90.10 本番候補 ${c.score.toFixed(2)}`;
+      label.textContent=`V90.11 本番候補 ${c.score.toFixed(2)}`;
       box.appendChild(label); ocrDebugLayer.appendChild(box);
     }
 
