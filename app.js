@@ -6,8 +6,6 @@ const ENABLE_DIAGNOSTIC = true;
 const fileInput = $("fileInput");
 const targetText = $("targetText");
 const targetHistory = $("targetHistory");
-const overlayText = $("overlayText");
-const overlayName = $("overlayName");
 const redactionMode = $("redactionMode");
 const redactionColor = $("redactionColor");
 const stampMode = $("stampMode");
@@ -134,8 +132,6 @@ function updateRedactionStyleUI() {
 
 function savePreferences() {
     safeSaveJson(SETTINGS_STORAGE_KEY, {
-        overlayText: overlayText?.value || "{{user}}",
-        overlayName: !!overlayName?.checked,
         manualDrawMode: manualDrawMode?.value || "trace",
         redactionMode: redactionMode?.value || "black",
         redactionColor: redactionColor?.value || "#1a1a1a"
@@ -144,8 +140,6 @@ function savePreferences() {
 
 function loadPreferences() {
     const saved = safeLoadJson(SETTINGS_STORAGE_KEY, {});
-    if (typeof saved.overlayText === "string" && overlayText) overlayText.value = saved.overlayText;
-    if (typeof saved.overlayName === "boolean" && overlayName) overlayName.checked = saved.overlayName;
     if (typeof saved.manualDrawMode === "string" && manualDrawMode) manualDrawMode.value = saved.manualDrawMode;
     if (typeof saved.redactionMode === "string" && redactionMode) redactionMode.value = saved.redactionMode;
     if (typeof saved.redactionColor === "string" && redactionColor) redactionColor.value = saved.redactionColor;
@@ -236,50 +230,7 @@ function sampleBackgroundColor(rect) {
     return `rgb(${Math.round(r / count)}, ${Math.round(g / count)}, ${Math.round(b / count)})`;
 }
 
-function getContrastTextColor(color) {
-    if (!color) return "#fff";
-    let r = 255, g = 255, b = 255;
-    if (color.startsWith("#")) {
-        const hex = color.slice(1);
-        const full = hex.length === 3 ? hex.split("").map(v => v + v).join("") : hex;
-        if (full.length >= 6) {
-            r = parseInt(full.slice(0, 2), 16);
-            g = parseInt(full.slice(2, 4), 16);
-            b = parseInt(full.slice(4, 6), 16);
-        }
-    } else {
-        const m = color.match(/rgba?\(([^)]+)\)/i);
-        if (m) {
-            const parts = m[1].split(",").map(v => parseFloat(v.trim()));
-            r = parts[0] || 0;
-            g = parts[1] || 0;
-            b = parts[2] || 0;
-        }
-    }
-    const luminance = 0.299 * r + 0.587 * g + 0.114 * b;
-    return luminance > 160 ? "#111" : "#fff";
-}
-
-function drawOverlayText(text, rect, style) {
-    if (!text) return;
-    ctx.save();
-    ctx.font = `bold ${Math.max(12, Math.round(rect.h * 0.8))}px sans-serif`;
-    ctx.textAlign = "center";
-    ctx.textBaseline = "middle";
-    if (style.mode === "blur") {
-        ctx.lineWidth = Math.max(3, rect.h * 0.08);
-        ctx.strokeStyle = "rgba(0,0,0,.7)";
-        ctx.strokeText(text, rect.x + rect.w / 2, rect.y + rect.h / 2);
-        ctx.fillStyle = "#fff";
-    } else {
-        const baseColor = style.mode === "bg" ? sampleBackgroundColor(rect) : (style.mode === "color" ? style.color : "#000000");
-        ctx.fillStyle = getContrastTextColor(baseColor);
-    }
-    ctx.fillText(text, rect.x + rect.w / 2, rect.y + rect.h / 2);
-    ctx.restore();
-}
-
-function renderRedactionRect(rect, text = "", style = null) {
+function renderRedactionRect(rect, style = null) {
     const applied = cloneRedactionStyle(style);
     if (applied.mode === "blur") {
         // V87.2:
@@ -322,7 +273,6 @@ function renderRedactionRect(rect, text = "", style = null) {
         ctx.fillRect(rect.x, rect.y, rect.w, rect.h);
         ctx.restore();
     }
-    drawOverlayText(text, rect, applied);
 }
 
 function loadImage(file) {
@@ -499,7 +449,7 @@ function getOcrVisualRect(box, symbols = [], rescue = false) {
 
 function paintOcr(box, text = "", symbols = [], rescue = false, style = null) {
     const rect = getOcrVisualRect(box, symbols, rescue);
-    renderRedactionRect(rect, text, style);
+    renderRedactionRect(rect, style);
     return rect;
 }
 
@@ -1084,71 +1034,6 @@ function samplePatchScore(imageData, template, x, y, w=template.w, h=template.h)
   return dot/(template.norm*Math.sqrt(norm)||1);
 }
 
-function runGlyphTemplateMatch(sourceCanvas, referenceMatch) {
-  const srcCtx=sourceCanvas.getContext('2d',{willReadFrequently:true});
-  const data=srcCtx.getImageData(0,0,sourceCanvas.width,sourceCanvas.height);
-  const symbols=(referenceMatch.symbols||[]).slice(0,2);
-  if(symbols.length<2) return {error:'基準HITから2文字のsymbol bboxを取得できません。'};
-
-  const glyphs=symbols.map((u,i)=>{
-    const b=u.bbox;
-    return {
-      ch:u.ch,
-      x:Math.round(b.x0), y:Math.round(b.y0),
-      w:Math.max(6,Math.round(b.x1-b.x0)), h:Math.max(6,Math.round(b.y1-b.y0)),
-      index:i
-    };
-  });
-
-  const step=5;
-  const threshold=.72;
-  const perGlyph=[];
-  for(const g of glyphs){
-    const template=makeTemplateSamples(data,g.x,g.y,g.w,g.h,12,12);
-    const candidates=[];
-    for(let y=0;y<=sourceCanvas.height-g.h;y+=step){
-      for(let x=0;x<=sourceCanvas.width-g.w;x+=step){
-        if(Math.abs(x-g.x)<g.w*1.2 && Math.abs(y-g.y)<g.h*1.2) continue;
-        const score=samplePatchScore(data,template,x,y,g.w,g.h);
-        if(score>=threshold) candidates.push({x,y,w:g.w,h:g.h,score,ch:g.ch});
-      }
-    }
-    candidates.sort((a,b)=>b.score-a.score);
-    perGlyph.push({glyph:g,template,candidates:candidates.slice(0,80),rawCount:candidates.length});
-  }
-
-  const a=perGlyph[0], b=perGlyph[1];
-  const pairs=[];
-  const expectedDx=glyphs[1].x-glyphs[0].x;
-  const expectedDy=glyphs[1].y-glyphs[0].y;
-  for(const ca of a.candidates){
-    for(const cb of b.candidates){
-      const dx=cb.x-ca.x, dy=cb.y-ca.y;
-      const dxErr=Math.abs(dx-expectedDx);
-      const dyErr=Math.abs(dy-expectedDy);
-      if(dxErr>Math.max(12,expectedDx*.45) || dyErr>Math.max(10,glyphs[0].h*.5)) continue;
-      const positionScore=Math.max(0,1-dxErr/Math.max(12,expectedDx*.45))*0.7 + Math.max(0,1-dyErr/Math.max(10,glyphs[0].h*.5))*0.3;
-      const score=(ca.score+cb.score)/2 + positionScore*.08;
-      pairs.push({x:ca.x,y:ca.y,w:(cb.x+cb.w)-ca.x,h:Math.max(ca.h,cb.h),score,scoreA:ca.score,scoreB:cb.score,dx,dy});
-    }
-  }
-  pairs.sort((a,b)=>b.score-a.score);
-  const dedup=[];
-  for(const p of pairs){
-    if(dedup.some(q=>Math.abs(q.x-p.x)<12 && Math.abs(q.y-p.y)<12)) continue;
-    dedup.push(p);
-    if(dedup.length>=20) break;
-  }
-  return {
-    glyphs,
-    step,threshold,
-    perGlyph:perGlyph.map(x=>({ch:x.glyph.ch,rawCount:x.rawCount,candidates:x.candidates.slice(0,10)})),
-    pairs:dedup,
-    expectedDx,expectedDy
-  };
-}
-
-
 // V64実験：画像を機械的に分割するのではなく、画素の密度から
 // 「文字がありそうな横長の領域」を推定し、その領域だけを局所OCRする。
 // 診断専用。黒塗りには使用しない。
@@ -1404,53 +1289,6 @@ function v81KanaEquivalent(targetCh, ocrCh){
   if(targetCh===ocrCh) return true;
   return V81_KANA_PAIRS.get(targetCh)?.has(ocrCh) || false;
 }
-function findV81KanaRescue(results,target,scale){
-  const targetChars=[...target];
-  if(!targetChars.length || targetChars.some(ch=>!isV81Kana(ch))) return [];
-  const out=[];
-  for(const r of results||[]){
-    for(const line of r.lines||[]){
-      const units=extractLineUnits(line);
-      if(!units.length) continue;
-      // 対象と同じ文字数の窓だけを見る。追加・削除を許すとV74と同じく候補が爆発するため。
-      for(let i=0;i<=units.length-targetChars.length;i++){
-        const selected=units.slice(i,i+targetChars.length);
-        let substitutions=0;
-        let ok=true;
-        for(let j=0;j<targetChars.length;j++){
-          if(!v81KanaEquivalent(targetChars[j],selected[j].ch)){ ok=false; break; }
-          if(targetChars[j]!==selected[j].ch) substitutions++;
-        }
-        if(!ok || substitutions<1 || substitutions>1) continue;
-        // すべて同じ文字種の「かな置換」だけ。漢字混入は除外。
-        if(selected.some(u=>!isV81Kana(u.ch))) continue;
-        const b=makeTargetHit(selected,'v81-kana').targetBox;
-        out.push({
-          ocr:selected.map(u=>u.ch).join(''),
-          target,
-          substitutions,
-          box:b,
-          lineText:units.map(u=>u.ch).join(''),
-          mode:r.mode
-        });
-      }
-    }
-  }
-  // 同じ場所に複数候補が出た場合は1件にまとめる。
-  const unique=[];
-  for(const x of out){
-    const dup=unique.some(q=>{
-      const a=x.box,b=q.box;
-      const ix0=Math.max(a.x0,b.x0),iy0=Math.max(a.y0,b.y0),ix1=Math.min(a.x1,b.x1),iy1=Math.min(a.y1,b.y1);
-      if(ix1<=ix0||iy1<=iy0) return false;
-      const inter=(ix1-ix0)*(iy1-iy0), area=Math.min((a.x1-a.x0)*(a.y1-a.y0),(b.x1-b.x0)*(b.y1-b.y0));
-      return area>0 && inter/area>.45;
-    });
-    if(!dup) unique.push(x);
-  }
-  return unique;
-}
-
 function editDistance(a,b){const A=[...a],B=[...b],d=Array.from({length:A.length+1},()=>Array(B.length+1).fill(0));for(let i=0;i<=A.length;i++)d[i][0]=i;for(let j=0;j<=B.length;j++)d[0][j]=j;for(let i=1;i<=A.length;i++)for(let j=1;j<=B.length;j++)d[i][j]=Math.min(d[i-1][j]+1,d[i][j-1]+1,d[i-1][j-1]+(A[i-1]===B[j-1]?0:1));return d[A.length][B.length];}
 function sequenceSimilarity(a, b) {
   const A = [...a], B = [...b];
@@ -2054,141 +1892,6 @@ async function refineNearCandidates(worker, results, ocrCanvas, target, scale) {
 // 別の局所OCRで「ちゃん」だけ認識された場合、その直前に対象文字があると推定する。
 // 推定矩形は既知の完全一致HITから得た対象文字の平均サイズと、
 // 対象→文脈の実測間隔を使う。診断にも使えるよう候補情報を返す。
-function collectContextRescueCandidates(results, regionScan, target) {
-  const contexts = [];
-  const exactHits = [];
-  const tlen = [...target].length;
-
-  function addContext(contextText, targetBox, contextBox, source) {
-    if (!contextText || contextText.length < 2 || contextText.length > 4) return;
-    const key = contextText;
-    const gap = contextBox.x0 - targetBox.x1;
-    const width = targetBox.x1 - targetBox.x0;
-    const height = targetBox.y1 - targetBox.y0;
-    if (!(width > 2 && height > 2)) return;
-    const old = contexts.find(x => x.text === key);
-    const sample = {width, height, gap, source};
-    if (old) old.samples.push(sample);
-    else contexts.push({text:key, samples:[sample]});
-  }
-
-  // 全体OCRの完全一致から文脈を学習。
-  for (const r of results || []) {
-    for (const line of r.lines || []) {
-      const units = extractLineUnits(line);
-      const text = units.map(u => u.ch).join('');
-      if (!text) continue;
-      let from = 0;
-      while (from <= text.length - tlen) {
-        const idx = text.indexOf(target, from);
-        if (idx < 0) break;
-        const selected = units.slice(idx, idx + tlen);
-        if (selected.length === tlen) {
-          const tb = {
-            x0: Math.min(...selected.map(u => u.bbox.x0)) / 1,
-            y0: Math.min(...selected.map(u => u.bbox.y0)) / 1,
-            x1: Math.max(...selected.map(u => u.bbox.x1)) / 1,
-            y1: Math.max(...selected.map(u => u.bbox.y1)) / 1
-          };
-          // targetの直後2～4文字を候補にする。最長を優先して学習する。
-          for (const n of [4,3,2]) {
-            const after = units.slice(idx + tlen, idx + tlen + n);
-            if (after.length >= 2) {
-              const ct = after.map(u => u.ch).join('');
-              const cb = {
-                x0: after[0].bbox.x0,
-                y0: Math.min(...after.map(u => u.bbox.y0)),
-                x1: Math.max(...after.map(u => u.bbox.x1)),
-                y1: Math.max(...after.map(u => u.bbox.y1))
-              };
-              addContext(ct, tb, cb, r.mode || '全体OCR');
-            }
-          }
-          exactHits.push({text, targetBox:tb});
-        }
-        from = idx + Math.max(1, tlen);
-      }
-    }
-  }
-
-  // 長い文脈を優先。単独の「ちゃん」より「ちゃん元気」のような文脈が
-  // 得られた場合はそちらを先に使う。
-  contexts.sort((a,b) => b.text.length - a.text.length);
-
-  const stats = contexts.map(c => {
-    const widths = c.samples.map(x=>x.width);
-    const heights = c.samples.map(x=>x.height);
-    const gaps = c.samples.map(x=>x.gap);
-    return {
-      text:c.text,
-      width:widths.reduce((a,b)=>a+b,0)/widths.length,
-      height:heights.reduce((a,b)=>a+b,0)/heights.length,
-      gap:gaps.reduce((a,b)=>a+b,0)/gaps.length,
-      samples:c.samples.length
-    };
-  });
-
-  const candidates = [];
-  const scanLines = [];
-  for (const r of results || []) {
-    for (const line of r.lines || []) {
-      scanLines.push({units:extractLineUnits(line), scale:1, ox:0, oy:0, source:r.mode || '全体OCR'});
-    }
-  }
-  for (const r of (regionScan?.tested || [])) {
-    for (const ld of r.lineData || []) {
-      scanLines.push({units:ld.units || [], scale:2, ox:r.x, oy:r.y, source:'局所OCR'});
-    }
-  }
-
-  for (const c of stats) {
-    for (const line of scanLines) {
-      const units=line.units || [];
-      const text=units.map(u=>u.ch).join('');
-      if (!text || text.includes(target)) continue;
-      let from=0;
-      while (from <= text.length-c.text.length) {
-        const idx=text.indexOf(c.text,from);
-        if (idx<0) break;
-        const contextUnits=units.slice(idx,idx+[...c.text].length);
-        if (contextUnits.length === [...c.text].length) {
-          const first=contextUnits[0].bbox;
-          const last=contextUnits[contextUnits.length-1].bbox;
-          const cx0=line.ox + first.x0/line.scale;
-          const cy0=line.oy + Math.min(...contextUnits.map(u=>u.bbox.y0))/line.scale;
-          const cx1=line.ox + last.x1/line.scale;
-          const cy1=line.oy + Math.max(...contextUnits.map(u=>u.bbox.y1))/line.scale;
-          const targetW=c.width/line.scale;
-          const targetH=c.height/line.scale;
-          const gap=Math.max(0,c.gap/line.scale);
-          const x1=cx0-gap;
-          const x0=x1-targetW;
-          const y0=((cy0+cy1)/2)-targetH/2;
-          const box={x0,y0,x1,y1:y0+targetH};
-          // 同一行に対象文字の完全一致が実際に存在する場合は救出しない。
-          const nearExact=exactHits.some(h=>Math.abs(((h.targetBox.x0+h.targetBox.x1)/2)-((box.x0+box.x1)/2))<Math.max(30,targetW*.9) && Math.abs(((h.targetBox.y0+h.targetBox.y1)/2)-((box.y0+box.y1)/2))<Math.max(25,targetH));
-          if (!nearExact) candidates.push({context:c.text,box,source:line.source,samples:c.samples,confidence:c.samples>=2?'文脈学習2件以上':'文脈学習1件'});
-        }
-        from=idx+1;
-      }
-    }
-  }
-
-  // 同じ地点に複数の文脈が重なった場合は1件にまとめる。
-  const dedup=[];
-  for(const c of candidates){
-    const dup=dedup.some(o=>{
-      const ix0=Math.max(o.box.x0,c.box.x0),iy0=Math.max(o.box.y0,c.box.y0);
-      const ix1=Math.min(o.box.x1,c.box.x1),iy1=Math.min(o.box.y1,c.box.y1);
-      if(ix1<=ix0||iy1<=iy0)return false;
-      const inter=(ix1-ix0)*(iy1-iy0),area=Math.min((o.box.x1-o.box.x0)*(o.box.y1-o.box.y0),(c.box.x1-c.box.x0)*(c.box.y1-c.box.y0));
-      return area>0&&inter/area>.45;
-    });
-    if(!dup)dedup.push(c);
-  }
-  return {contexts:stats,candidates:dedup};
-}
-
 function mergeMatches(results){const all=results.flatMap(r=>r.matches),final=[];for(const box of all){const dup=final.some(o=>{const ix0=Math.max(box.x0,o.x0),iy0=Math.max(box.y0,o.y0),ix1=Math.min(box.x1,o.x1),iy1=Math.min(box.y1,o.y1);if(ix1<=ix0||iy1<=iy0)return false;const inter=(ix1-ix0)*(iy1-iy0),area=Math.min((box.x1-box.x0)*(box.y1-box.y0),(o.x1-o.x0)*(o.y1-o.y0));return area>0&&inter/area>.45;});if(!dup)final.push(box);}return final;}
 
 async function run(){
@@ -2261,7 +1964,7 @@ async function run(){
     }
 
 
-    // V90.1: 通常OCR/局所OCRで拾えなかった場所だけ、
+    // V90.4: 通常OCR/局所OCRで拾えなかった場所だけ、
     // コントラスト補正→イタリックテンプレートを補助候補として追加する。
     status("OCR中…\nイタリック文字の取りこぼしを補助確認しています。");
     const italicRescue = collectItalicRescueCandidates(sourceImage, target, paintBoxes);
@@ -2272,12 +1975,6 @@ async function run(){
       });
     }
 
-    // V86:
-    // V70の文脈救出は「ちゃん」「さん」など一般的な語尾に反応して
-    // 別の名前や無関係な位置を黒塗りしてしまう誤爆が確認されたため、
-    // 本番の自動黒塗り候補への統合は停止する。
-    // collectContextRescueCandidates() 自体は診断用として残す。
-    const contextRescue = collectContextRescueCandidates(results, regionScan, target);
 
     // OCR黒塗りを編集可能なオブジェクトとして登録する。
     // OCR専用の補正・余白計算はここで一度だけ行い、以後の移動・サイズ変更では
@@ -2293,7 +1990,6 @@ async function run(){
       if(rect.w < 1 || rect.h < 1) continue;
       manualStamps.push({
         x:rect.x, y:rect.y, w:rect.w, h:rect.h,
-        text:overlayName.checked?overlayText.value:"",
         style:getCurrentRedactionStyle(),
         kind:"ocr"
       });
@@ -2329,214 +2025,7 @@ const TEMPLATE_GRAY_BG_MAX=75;
 const TEMPLATE_GRAY_SCORE_THRESHOLD=0.70;
 const TEMPLATE_GRAY_MIN_BG_SCORE=0.50;
 
-function buildTextTemplate(text){
-  // まず14pxで描画し、実際に文字が存在するアルファ領域だけをcropする。
-  const m=document.createElement('canvas');
-  const mc=m.getContext('2d');
-  mc.font=`400 ${TEMPLATE_BASE_FONT_SIZE}px ${TEMPLATE_FONT_STACK}`;
-  const met=mc.measureText(text);
-  const rawW=Math.ceil(met.width)+12;
-  const rawH=Math.ceil(TEMPLATE_BASE_FONT_SIZE*1.8);
-  m.width=rawW; m.height=rawH;
-  const g=m.getContext('2d',{willReadFrequently:true});
-  g.clearRect(0,0,rawW,rawH);
-  g.font=`400 ${TEMPLATE_BASE_FONT_SIZE}px ${TEMPLATE_FONT_STACK}`;
-  g.fillStyle='#fff';
-  g.textBaseline='alphabetic';
-  g.fillText(text,6,TEMPLATE_BASE_FONT_SIZE+2);
-
-  const d=g.getImageData(0,0,rawW,rawH).data;
-  let minX=rawW,minY=rawH,maxX=-1,maxY=-1;
-  for(let y=0;y<rawH;y++) for(let x=0;x<rawW;x++){
-    if(d[(y*rawW+x)*4+3]>=70){
-      if(x<minX)minX=x; if(x>maxX)maxX=x;
-      if(y<minY)minY=y; if(y>maxY)maxY=y;
-    }
-  }
-  if(maxX<minX||maxY<minY) return {w:0,h:0,samples:[],bgSamples:[],fontSize:TEMPLATE_BASE_FONT_SIZE};
-
-  const cropW=maxX-minX+1, cropH=maxY-minY+1;
-  const targetH=TEMPLATE_TARGET_HEIGHT;
-  const scale=targetH/cropH;
-  const targetW=Math.max(1,Math.round(cropW*scale));
-
-  const resized=document.createElement('canvas');
-  resized.width=targetW; resized.height=targetH;
-  const rg=resized.getContext('2d',{willReadFrequently:true});
-  rg.imageSmoothingEnabled=true;
-  rg.clearRect(0,0,targetW,targetH);
-  rg.drawImage(m,minX,minY,cropW,cropH,0,0,targetW,targetH);
-
-  const rd=rg.getImageData(0,0,targetW,targetH).data;
-  const fg=[], bg=[];
-  for(let y=0;y<targetH;y++) for(let x=0;x<targetW;x++){
-    const a=rd[(y*targetW+x)*4+3];
-    if(a>=90) fg.push({x,y,a:a/255});
-    else if(a<=20) bg.push({x,y});
-  }
-
-  // 背景点は全点ではなく一定間隔で固定サンプリング。
-  const fgStride=Math.max(1,Math.ceil(fg.length/260));
-  const bgStride=Math.max(1,Math.ceil(bg.length/220));
-  const fgSamples=[];
-  const bgSamples=[];
-  for(let i=0;i<fg.length;i+=fgStride) fgSamples.push(fg[i]);
-  for(let i=0;i<bg.length;i+=bgStride) bgSamples.push(bg[i]);
-
-  return {
-    canvas:resized,w:targetW,h:targetH,
-    samples:fgSamples,bgSamples,
-    rawW:cropW,rawH:cropH,
-    fontSize:TEMPLATE_BASE_FONT_SIZE,
-    targetHeight:targetH
-  };
-}
-
-function templateSearch(source,text){
-  const tpl=buildTextTemplate(text);
-  const sw=source.naturalWidth||source.width, sh=source.naturalHeight||source.height;
-  if(!tpl.w||tpl.w>=sw||tpl.h>=sh) return {
-    tpl,candidates:[],rawCount:0,step:TEMPLATE_STEP,threshold:TEMPLATE_SCORE_THRESHOLD,
-    searchYStart:0,searchYEnd:sh
-  };
-
-  const sc=document.createElement('canvas'); sc.width=sw; sc.height=sh;
-  const sg=sc.getContext('2d',{willReadFrequently:true}); sg.drawImage(source,0,0,sw,sh);
-  const sd=sg.getImageData(0,0,sw,sh).data;
-  const gray=new Uint8Array(sw*sh);
-  for(let i=0,p=0;i<sd.length;i+=4,p++){
-    gray[p]=Math.round(sd[i]*.299+sd[i+1]*.587+sd[i+2]*.114);
-  }
-
-  // 上部UIに加え、チャット左端に縦に並ぶアバター/アイコン列を探索から外す。
-  // 画像サイズに対する割合で指定し、端末解像度が変わっても極端にズレにくくする。
-  const searchYStart=Math.floor(sh*TEMPLATE_SEARCH_TOP_RATIO);
-  const searchYEnd=Math.max(searchYStart,sh-tpl.h);
-  const searchXStart=Math.floor(sw*TEMPLATE_SEARCH_LEFT_RATIO);
-  const searchXEnd=Math.max(searchXStart,sw-tpl.w-Math.floor(sw*TEMPLATE_SEARCH_RIGHT_RATIO));
-
-  const rowHas=new Uint8Array(sh);
-  for(let y=searchYStart;y<=Math.min(sh-1,searchYEnd+tpl.h);y++){
-    let count=0;
-    for(let x=searchXStart;x<=searchXEnd;x+=3){
-      if(gray[y*sw+x]>=TEMPLATE_MIN_BRIGHTNESS){ if(++count>=8) break; }
-    }
-    if(count>=8) rowHas[y]=1;
-  }
-
-  const candidates=[], step=TEMPLATE_STEP;
-  let scorePassCount=0, bgRejectedCount=0;
-  for(let y=searchYStart;y<=searchYEnd;y+=step){
-    let rowOk=false;
-    for(let yy=0;yy<tpl.h;yy+=Math.max(2,step)){
-      if(rowHas[y+yy]){rowOk=true;break;}
-    }
-    if(!rowOk) continue;
-
-    for(let x=searchXStart;x<=searchXEnd;x+=step){
-      let fgGood=0, fgTotal=0, bgGood=0, bgTotal=0;
-      for(const p of tpl.samples){
-        const v=gray[(y+p.y)*sw+(x+p.x)];
-        if(v>=TEMPLATE_MIN_BRIGHTNESS) fgGood++;
-        fgTotal++;
-      }
-      // テンプレートで文字がない場所は、画像側でも暗めであることを要求する。
-      for(const p of tpl.bgSamples){
-        const v=gray[(y+p.y)*sw+(x+p.x)];
-        if(v<TEMPLATE_MIN_BRIGHTNESS) bgGood++;
-        bgTotal++;
-      }
-      const fgScore=fgTotal?fgGood/fgTotal:0;
-      const bgScore=bgTotal?bgGood/bgTotal:0;
-      const score=fgScore*TEMPLATE_FG_WEIGHT+bgScore*TEMPLATE_BG_WEIGHT;
-      if(score>=TEMPLATE_SCORE_THRESHOLD){
-        scorePassCount++;
-        if(bgScore>=TEMPLATE_MIN_BG_SCORE){
-          candidates.push({x,y,w:tpl.w,h:tpl.h,score,fgScore,bgScore,pass:"white"});
-        }else{
-          bgRejectedCount++;
-        }
-      }
-    }
-  }
-
-  
-  // V86: 黒背景＋グレー文字用の第2パス。
-  // buildTextTemplate() の実データ構造（samples / bgSamples）を使う。
-  // 先に「中間輝度の画素がある行」だけを絞り、全画面総当たりの負荷も抑える。
-  const rowHasGray=new Uint8Array(sh);
-  for(let y=searchYStart;y<=Math.min(sh-1,searchYEnd+tpl.h);y++){
-    let count=0;
-    for(let x=searchXStart;x<=searchXEnd;x+=3){
-      const v=gray[y*sw+x];
-      if(v>=TEMPLATE_GRAY_TEXT_MIN && v<=TEMPLATE_GRAY_TEXT_MAX){
-        if(++count>=6) break;
-      }
-    }
-    if(count>=6) rowHasGray[y]=1;
-  }
-
-  let grayScorePassCount=0, grayAddedCount=0;
-  for(let y=searchYStart;y<=searchYEnd;y+=step){
-    let rowOk=false;
-    for(let yy=0;yy<tpl.h;yy+=Math.max(2,step)){
-      if(rowHasGray[y+yy]){ rowOk=true; break; }
-    }
-    if(!rowOk) continue;
-
-    for(let x=searchXStart;x<=searchXEnd;x+=step){
-      let fgHit=0, fgTotal=0, bgHit=0, bgTotal=0;
-
-      for(const p of tpl.samples){
-        const lum=gray[(y+p.y)*sw+(x+p.x)];
-        fgTotal++;
-        if(lum>=TEMPLATE_GRAY_TEXT_MIN && lum<=TEMPLATE_GRAY_TEXT_MAX) fgHit++;
-      }
-
-      for(const p of tpl.bgSamples){
-        const lum=gray[(y+p.y)*sw+(x+p.x)];
-        bgTotal++;
-        if(lum<=TEMPLATE_GRAY_BG_MAX) bgHit++;
-      }
-
-      const grayFgScore=fgTotal?fgHit/fgTotal:0;
-      const grayBgScore=bgTotal?bgHit/bgTotal:0;
-      const grayScore=grayFgScore*0.78 + grayBgScore*0.22;
-
-      if(grayScore>=TEMPLATE_GRAY_SCORE_THRESHOLD){
-        grayScorePassCount++;
-        if(grayBgScore>=TEMPLATE_GRAY_MIN_BG_SCORE){
-          candidates.push({
-            x,y,w:tpl.w,h:tpl.h,
-            score:grayScore,fgScore:grayFgScore,bgScore:grayBgScore,
-            pass:"gray"
-          });
-          grayAddedCount++;
-        }
-      }
-    }
-  }
-
-candidates.sort((a,b)=>b.score-a.score);
-  const kept=[];
-  for(const c of candidates){
-    const dup=kept.some(k=>{
-      const ix=Math.max(0,Math.min(c.x+c.w,k.x+k.w)-Math.max(c.x,k.x));
-      const iy=Math.max(0,Math.min(c.y+c.h,k.y+k.h)-Math.max(c.y,k.y));
-      return ix*iy>Math.min(c.w*c.h,k.w*k.h)*.35;
-    });
-    if(!dup) kept.push(c);
-    if(kept.length>=30) break;
-  }
-  return {
-    tpl,candidates:kept,rawCount:scorePassCount,bgRejectedCount,
-    grayScorePassCount,grayAddedCount,
-    step,threshold:TEMPLATE_SCORE_THRESHOLD,grayThreshold:TEMPLATE_GRAY_SCORE_THRESHOLD,
-    searchYStart,searchYEnd,searchXStart,searchXEnd
-  };
-}
-
-// ===== V90.3 実験：コントラスト補正＋イタリック多段テンプレート診断 =====
+// ===== V90.4 実験：コントラスト補正＋イタリック多段テンプレート診断 =====
 // 真緒のような画数の多い文字も考慮し、
 // コントラスト補正後の画像に対して
 // 1) テンプレート高さ 30 / 32 / 34px
@@ -2824,7 +2313,7 @@ function collectItalicRescueCandidates(source, text, existingBoxes=[]){
   return {result, accepted};
 }
 
-// ===== /V90.3 実験 =====
+// ===== /V90.4 実験 =====
 
 // ===== /V83 実験 =====
 
@@ -2845,7 +2334,6 @@ async function diagnoseOCR(){
     status("OCR診断中…\n認識条件を比較しています。画像表示は維持します。");
     const ocrStarted=performance.now();
     const {results,scale,ocrCanvas,stats}=await collectOcrResults(worker,target);
-    const templateResult=templateSearch(sourceImage,target);
     const italicVariantResult=italicVariantDiagnosticSearch(sourceImage,target);
     const ocrElapsed=performance.now()-ocrStarted;
     const refineStarted=performance.now();
@@ -2855,7 +2343,6 @@ async function diagnoseOCR(){
     // V70.1: 診断側でも文脈救出結果を必ず初期化する。
     // 実処理(run)では局所OCR結果も渡すが、診断ではここまでで局所OCRを
     // 実行していないため、まず全体OCRだけを対象にする。
-    const contextRescue = collectContextRescueCandidates(results, null, target);
     const totalElapsed=performance.now()-totalStarted;
     const exactCount=results.reduce((n,r)=>n+r.matches.length,0);
     const candidateCount=results.reduce((n,r)=>n+r.near.length,0);
@@ -2944,14 +2431,7 @@ async function diagnoseOCR(){
     lines.push(`色抽出OCR：${stats.colorHitCount||0}件 / ${(stats.colorMs/1000).toFixed(2)}秒`);
     lines.push(`※ V68の全領域走査方式を診断用にも使用。V70本体では、この局所OCRのHITを追加の黒塗り候補として統合します。`);
 
-    lines.push("",`===== V86 Canvasテンプレート検索実験（グレー文字パス修正版） =====`);
-    lines.push(`対象文字：${target} / Canvas基準フォント：${TEMPLATE_BASE_FONT_SIZE}px / 目標文字高：${TEMPLATE_TARGET_HEIGHT}px / 探索間隔：${templateResult.step||TEMPLATE_STEP}px / 閾値：${TEMPLATE_SCORE_THRESHOLD}`);
-    lines.push(`テンプレート：${templateResult.tpl?.w||0}x${templateResult.tpl?.h||0}px（14px描画→実文字領域crop→比率維持拡大）`);
-    lines.push(`探索範囲：x=${templateResult.searchXStart||0}〜${templateResult.searchXEnd||0} / y=${templateResult.searchYStart||0}〜${templateResult.searchYEnd||0}（左10%のアイコン列＋上部12%を除外）`);
-    lines.push(`候補：${templateResult.candidates?.length||0}件（白pass ${templateResult.rawCount||0}件 / 白背景除外${templateResult.bgRejectedCount||0}件 / グレーpass ${templateResult.grayScorePassCount||0}件）`);
-    (templateResult.candidates||[]).slice(0,20).forEach((c,i)=>lines.push(`  候補${i+1}: score ${c.score.toFixed(3)} / 形状${c.fgScore.toFixed(3)} / 背景${c.bgScore.toFixed(3)} / (${c.x},${c.y},w${c.w},h${c.h})`));
-    lines.push(`※ V86ではまだ黒塗りには使用しません。緑枠はCanvasテンプレート検索の候補です。`);
-    lines.push("",`===== V90.3 コントラスト＋イタリック救出診断 =====`);
+    lines.push("",`===== V90.4 コントラスト＋イタリック救出診断 =====`);
     lines.push(`方式：コントラスト補正 → イタリックテンプレート / 粗探索${ITALIC_COARSE_STEP}px → 局所再探索${ITALIC_REFINE_STEP}px`);
     lines.push(`テンプレートバリエーション：高さ ${ITALIC_VARIANT_HEIGHTS.join("/")}px × 傾き ${ITALIC_VARIANT_SKEWS.map(v=>v.toFixed(2)).join("/")}`);
     const firstVariant=italicVariantResult.variants?.[0];
@@ -2962,25 +2442,8 @@ async function diagnoseOCR(){
     }
     lines.push(`最終候補：${italicVariantResult.merged?.length||0}件`);
     (italicVariantResult.merged||[]).slice(0,10).forEach((c,i)=>lines.push(`  統合候補${i+1}: score ${c.score.toFixed(3)} / 形状${c.fgScore.toFixed(3)} / 背景${c.bgScore.toFixed(3)} / ${c.label} / (${c.x},${c.y},w${c.w},h${c.h})`));
-    lines.push(`※ V90.3では、実績のあった高さ32/34px・skew 0.00を維持したまま、粗探索で通常格子に加えて3pxずらし格子も確認し、X/Y末尾位置も必ず探索するようにしています。既存OCRと重複しない高スコア候補は本番の補助黒塗りにも使用します。オレンジ枠がこの方式の候補です。`);
+    lines.push(`※ V90.4では、このイタリック救出を本番の自動黒塗り補助として継続使用します。通常格子＋3pxずらし格子＋X/Y末尾保証で取りこぼしを抑えています。オレンジ枠がこの方式の候補です。`);
 
-
-    lines.push("",`===== V82.1 誤認識救出診断（かな）＋候補bbox仮表示 =====`);
-    const v81KanaRescue=findV81KanaRescue(results,target,scale);
-    const hasKanjiTarget=[...target].some(isV81Kanji);
-    if(hasKanjiTarget){
-      lines.push(`対象文字に漢字を含むため、V81では誤認識置換を実行しません。`);
-      lines.push(`漢字は置換辞書ではなく、今後は文字形・位置・サイズ等を組み合わせて救出する方針です。`);
-    }else if(![...target].every(isV81Kana)){
-      lines.push(`対象文字はかな専用救出の対象外です。`);
-    }else{
-      lines.push(`かな誤認識による新規候補：${v81KanaRescue.length}件`);
-      v81KanaRescue.slice(0,20).forEach((c,i)=>{
-        lines.push(`  候補${i+1}: OCR「${c.ocr}」→対象「${c.target}」 / 置換${c.substitutions}文字 / bbox=(${Math.round(c.box.x0)},${Math.round(c.box.y0)},w${Math.round(c.box.x1-c.box.x0)},h${Math.round(c.box.y1-c.box.y0)}) / 「${c.lineText}」`);
-      });
-      if(!v81KanaRescue.length) lines.push(`かな誤認識による新規候補はありません。`);
-      lines.push(`※ V82.1ではまだ黒塗りに使用しません。候補が出た場合のみ赤枠で仮表示します。`);
-    }
 
     lines.push('', `===== V76 局所OCR・順序維持ロバスト一致実験 =====`);
     const localRobust=[];
@@ -3010,45 +2473,6 @@ async function diagnoseOCR(){
       lines.push(`  候補${i+1}: 対象「${target}」 / スキップ${(n.skipped||[]).length}unit${skippedText?`「${skippedText}」`:''} / (${Math.round(b.x0)},${Math.round(b.y0)},w${Math.round(b.x1-b.x0)},h${Math.round(b.y1-b.y0)}) / ${n.region.mode} / ${n.region.x},${n.region.y}`);
     });
     lines.push(`※ 文字の誤認置換はせず、対象文字が指定順で実際に認識された場合だけ対象とします。完全一致は別枠です。`);
-
-    // V63実験：文字列全体ではなく、OCRが拾えた各文字を個別テンプレート化して組み合わせる。
-    lines.push("",`===== 文字単体テンプレート照合実験（V63） =====`);
-    if(exactMatches.length){
-      const ref=exactMatches[0];
-      const gr=runGlyphTemplateMatch(canvas,ref);
-      if(gr.error){
-        lines.push(gr.error);
-      }else{
-        lines.push(`基準文字：${gr.glyphs.map(g=>`「${g.ch}」=(${g.x},${g.y},w${g.w},h${g.h})`).join(' / ')}`);
-        lines.push(`走査間隔：${gr.step}px / 採用閾値：${gr.threshold.toFixed(2)} / 想定文字間隔：dx=${gr.expectedDx}, dy=${gr.expectedDy}`);
-        gr.perGlyph.forEach(g=>{
-          lines.push(`文字「${g.ch}」：閾値以上 ${g.rawCount}件`);
-          g.candidates.slice(0,5).forEach((c,i)=>lines.push(`  候補${i+1}: score ${c.score.toFixed(3)} / (${c.x},${c.y},w${c.w},h${c.h})`));
-        });
-        if(gr.pairs.length){
-          lines.push(`2文字セット成立候補：${gr.pairs.length}件`);
-          gr.pairs.slice(0,10).forEach((p,i)=>lines.push(`  セット${i+1}: score ${p.score.toFixed(3)} / ね(${p.x},${p.y}) + る(dx=${p.dx},dy=${p.dy}) / 個別 ${p.scoreA.toFixed(3)}・${p.scoreB.toFixed(3)}`));
-        }else{
-          lines.push(`2文字セット成立候補：0件`);
-        }
-        lines.push(`※ 文字単体の形＋2文字の相対位置だけを見ています。今回は黒塗りには使用しません。`);
-      }
-    }else{
-      lines.push(`完全一致HITがないため文字テンプレートを作成できません。`);
-    }
-
-    lines.push("",`===== V70 文脈救出 =====`);
-    if(contextRescue.contexts.length){
-      lines.push(`学習文脈：${contextRescue.contexts.map(c=>`「${c.text}」(${c.samples}件)`).join(' / ')}`);
-    }else{
-      lines.push(`学習文脈：なし`);
-    }
-    lines.push(`文脈候補：${contextRescue.candidates.length}件 / 救出候補：${contextRescue.candidates.length}件`);
-    contextRescue.candidates.slice(0,20).forEach((c,i)=>{
-      lines.push(`  候補${i+1}: 文脈「${c.context}」 / (${Math.round(c.box.x0)},${Math.round(c.box.y0)},w${Math.round(c.box.x1-c.box.x0)},h${Math.round(c.box.y1-c.box.y0)}) / ${c.source} / ${c.confidence}`);
-    });
-    lines.push(`※ V70では、完全一致HITから対象文字の直後の2～4文字を文脈として学習します。V86では誤爆対策のため、この文脈救出は診断表示のみに留め、本番黒塗りには使いません。`);
-    lines.push(`※ 文脈だけが認識された地点では、既知の対象文字サイズと対象→文脈の間隔から位置を推定します。`);
 
     lines.push("",`===== 処理時間 =====`,
       `OCR全体：${(ocrElapsed/1000).toFixed(2)}秒`,
@@ -3092,22 +2516,10 @@ async function diagnoseOCR(){
       box.style.left=`${tr.left+c.x*tr.scaleX}px`; box.style.top=`${tr.top+c.y*tr.scaleY}px`;
       box.style.width=`${c.w*tr.scaleX}px`; box.style.height=`${c.h*tr.scaleY}px`;
       const label=document.createElement('span'); label.className='ocr-debug-label';
-      label.textContent=`V90.3 ${c.key} ${c.score.toFixed(2)}`;
+      label.textContent=`V90.4 ${c.key} ${c.score.toFixed(2)}`;
       box.appendChild(label); ocrDebugLayer.appendChild(box);
     }
 
-    // V82.1: かな誤認識候補は黒塗りせず、画像上に赤枠だけ表示。
-    const kanaCandidates = v81KanaRescue.slice(0,20);
-    for(const c of kanaCandidates){
-      const b=c.box;
-      const box=document.createElement('div');
-      box.className='ocr-debug-box'; box.style.borderColor='#ff3333';
-      box.style.left=`${tr.left+b.x0*tr.scaleX}px`; box.style.top=`${tr.top+b.y0*tr.scaleY}px`;
-      box.style.width=`${(b.x1-b.x0)*tr.scaleX}px`; box.style.height=`${(b.y1-b.y0)*tr.scaleY}px`;
-      const label=document.createElement('span'); label.className='ocr-debug-label';
-      label.textContent=`V82.1候補: ${c.ocr}→${c.target}`; box.appendChild(label);
-      ocrDebugLayer.appendChild(box);
-    }
     ocrDebugLayer.hidden=ocrDebugLayer.childElementCount===0;
     status(`OCR診断完了。\n検出：${exactCount}件（重複を含む） / 候補地点：${candidateGroups.length}箇所 / 再OCR確認：${refined.length}箇所\n処理時間：${(totalElapsed/1000).toFixed(2)}秒\n下の診断結果を確認してください。`);
   }catch(error){canvas.hidden=false;canvas.style.display='block';status("OCR診断でエラーが発生しました。",error);}
@@ -3200,7 +2612,6 @@ function placeStampAt(point) {
         y: point.y - last.h / 2,
         w: last.w,
         h: last.h,
-        text: overlayName.checked ? overlayText.value : "",
         style: getCurrentRedactionStyle(),
         kind: "manual"
     };
@@ -3210,7 +2621,7 @@ function placeStampAt(point) {
 
     pushManualHistory();
     manualStamps.push(stamp);
-    paintManual(stamp, stamp.text, stamp.style);
+    paintManual(stamp, stamp.style);
     updateUndoButton();
     saveBtn.disabled = false;
     status(`スタンプを追加しました。\n追加済み：${manualStamps.length}箇所`);
@@ -3237,10 +2648,10 @@ function finishStamp(point) {
         return;
     }
 
-    const stamp = { x, y, w, h, text: overlayName.checked ? overlayText.value : "", style: getCurrentRedactionStyle(), kind: "manual" };
+    const stamp = { x, y, w, h, style: getCurrentRedactionStyle(), kind: "manual" };
     pushManualHistory();
     manualStamps.push(stamp);
-    paintManual(stamp, stamp.text, stamp.style);
+    paintManual(stamp, stamp.style);
     updateUndoButton();
     saveBtn.disabled = false;
     status(`${manualDrawMode?.value === "trace" ? "なぞり式" : "手動"}黒塗りを追加しました。\n追加済み：${manualStamps.length}箇所`);
@@ -3596,8 +3007,6 @@ redactionMode?.addEventListener("change", () => {
     status(`隠し方を「${label}」にしました。`);
 });
 redactionColor?.addEventListener("input", savePreferences);
-overlayText?.addEventListener("input", savePreferences);
-overlayName?.addEventListener("change", savePreferences);
 manualDrawMode?.addEventListener("change", savePreferences);
 targetText?.addEventListener("keydown", event => {
     if (event.key === "Enter") saveTargetHistoryEntry(targetText.value);
