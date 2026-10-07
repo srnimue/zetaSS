@@ -329,3 +329,51 @@ body.help-dialog-open{
     max-width:160px !important;
   }
 }
+
+
+/* V90.13: 実行系を上、詳細設定を折りたたみへ */
+.option-panel{
+  margin-top:12px;
+  border-top:1px solid #e6e6e6;
+  padding-top:4px;
+}
+.option-panel summary{
+  display:flex;
+  align-items:center;
+  gap:6px;
+  width:max-content;
+  padding:8px 2px;
+  color:#555;
+  font-size:14px;
+  font-weight:600;
+  cursor:pointer;
+  list-style:none;
+}
+.option-panel summary::-webkit-details-marker{display:none;}
+.option-panel summary::before{
+  content:'›';
+  display:inline-block;
+  font-size:20px;
+  line-height:1;
+  transform:rotate(0deg);
+  transition:transform .12s ease;
+}
+.option-panel[open] summary::before{transform:rotate(90deg);}
+.option-panel-body{
+  padding:4px 0 2px;
+}
+.option-item{
+  margin:6px 0 12px;
+}
+.option-item > label{
+  margin-bottom:6px;
+}
+.option-stamp{
+  margin:4px 0 2px;
+}
+.option-panel .manual-draw-setting{
+  display:block;
+}
+.option-panel .redaction-style-controls{
+  margin-bottom:0;
+}

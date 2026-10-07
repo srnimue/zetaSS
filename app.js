@@ -71,7 +71,7 @@ const MANUAL_HIT_RADIUS_PX = 30; // 画面表示上の当たり判定。新規�
 const TRACE_FIXED_HEIGHT = 32; // なぞり式の矩形高さ（元画像canvas座標px）
 const SETTINGS_STORAGE_KEY = "zetaSS.settings.v87";
 const TARGET_HISTORY_STORAGE_KEY = "zetaSS.targetHistory.v87";
-const MAX_TARGET_HISTORY = 6;
+const MAX_TARGET_HISTORY = 5;
 
 let sourceCanvasRef = null;
 let sourceCtxRef = null;

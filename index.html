@@ -3,8 +3,8 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>スクショ黒塗りツール V90.12</title>
-<link rel="stylesheet" href="style.css?v=90120">
+<title>スクショ黒塗りツール V90.13</title>
+<link rel="stylesheet" href="style.css?v=90130">
 <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
 </head>
 <body>
@@ -20,34 +20,6 @@
 <input id="targetText" type="text" placeholder="例：ゆーざー" autocomplete="off">
 <div id="targetHistory" class="target-history" hidden></div>
 
-
-<label for="redactionMode">隠し方</label>
-<div class="redaction-style-controls">
-  <select id="redactionMode">
-    <option value="black">黒塗り</option>
-    <option value="bg">背景色</option>
-    <option value="blur">ぼかし</option>
-    <option value="color">任意の色</option>
-  </select>
-  <input id="redactionColor" type="color" value="#1a1a1a" aria-label="任意の色">
-</div>
-
-<label class="checkbox">
-<input id="stampMode" type="checkbox" disabled>
-スタンプモード（直前の手動黒塗りと同じサイズ）
-</label>
-
-<div class="manual-draw-setting">
-  <label for="manualDrawMode">手動の描画方法</label>
-  <div class="manual-draw-controls">
-    <select id="manualDrawMode">
-      <option value="trace" selected>なぞり式（高さ固定）</option>
-      <option value="free">自由矩形</option>
-    </select>
-    <button id="manualHelpBtn" class="help-button" type="button" aria-label="手動モードの使い方" aria-haspopup="dialog" aria-controls="manualHelpDialog">?</button>
-  </div>
-</div>
-
 <div class="button-row main-actions">
 <button id="redactBtn" type="button" disabled>✨ 自動検出</button>
 <button id="manualBtn" type="button" disabled>🖊 手動</button>
@@ -61,6 +33,40 @@
 
 <button id="manualDoneBtn" class="secondary" type="button" hidden>手動黒塗り終了</button>
 
+<details class="option-panel">
+  <summary>オプション</summary>
+  <div class="option-panel-body">
+    <div class="manual-draw-setting option-item">
+      <label for="manualDrawMode">手動の描画方法</label>
+      <div class="manual-draw-controls">
+        <select id="manualDrawMode">
+          <option value="trace" selected>なぞり式（高さ固定）</option>
+          <option value="free">自由矩形</option>
+        </select>
+        <button id="manualHelpBtn" class="help-button" type="button" aria-label="手動モードの使い方" aria-haspopup="dialog" aria-controls="manualHelpDialog">?</button>
+      </div>
+    </div>
+
+    <div class="option-item">
+      <label for="redactionMode">隠し方</label>
+      <div class="redaction-style-controls">
+        <select id="redactionMode">
+          <option value="black">黒塗り</option>
+          <option value="bg">背景色</option>
+          <option value="blur">ぼかし</option>
+          <option value="color">任意の色</option>
+        </select>
+        <input id="redactionColor" type="color" value="#1a1a1a" aria-label="任意の色">
+      </div>
+    </div>
+
+    <label class="checkbox option-stamp">
+      <input id="stampMode" type="checkbox" disabled>
+      スタンプモード
+    </label>
+  </div>
+</details>
+
 <div id="manualHelpDialog" class="help-dialog" hidden role="dialog" aria-modal="true" aria-labelledby="manualHelpTitle">
   <div class="help-dialog-backdrop" data-help-close></div>
   <div class="help-dialog-card" role="document">
@@ -71,6 +77,7 @@
     <div class="help-dialog-body">
       <p><strong>なぞり式</strong>：文字の上を横になぞると、高さ固定の黒塗りを作れます。</p>
       <p><strong>自由矩形</strong>：指で囲んだ範囲を自由な大きさで黒塗りします。</p>
+      <p><strong>スタンプモード</strong>：直前に作った手動の隠し範囲と同じサイズを、画像をタップして追加できます。</p>
       <p><strong>既存の黒塗り</strong>：タップして選択し、中央をドラッグで移動、四隅をドラッグでサイズ変更できます。</p>
       <p><strong>削除</strong>：選択した黒塗りの左上に出る「×」を押します。</p>
       <p><strong>画像の移動・拡大縮小</strong>：2本指で移動、ピンチで拡大縮小できます。</p>
@@ -102,6 +109,6 @@
 <pre id="errorDetails" class="error" hidden></pre>
 <pre id="ocrDiagnostics" class="diagnostics" hidden></pre>
 </main>
-<script src="app.js?v=90120"></script>
+<script src="app.js?v=90130"></script>
 </body>
 </html>
