@@ -1577,9 +1577,14 @@ function makeWhiteBorderCanvas(src,pad){
 }
 
 function buildOcrCanvas(){
-  // OCR用キャンバス本体は従来の座標系のまま保持し、実際にTesseractへ渡す
-  // キャンバスだけに白い10px境界線を追加する。表示用canvasは変更しない。
-  const scale=2.5;
+  // V90.9: 小さめ画像は従来どおり2.5倍。大きな縦長画像だけ、
+  // OCRキャンバスが約1100万pixelを超えない範囲まで自動的にscaleを下げる。
+  // これでiPhone Safariのメモリ急増を抑えつつ、通常画像の精度は変えない。
+  const baseScale=2.5;
+  const maxOcrPixels=11000000;
+  const srcPixels=Math.max(1,canvas.width*canvas.height);
+  const safeScale=Math.sqrt(maxOcrPixels/srcPixels);
+  const scale=Math.max(1.8,Math.min(baseScale,safeScale));
   const oc=document.createElement("canvas");
   oc.width=Math.round(canvas.width*scale);
   oc.height=Math.round(canvas.height*scale);
@@ -1593,7 +1598,7 @@ function buildOcrCanvas(){
 async function collectOcrResults(worker,target){
   const {canvas:oc,scale}=buildOcrCanvas();
   const results=[];
-  const stats={primaryMs:0,fallbackMs:0,primaryHitCount:0,fallbackUsed:false,primaryName:"グレー＋コントラスト",fallbackNames:["二値化180","二値化220","反転"]};
+  const stats={primaryMs:0,fallbackMs:0,primaryHitCount:0,fallbackUsed:false,primaryName:"グレー＋コントラスト",fallbackNames:["二値化180","二値化220","反転"],fallbackSkippedForSpeed:false};
 
   // まず今回の実験で最も安定していた「グレー＋コントラスト」だけを実行。
   // ここで1件でも正確に見つかれば、追加の全体OCRは省略する。
@@ -1612,24 +1617,14 @@ async function collectOcrResults(worker,target){
     stats.primaryMs=performance.now()-primaryStarted;
   }
 
-  // グレー＋コントラストで1件も見つからなかった場合だけ、
-  // 補助的な全体OCRを追加する。通常・グレースケールは今回の実験では外す。
-  if(stats.primaryHitCount===0){
-    stats.fallbackUsed=true;
-    const fallbackStarted=performance.now();
-    for(const name of stats.fallbackNames){
-      status("実行中…");
-      const baseVariant=makeOcrVariant(oc,name);
-      const variant=makeWhiteBorderCanvas(baseVariant,OCR_BORDER_PX*scale);
-      try {
-        results.push(await recognizeVariant(worker,variant,target,name,scale,OCR_BORDER_PX*scale,OCR_BORDER_PX*scale));
-      } finally {
-        variant.width=1;variant.height=1;
-        if(baseVariant!==oc){baseVariant.width=1;baseVariant.height=1;}
-      }
-    }
-    stats.fallbackMs=performance.now()-fallbackStarted;
-  }
+  // V90.9 速度・安定性優先:
+  // primary HITが0件でも、二値化180/220/反転の「全画面OCR 3連打」は行わない。
+  // iPhone Safariでは縦長画像の2.5倍キャンバスが非常に大きくなり、
+  // ここで複数の全画面OCRを連続実行するとメモリ圧迫・タブクラッシュの原因になる。
+  // 代わりに、この後の色抽出OCR・近似候補・文字領域局所OCR・イタリック救出へ渡す。
+  stats.fallbackUsed=false;
+  stats.fallbackSkippedForSpeed = stats.primaryHitCount===0;
+  stats.fallbackMs=0;
 
   // V82.1: 過去の色抽出実験でヒットしたケースを退行させないため、
   // 色抽出OCRは主OCRのHIT数に関係なく1回だけ追加実行する。
@@ -2029,7 +2024,7 @@ async function run(){
     saveBtn.disabled=false; manualBtn.disabled=false;
     const italicAdded = italicRescue?.accepted?.length || 0;
     const localAdded = Math.max(0, paintBoxes.length - matches.length - italicAdded);
-    status(`黒塗り完了：${manualStamps.length}箇所\n通常OCR：${matches.length}箇所 / 追加局所OCR：${localAdded}箇所 / イタリック救出：${italicAdded}箇所\n位置再確認：${exactRefineAttempted}件 / 省略：${exactRefineSkipped}件`);
+    status(`黒塗り完了：${manualStamps.length}箇所\n通常OCR：${matches.length}箇所 / 追加局所OCR：${localAdded}箇所 / イタリック救出：${italicAdded}箇所\n位置再確認：${exactRefineAttempted}件 / 省略：${exactRefineSkipped}件${stats.fallbackSkippedForSpeed ? " / 重い全画面fallback省略" : ""}`);
   }catch(error){status("OCRでエラーが発生しました。下のエラー詳細を確認してください。",error);}
 }
 
@@ -2056,7 +2051,7 @@ const TEMPLATE_GRAY_BG_MAX=75;
 const TEMPLATE_GRAY_SCORE_THRESHOLD=0.70;
 const TEMPLATE_GRAY_MIN_BG_SCORE=0.50;
 
-// ===== V90.8 実験：コントラスト補正＋イタリック多段テンプレート診断 =====
+// ===== V90.9 実験：コントラスト補正＋イタリック多段テンプレート診断 =====
 // 真緒のような画数の多い文字も考慮し、
 // コントラスト補正後の画像に対して
 // 1) テンプレート高さ 30 / 32 / 34px
@@ -2344,7 +2339,7 @@ function collectItalicRescueCandidates(source, text, existingBoxes=[]){
   return {result, accepted};
 }
 
-// ===== /V90.8 実験 =====
+// ===== /V90.9 実験 =====
 
 // ===== /V83 実験 =====
 
@@ -2462,7 +2457,7 @@ async function diagnoseOCR(){
     lines.push(`色抽出OCR：${stats.colorHitCount||0}件 / ${(stats.colorMs/1000).toFixed(2)}秒`);
     lines.push(`※ V68の全領域走査方式を診断用にも使用。V70本体では、この局所OCRのHITを追加の黒塗り候補として統合します。`);
 
-    lines.push("",`===== V90.8 コントラスト＋イタリック救出診断 =====`);
+    lines.push("",`===== V90.9 コントラスト＋イタリック救出診断 =====`);
     lines.push(`方式：コントラスト補正 → イタリックテンプレート / 粗探索${ITALIC_COARSE_STEP}px → 局所再探索${ITALIC_REFINE_STEP}px`);
     lines.push(`テンプレートバリエーション：高さ ${ITALIC_VARIANT_HEIGHTS.join("/")}px × 傾き ${ITALIC_VARIANT_SKEWS.map(v=>v.toFixed(2)).join("/")}`);
     const firstVariant=italicVariantResult.variants?.[0];
@@ -2508,14 +2503,14 @@ async function diagnoseOCR(){
     lines.push("",`===== 処理時間 =====`,
       `OCR全体：${(ocrElapsed/1000).toFixed(2)}秒`,
       `  第1段階（グレー＋コントラスト）：${(stats.primaryMs/1000).toFixed(2)}秒 / HIT ${stats.primaryHitCount}件`,
-      `  追加全体OCR：${stats.fallbackUsed ? (stats.fallbackMs/1000).toFixed(2)+"秒 / 実行" : "0.00秒 / 省略"}`,
+      `  追加全体OCR：${stats.fallbackSkippedForSpeed ? "0.00秒 / V90.9速度優先で省略" : (stats.fallbackUsed ? (stats.fallbackMs/1000).toFixed(2)+"秒 / 実行" : "0.00秒 / 省略")}`,
       `候補再OCR：${(refineElapsed/1000).toFixed(2)}秒`,
       `診断全体：${(totalElapsed/1000).toFixed(2)}秒`,
       `候補地点：${candidateGroups.length} / 色抽出HIT：${stats.colorHitCount||0} / 近似候補救出：${refine.fastRecovered} / 再OCR実行：${refine.attempted} / 再OCR追加パス：${refine.extraPasses} / 既存HITで省略：${refine.skippedExact}`,
       "",
       `※ 今回は速度実験として、まずグレー＋コントラストだけを全体OCRします。`,
-      `※ 第1段階で1件以上HITした場合、二値化180・220・反転の全体OCRは省略します。`,
-      `※ 第1段階でHITが0件の場合だけ、二値化180・220・反転を追加します。`,
+      `※ V90.9では、二値化180・220・反転の全画面OCRは速度・メモリ優先で本番経路から省略します。`,
+      `※ HITが0件でも、色抽出OCR・候補再OCR・文字領域局所OCR・イタリック救出へ進みます。`,
       `※ 候補地点は同じ位置付近の候補をまとめています。`,
       `※ 近似候補は、対象文字と同じ文字数で、3文字以上の対象なら「対象の1文字違い」程度を先に救出します。
 ※ 近似候補の黒塗り範囲は、候補地点全体ではなく採用候補自身のbboxを使います。`,
@@ -2547,7 +2542,7 @@ async function diagnoseOCR(){
       box.style.left=`${tr.left+c.x*tr.scaleX}px`; box.style.top=`${tr.top+c.y*tr.scaleY}px`;
       box.style.width=`${c.w*tr.scaleX}px`; box.style.height=`${c.h*tr.scaleY}px`;
       const label=document.createElement('span'); label.className='ocr-debug-label';
-      label.textContent=`V90.8 ${c.key} ${c.score.toFixed(2)}`;
+      label.textContent=`V90.9 ${c.key} ${c.score.toFixed(2)}`;
       box.appendChild(label); ocrDebugLayer.appendChild(box);
     }
 
