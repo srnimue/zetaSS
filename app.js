@@ -2292,20 +2292,14 @@ function italicVariantDiagnosticSearch(source, text, variantHeights=ITALIC_VARIA
 
 function collectItalicRescueCandidates(source, text, existingBoxes=[], variantHeights=ITALIC_VARIANT_HEIGHTS, detected=null){
   const regions=(detected?.regions||[]).filter(r=>r && r.w>0 && r.h>0);
-  const useRegionLimited = regions.length > 0;
-
-  // 文字領域が1つも取れなかった場合だけ、従来の全画面探索へ戻す。
-  // 領域が取れている通常ケースでは、文字行だけを探索して背景の大半を見ない。
-  const result=italicVariantDiagnosticSearch(
-    source,
-    text,
-    variantHeights,
-    useRegionLimited ? {searchRegions:regions, existingBoxes} : {existingBoxes}
-  );
   const accepted=[];
+  const acceptedBoxes=[...existingBoxes];
+  const passes=[];
+  let scoredPositions=0;
+  let skippedExisting=0;
 
-  function overlapsExisting(c){
-    return existingBoxes.some(o=>{
+  function overlapsExisting(c, boxes=acceptedBoxes){
+    return boxes.some(o=>{
       const ox=o.x ?? o.x0 ?? 0;
       const oy=o.y ?? o.y0 ?? 0;
       const ow=o.w ?? ((o.x1??0)-(o.x0??0));
@@ -2319,22 +2313,38 @@ function collectItalicRescueCandidates(source, text, existingBoxes=[], variantHe
     });
   }
 
-  for(const c of (result.merged||[])){
-    if(c.score<ITALIC_RESCUE_SCORE_MIN) continue;
-    if(c.fgScore<ITALIC_RESCUE_FG_MIN) continue;
-    if(c.bgScore<ITALIC_RESCUE_BG_MIN) continue;
-    if(overlapsExisting(c)) continue;
-    accepted.push({...c, source:"イタリック救出"});
-    if(accepted.length>=ITALIC_RESCUE_MAX_NEW) break;
+  function runPass(label, searchConfig={}){
+    const result=italicVariantDiagnosticSearch(source,text,variantHeights,searchConfig);
+    passes.push({label, result});
+    const variants=result.variants||[];
+    scoredPositions+=variants.reduce((n,v)=>n+(v.scoredPositionCount||0),0);
+    skippedExisting+=variants.reduce((n,v)=>n+(v.skippedExistingCount||0),0);
+    for(const c of (result.merged||[])){
+      if(c.score<ITALIC_RESCUE_SCORE_MIN) continue;
+      if(c.fgScore<ITALIC_RESCUE_FG_MIN) continue;
+      if(c.bgScore<ITALIC_RESCUE_BG_MIN) continue;
+      if(overlapsExisting(c)) continue;
+      accepted.push({...c, source:"イタリック救出", passLabel:label});
+      acceptedBoxes.push({x:c.x,y:c.y,w:c.w,h:c.h});
+      if(accepted.length>=ITALIC_RESCUE_MAX_NEW) break;
+    }
   }
 
-  const variants=result.variants||[];
-  const scoredPositions=variants.reduce((n,v)=>n+(v.scoredPositionCount||0),0);
-  const skippedExisting=variants.reduce((n,v)=>n+(v.skippedExistingCount||0),0);
+  if(regions.length){
+    // 先に文字領域を優先探索し、その後は未検出部分だけ全画面で補完する。
+    runPass("文字領域優先", {searchRegions:regions, existingBoxes:acceptedBoxes});
+    if(accepted.length<ITALIC_RESCUE_MAX_NEW){
+      runPass("全画面補完", {existingBoxes:acceptedBoxes});
+    }
+  }else{
+    runPass("全画面", {existingBoxes:acceptedBoxes});
+  }
+
   return {
-    result,
+    result: passes[0]?.result || {variants:[], merged:[]},
+    passes,
     accepted,
-    searchMode: useRegionLimited ? "文字領域限定" : "全画面fallback",
+    searchMode: regions.length ? "文字領域優先＋全画面補完" : "全画面",
     searchRegionCount: regions.length,
     scoredPositions,
     skippedExisting
@@ -2451,7 +2461,7 @@ async function diagnoseOCR(){
     lines.push(`色抽出OCR：${stats.colorHitCount||0}件 / ${(stats.colorMs/1000).toFixed(2)}秒`);
     lines.push(`※ V68の全領域走査方式を診断用にも使用。V70本体では、この局所OCRのHITを追加の黒塗り候補として統合します。`);
 
-    lines.push("",`===== V90.19 コントラスト＋イタリック救出診断 =====`);
+    lines.push("",`===== V90.20 コントラスト＋イタリック救出診断 =====`);
     lines.push(`方式：コントラスト補正 → イタリックテンプレート / 粗探索${ITALIC_COARSE_STEP}px → 局所再探索${ITALIC_REFINE_STEP}px`);
     lines.push(`テンプレートバリエーション：高さ ${diagnosticItalicHeights.join("/")}px（文字領域から自動推定）× 傾き ${ITALIC_VARIANT_SKEWS.map(v=>v.toFixed(2)).join("/")}`);
     const firstVariant=italicVariantResult.variants?.[0];
@@ -2505,7 +2515,7 @@ async function diagnoseOCR(){
       `候補地点：${candidateGroups.length} / 色抽出HIT：${stats.colorHitCount||0} / 近似候補救出：${refine.fastRecovered} / 再OCR実行：${refine.attempted} / 再OCR追加パス：${refine.extraPasses} / 既存HITで省略：${refine.skippedExact}`,
       "",
       `※ 今回は速度実験として、まずグレー＋コントラストだけを全体OCRします。`,
-      `※ V90.19では、コカゲ再検証のため追加全画面OCRを挟まず、V90.12/14系の近似候補救出条件へ戻しています。`,
+      `※ V90.20では、イタリック救出は「文字領域優先 → 全画面補完」の2段構成です。OCRで確定した領域は探索前に除外し、PC保存は共有シート優先ではなく保存/ダウンロードを優先します。`,
       `※ 大画像や強い近似候補がある場合は全画面fallbackを省略し、後段の局所救出へ進みます。`,
       `※ 候補地点は同じ位置付近の候補をまとめています。`,
       `※ 近似候補は、対象文字と同じ文字数で、3文字以上の対象なら「対象の1文字違い」程度を先に救出します。
@@ -3147,6 +3157,39 @@ function canvasToBlob() {
     });
 }
 
+function isLikelyMobileSaveEnvironment() {
+    const ua = navigator.userAgent || "";
+    const touch = navigator.maxTouchPoints || 0;
+    return /iPhone|iPad|iPod|Android/i.test(ua) || (touch > 0 && Math.min(window.innerWidth || 0, window.innerHeight || 0) <= 1024);
+}
+
+function downloadBlob(blob, name) {
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = name;
+    link.rel = "noopener";
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+async function saveBlobWithPicker(blob, name) {
+    if (!window.showSaveFilePicker) return false;
+    const handle = await window.showSaveFilePicker({
+        suggestedName: name,
+        types: [{
+            description: "PNG画像",
+            accept: { "image/png": [".png"] }
+        }]
+    });
+    const writable = await handle.createWritable();
+    await writable.write(blob);
+    await writable.close();
+    return true;
+}
+
 async function saveImage() {
     if (!sourceImage || !canvas.width || !canvas.height) {
         status("先に画像を処理してください。");
@@ -3157,25 +3200,28 @@ async function saveImage() {
     try {
         const blob = await canvasToBlob();
         const file = new File([blob], fileName, { type: "image/png" });
+        const preferNativeSave = !isLikelyMobileSaveEnvironment();
 
-        if (navigator.share && navigator.canShare && navigator.canShare({ files: [file] })) {
+        if (preferNativeSave && window.showSaveFilePicker) {
+            await saveBlobWithPicker(blob, fileName);
+            status("PNGを保存しました。");
+            return;
+        }
+
+        if (!preferNativeSave && navigator.share && navigator.canShare && navigator.canShare({ files: [file] })) {
             await navigator.share({ files: [file] });
             status("画像を共有シートに渡しました。\n必要な場所へ保存してください。");
             return;
         }
 
-        const url = URL.createObjectURL(blob);
-        const link = document.createElement("a");
-        link.href = url;
-        link.download = fileName;
-        link.rel = "noopener";
-        document.body.appendChild(link);
-        link.click();
-        link.remove();
-        setTimeout(() => URL.revokeObjectURL(url), 1000);
+        downloadBlob(blob, fileName);
         status("PNGを保存しました。");
     } catch (error) {
-        status(error?.name === "AbortError" ? "保存をキャンセルしました。" : "画像の保存に失敗しました。もう一度お試しください。", error?.name === "AbortError" ? null : error);
+        if (error?.name === "AbortError") {
+            status("保存をキャンセルしました。");
+        } else {
+            status("画像の保存に失敗しました。もう一度お試しください。", error);
+        }
     } finally {
         saveBtn.disabled = false;
     }
