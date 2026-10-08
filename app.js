@@ -33,7 +33,7 @@ const zoomOutBtn = $("zoomOutBtn");
 const zoomInBtn = $("zoomInBtn");
 const zoomLabel = $("zoomLabel");
 
-// V86.1: 手動描画の初期モードは「なぞり式」。
+// 手動描画の初期モードは「なぞり式」。
 if (manualDrawMode) manualDrawMode.value = "trace";
 
 if (!ENABLE_DIAGNOSTIC) {
@@ -64,7 +64,7 @@ const pointers = new Map();
 let pinchStartDistance = 0;
 let pinchStartZoom = 1;
 let panLastCenter = null;
-// V86.1: 新規手動描画の指オフセットは「画面上のCSS px」で管理する。
+// 新規手動描画の指オフセットは「画面上のCSS px」で管理する。
  // ズーム倍率が変わっても、指から見た描画位置の距離を一定にする。
 const TOUCH_Y_OFFSET_SCREEN_PX = -40;
 const MANUAL_HIT_RADIUS_PX = 30; // 画面表示上の当たり判定。新規描画より既存編集を優先。
@@ -125,7 +125,7 @@ function getStampRedactionStyle(stamp) {
 function updateRedactionStyleUI() {
     if (!redactionColor || !redactionMode) return;
     const showColor = redactionMode.value === "color";
-    // V87.2: カラーピッカーの場所は常に確保して、表示/非表示でUIが動かないようにする。
+    // カラーピッカーの場所は常に確保して、表示/非表示でUIが動かないようにする。
     redactionColor.classList.toggle("is-placeholder", !showColor);
     redactionColor.disabled = !showColor;
 }
@@ -233,7 +233,6 @@ function sampleBackgroundColor(rect) {
 function renderRedactionRect(rect, style = null) {
     const applied = cloneRedactionStyle(style);
     if (applied.mode === "blur") {
-        // V87.2:
         // SafariではCanvasRenderingContext2D.filterのblurが効かない/弱いことがあるため、
         // 対象範囲を一度縮小してから滑らかに拡大する方式で確実にぼかす。
         const blurMargin = 8;
@@ -292,87 +291,25 @@ function normalize(text) {
         .toLowerCase();
 }
 
-const OCR_EDGE_PAD = 1; // bbox外へ少しだけ足す左右余白。V90.5で過剰な黒塗りを抑えるため縮小。
-const OCR_MIN_PADDING = 2; // 最低限のパディング。V90.5で3px→2pxへ微調整。
-const OCR_PADDING_RATIO = 0.06; // 文字サイズに対するパディング比率。V90.5で8%→6%。
-const OCR_SYMBOL_MAX_WIDTH_HEIGHT_RATIO = 2.2; // 1文字bboxとして妥当とみなす幅/高さの上限
-const OCR_ESTIMATED_CHAR_GAP = 4; // 片方の文字bboxだけ妥当な時に、隣の文字位置を補う仮定ギャップ
-const OCR_FIRST_SYMBOL_MIN_HEIGHT_RATIO = 0.25; // 1文字目bboxが極端に薄い時だけ補正
-const OCR_FIRST_SYMBOL_MAX_WIDTH_RATIO = 0.6; // 2文字目に対して1文字目の幅が極端に狭い時だけ補正
-const OCR_RESCUE_EXTRA = 14; // 近似候補救出だけ左右に追加する余白(px)
-
-// symbols[].bbox は呼び出し側で必ずbox.x/w/y/hと同じ座標系(元画像のcanvas座標)に
-// 揃えてから渡すこと。座標系が食い違うと、ここでの比率判定が正しく機能しない。
-//
-// 方針：1文字目のbboxがOCRの癖で極端に細い/薄いと分かった場合、
-// 「パディングを削って帳尻を合わせる」のではなく、box自体(x, w)を
-// その文字の本来の位置まで広げる。黒塗りツールは隠しすぎるより
-// 隠し漏れる方が致命的なので、疑わしい時は常に広げる方向で補正する。
-const OCR_PREV_GAP_MAX = 10; // 直前の生シンボルとの隙間がこれを超えたら位置ズレを疑う(px)
-const OCR_PREV_GAP_REANCHOR = 2; // 位置ズレを疑った時、直前シンボルの右端からこの分だけ空けて開始点にする(px)
-const OCR_LEFT_BOUNDARY_SAFE_MARGIN = 1; // 左境界は必ず1文字目bboxの内側に食い込まないよう、この分だけ手前で止める(px)
-
+// OCRの最終矩形は、対象文字のsymbol bboxをまとめて一度だけ作る。
+// 位置の推定や多段補正はここでは行わず、怪しいsymbol列はextractLineUnits側で
+// word bboxの均等分割へフォールバックしてから渡す。
 function getOcrPaintBox(box, symbols = []) {
     const valid = (symbols || [])
-        .map((s, idx) => ({ idx, bbox: s?.bbox }))
-        .filter(e => {
-            const b=e.bbox;
-            return b &&
-                Number.isFinite(b.x0) && Number.isFinite(b.x1) &&
-                Number.isFinite(b.y0) && Number.isFinite(b.y1) &&
-                b.x1 > b.x0 && b.y1 > b.y0;
-        })
-        .map(e => ({...e, w:e.bbox.x1-e.bbox.x0, h:e.bbox.y1-e.bbox.y0}));
+        .map(s => s?.bbox)
+        .filter(b =>
+            b &&
+            Number.isFinite(b.x0) && Number.isFinite(b.x1) &&
+            Number.isFinite(b.y0) && Number.isFinite(b.y1) &&
+            b.x1 > b.x0 && b.y1 > b.y0
+        );
 
     if (!valid.length) return { ...box };
 
-    // V90.22: 名前用途を優先し、1〜3文字だけ軽量な幅外れ値補正を行う。
-    // OCRで1文字だけ異常に横長なbboxが返ると隣接文字まで巻き込むため、
-    // 明らかな外れ値だけを隣の正常文字幅から縮める。追加OCRは行わない。
-    const adjusted = valid.map(e => ({...e, bbox:{...e.bbox}}));
-    if (adjusted.length >= 2 && adjusted.length <= 3) {
-        const widths=adjusted.map(e=>e.w);
-        const sorted=[...widths].sort((a,b)=>a-b);
-        const referenceWidth=adjusted.length===2
-            ? Math.min(...widths)
-            : (sorted[0]+sorted[1])/2;
-        const outlierIndexes=adjusted
-            .map((e,i)=>e.w > referenceWidth*2.2 ? i : -1)
-            .filter(i=>i>=0);
-
-        if (outlierIndexes.length===1 && referenceWidth>0) {
-            const i=outlierIndexes[0];
-            const est=Math.max(1, referenceWidth*1.15);
-            const cur=adjusted[i].bbox;
-
-            if (i===0) {
-                // 先頭文字は次の文字側に近い右端を残し、左端だけ縮める。
-                cur.x0=Math.max(0, cur.x1-est);
-            } else if (i===adjusted.length-1) {
-                // 末尾文字は前の文字側に近い左端を残し、右端だけ縮める。
-                cur.x1=cur.x0+est;
-            } else {
-                // 3文字名の中央だけ異常な場合は、左右の正常文字の間へ収める。
-                const prev=adjusted[i-1].bbox;
-                const next=adjusted[i+1].bbox;
-                const available=Math.max(1, next.x0-prev.x1);
-                if (available >= referenceWidth*0.55 && available <= referenceWidth*1.8) {
-                    cur.x0=prev.x1;
-                    cur.x1=next.x0;
-                } else {
-                    const center=(cur.x0+cur.x1)/2;
-                    cur.x0=Math.max(0, center-est/2);
-                    cur.x1=cur.x0+est;
-                }
-            }
-        }
-    }
-
-    const boxes=adjusted.map(e=>e.bbox);
-    const x0 = Math.min(...boxes.map(b => b.x0));
-    const y0 = Math.min(...boxes.map(b => b.y0));
-    const x1 = Math.max(...boxes.map(b => b.x1));
-    const y1 = Math.max(...boxes.map(b => b.y1));
+    const x0 = Math.min(...valid.map(b => b.x0));
+    const y0 = Math.min(...valid.map(b => b.y0));
+    const x1 = Math.max(...valid.map(b => b.x1));
+    const y1 = Math.max(...valid.map(b => b.y1));
 
     return {
         ...box,
@@ -383,7 +320,7 @@ function getOcrPaintBox(box, symbols = []) {
     };
 }
 
-function getOcrVisualRect(box, symbols = [], rescue = false) {
+function getOcrVisualRect(box, symbols = []) {
     const paintBox = getOcrPaintBox(box, symbols);
     const padding = Math.max(2, Math.round(paintBox.h * 0.08));
 
@@ -398,12 +335,6 @@ function getOcrVisualRect(box, symbols = [], rescue = false) {
         w: Math.max(1, right - left),
         h: Math.max(1, bottom - top)
     };
-}
-
-function paintOcr(box, text = "", symbols = [], rescue = false, style = null) {
-    const rect = getOcrVisualRect(box, symbols, rescue);
-    renderRedactionRect(rect, style);
-    return rect;
 }
 
 function paintManual(box, style = null) {
@@ -500,17 +431,6 @@ function restoreManualSnapshot(snapshot) {
     editMode = null;
     selection.hidden = true;
     redrawFromBase();
-}
-
-function getManualVisualRect(stamp) {
-    const padding = Math.max(4, Math.round(Math.min(stamp.w, stamp.h) * 0.12));
-    const verticalPadding = padding + 2;
-    return {
-        x: Math.max(0, stamp.x - padding - 6),
-        y: Math.max(0, stamp.y - verticalPadding),
-        w: stamp.w + padding,
-        h: stamp.h + verticalPadding * 2
-    };
 }
 
 function hideManualDeleteButton() {
@@ -714,38 +634,6 @@ function getOcrLanguage(target) {
     return /[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff]/u.test(target) ? "jpn" : "eng";
 }
 
-function makeGrayContrast(src){
-  const c=document.createElement('canvas'); c.width=src.width; c.height=src.height;
-  const ctx=c.getContext('2d'); ctx.drawImage(src,0,0);
-  const img=ctx.getImageData(0,0,c.width,c.height),d=img.data;
-  for(let i=0;i<d.length;i+=4){const g=Math.max(0,Math.min(255,((0.299*d[i]+0.587*d[i+1]+0.114*d[i+2])-128)*1.35+128));d[i]=d[i+1]=d[i+2]=g;}
-  ctx.putImageData(img,0,0); return c;
-}
-function makeInverted(src){
-  const c=document.createElement('canvas'); c.width=src.width; c.height=src.height;
-  const ctx=c.getContext('2d'); ctx.drawImage(src,0,0);
-  const img=ctx.getImageData(0,0,c.width,c.height),d=img.data;
-  for(let i=0;i<d.length;i+=4){d[i]=255-d[i];d[i+1]=255-d[i+1];d[i+2]=255-d[i+2];}
-  ctx.putImageData(img,0,0); return c;
-}
-function makeColorExtract(src){
-  // 色付き文字を補助的に拾うための簡易色抽出。
-  // 彩度が低い画素は白、彩度が高い画素は元の明度を保持したグレーにする。
-  const c=document.createElement('canvas'); c.width=src.width; c.height=src.height;
-  const ctx=c.getContext('2d'); ctx.drawImage(src,0,0);
-  const img=ctx.getImageData(0,0,c.width,c.height),d=img.data;
-  for(let i=0;i<d.length;i+=4){
-    const r=d[i],g=d[i+1],b=d[i+2];
-    const mx=Math.max(r,g,b),mn=Math.min(r,g,b);
-    const sat=mx-mn;
-    if(sat < 32){ d[i]=d[i+1]=d[i+2]=255; }
-    else {
-      const y=Math.round(r*.299+g*.587+b*.114);
-      d[i]=d[i+1]=d[i+2]=y;
-    }
-  }
-  ctx.putImageData(img,0,0); return c;
-}
 function makeOcrVariant(baseCanvas, name) {
     if (name === "通常") return baseCanvas;
 
@@ -806,27 +694,52 @@ function makeOcrVariant(baseCanvas, name) {
 function symbolsLookValid(word, syms) {
     const wb = word?.bbox;
     if (!wb || !syms.length) return false;
+
     let prevX1 = wb.x0 - 1;
     for (const s of syms) {
-        if (s.bbox.x0 < prevX1 - 2) return false; // 前の文字と逆転/大きく重複＝並び順が崩れている
-        prevX1 = s.bbox.x1;
+        const b=s?.bbox;
+        if (!b || b.x1<=b.x0 || b.y1<=b.y0) return false;
+        if (b.x0 < prevX1 - 2) return false;
+        prevX1 = b.x1;
     }
+
     const first = syms[0].bbox, last = syms[syms.length - 1].bbox;
     const wordWidth = Math.max(1, wb.x1 - wb.x0);
     const leftGap = first.x0 - wb.x0;
     const rightGap = wb.x1 - last.x1;
-    // 先頭/末尾の文字が単語の枠から離れすぎている＝どこかの文字が
-    // 本来の位置からズレて報告されている可能性が高い。
-    return leftGap <= wordWidth * 0.25 && rightGap <= wordWidth * 0.25;
+    if (leftGap > wordWidth * 0.25 || rightGap > wordWidth * 0.25) return false;
+
+    // 名前用途で特に重要な1〜3文字の日本語を安定させるため、
+    // 日本語symbolだけ「1文字なのに異常に横長」「文字幅が1つだけ極端」を軽く検査する。
+    // 異常ならここで座標を直接いじらず、呼び出し側のword bbox均等分割に任せる。
+    const japanese = syms
+        .map(s => ({ s, chars:[...normalize(s.text)] }))
+        .filter(e => e.chars.length===1 && /[ぁ-ゖァ-ヺ一-龯々〆ヵヶ]/u.test(e.chars[0]))
+        .map(e => {
+            const b=e.s.bbox;
+            return { w:b.x1-b.x0, h:b.y1-b.y0 };
+        });
+
+    if (japanese.length >= 2) {
+        if (japanese.some(e => e.w / Math.max(1,e.h) > 1.80)) return false;
+
+        const widths=japanese.map(e=>e.w).sort((a,b)=>a-b);
+        const minW=Math.max(1,widths[0]);
+        const maxW=widths[widths.length-1];
+        if (japanese.length <= 3) {
+            if (maxW / minW > 2.20) return false;
+        } else {
+            const mid=Math.floor(widths.length/2);
+            const median=widths.length%2 ? widths[mid] : (widths[mid-1]+widths[mid])/2;
+            if (median>0 && maxW > median*2.20) return false;
+        }
+    }
+
+    return true;
 }
 
-// punctuation（正規化で消える記号）も含めて「直前の生シンボルのbbox」を
-// 各文字に記録しておく。「？」の直後の文字だけbboxが不自然に右へズレる
-// パターンが繰り返し確認されているため、後段(getOcrPaintBox)でこの
-// prevRawBboxとの隙間を見て、怪しければ位置を補正する。
 function extractLineUnits(line){
   const units=[];
-  let prevBbox=null;
   for(const word of (line?.words||[])){
     const rawSyms=(word?.symbols||[]).filter(s=>s?.bbox);
     const kept=rawSyms.filter(s=>normalize(s.text));
@@ -834,41 +747,29 @@ function extractLineUnits(line){
       for(let idx=0;idx<rawSyms.length;idx++){
         const s=rawSyms[idx];
         const chNorm=normalize(s.text);
-        if(chNorm){
-          const chars=[...chNorm];
-          let ch;
-          if(chars.length>1){
-            // Tesseractが稀に、本来1文字ずつ正しく分かれているsymbol列に対して、
-            // 同じ複数文字のテキスト（例：「ネル」）を重複して報告することがある
-            // （bboxの分割自体は正しいのに、textラベルだけ被って長くなる）。
-            // このsymbol自身のbboxはそのまま信用し、直前から続く「同じテキストを
-            // 繰り返す連続グループ」の中で自分が何番目かを見て、その順番の
-            // 1文字だけを割り当てる。
-            let runStart=idx;
-            while(runStart>0&&normalize(rawSyms[runStart-1].text)===chNorm)runStart--;
-            const posInRun=idx-runStart;
-            ch=chars[Math.min(posInRun,chars.length-1)];
-          }else{
-            ch=chars[0];
-          }
-          units.push({ch,bbox:s.bbox,raw:s.text,prevRawBbox:prevBbox});
+        if(!chNorm) continue;
+        const chars=[...chNorm];
+        let ch;
+        if(chars.length>1){
+          // 同じ複数文字ラベルが連続symbolへ重複して付くケースでは、
+          // bboxは維持したまま連続順に1文字ずつ割り当てる。
+          let runStart=idx;
+          while(runStart>0&&normalize(rawSyms[runStart-1].text)===chNorm)runStart--;
+          const posInRun=idx-runStart;
+          ch=chars[Math.min(posInRun,chars.length-1)];
+        }else{
+          ch=chars[0];
         }
-        prevBbox=s.bbox;
+        units.push({ch,bbox:s.bbox,raw:s.text,bboxSource:'symbol'});
       }
     }else if(word?.bbox&&normalize(word.text)){
+      // symbolの順序・幅が怪しい時は、word全体を正規化後の文字数で均等分割する。
+      // 追加OCRは使わないため速度への影響はほぼない。
       const chars=[...normalize(word.text)],b=word.bbox;
       chars.forEach((ch,i)=>{
         const bbox={x0:b.x0+(b.x1-b.x0)*i/chars.length,y0:b.y0,x1:b.x0+(b.x1-b.x0)*(i+1)/chars.length,y1:b.y1};
-        units.push({ch,raw:word.text,bbox,prevRawBbox:prevBbox});
-        prevBbox=bbox;
+        units.push({ch,raw:word.text,bbox,bboxSource:'word-split'});
       });
-    }else if(rawSyms.length){
-      // 「？」単体のように、文字としては1つも残らない(=正規化で空になる)
-      // 単語。ここでunitsには何も追加しないが、直後の文字が正しく
-      // 「直前の右端」を参照できるよう、この単語の右端だけは必ず記録する。
-      prevBbox=rawSyms[rawSyms.length-1].bbox;
-    }else if(word?.bbox){
-      prevBbox=word.bbox;
     }
   }
   return units;
@@ -903,7 +804,7 @@ function findTargetInUnits(units,target){
   return hits;
 }
 
-// V76実験：OCRが対象文字の間に余計なunitを挟んだり、文字を細かく分割しても、
+// OCRが対象文字の間に余計なunitを挟んだり、文字を細かく分割しても、
 // 「対象文字がこの順番で出現しているか」を見る。完全一致とは別の診断用ルート。
 // 近似文字そのものへの置換は行わず、対象文字が実際にunits内に存在する場合だけ拾う。
 function findTargetInUnitsRobust(units,target,options={}){
@@ -952,44 +853,8 @@ function findTargetInUnitsRobust(units,target,options={}){
 
 
 
-// V63実験：OCRで正しく拾えた「文字単体」をテンプレートにして、
-// 同じ文字形＋文字間隔を画像そのものから探す。まずは診断専用で、黒塗りには使用しない。
-function grayPixel(data, w, x, y) {
-  const i = (y * w + x) * 4;
-  return data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114;
-}
-
-function makeTemplateSamples(imageData, x, y, w, h, cols=16, rows=16) {
-  const out=[];
-  for(let ry=0; ry<rows; ry++) for(let rx=0; rx<cols; rx++) {
-    const px=Math.min(imageData.width-1, Math.max(0, Math.floor(x+(rx+0.5)*w/cols)));
-    const py=Math.min(imageData.height-1, Math.max(0, Math.floor(y+(ry+0.5)*h/rows)));
-    out.push(grayPixel(imageData.data,imageData.width,px,py));
-  }
-  const mean=out.reduce((a,b)=>a+b,0)/out.length;
-  const norm=Math.sqrt(out.reduce((a,v)=>a+(v-mean)*(v-mean),0))||1;
-  return {values:out,mean,norm,cols,rows,w,h};
-}
-
-function samplePatchScore(imageData, template, x, y, w=template.w, h=template.h) {
-  const vals=[];
-  for(let ry=0; ry<template.rows; ry++) for(let rx=0; rx<template.cols; rx++) {
-    const px=Math.min(imageData.width-1, Math.max(0, Math.floor(x+(rx+0.5)*w/template.cols)));
-    const py=Math.min(imageData.height-1, Math.max(0, Math.floor(y+(ry+0.5)*h/template.rows)));
-    vals.push(grayPixel(imageData.data,imageData.width,px,py));
-  }
-  const mean=vals.reduce((a,b)=>a+b,0)/vals.length;
-  let dot=0, norm=0;
-  for(let i=0;i<vals.length;i++) {
-    const a=template.values[i]-template.mean, b=vals[i]-mean;
-    dot+=a*b; norm+=b*b;
-  }
-  return dot/(template.norm*Math.sqrt(norm)||1);
-}
-
-// V64実験：画像を機械的に分割するのではなく、画素の密度から
-// 「文字がありそうな横長の領域」を推定し、その領域だけを局所OCRする。
-// 診断専用。黒塗りには使用しない。
+// 文字密度から横長のテキスト候補領域を推定する。
+// OCR本体の追加局所走査と診断の両方で使用する。
 function detectTextLikeRegions(sourceCanvas) {
   const ctx=sourceCanvas.getContext('2d',{willReadFrequently:true});
   const img=ctx.getImageData(0,0,sourceCanvas.width,sourceCanvas.height);
@@ -1193,55 +1058,6 @@ async function collectTextRegionMatches(worker, sourceCanvas, target) {
   return {detected, tested, matches, elapsed: performance.now() - started};
 }
 
-// V81: かな限定の誤認識救出。V74の「1文字違いなら何でも候補」より
-// かなり厳しく、対象文字ごとに限定した置換だけを許容する。
-// 漢字はここでは扱わない。
-const V81_KANA_PAIRS = new Map([
-  ['ネ', new Set(['デ','ね'])], ['ね', new Set(['ネ'])],
-  ['ル', new Set(['る','レ'])], ['る', new Set(['ル'])],
-  ['レ', new Set(['ル'])],
-  ['ナ', new Set(['な'])], ['な', new Set(['ナ'])],
-  ['ニ', new Set(['二','に'])], ['に', new Set(['ニ'])],
-  ['二', new Set(['ニ'])],
-  ['カ', new Set(['力','か'])], ['か', new Set(['カ'])],
-  ['キ', new Set(['き'])], ['き', new Set(['キ'])],
-  ['ク', new Set(['く'])], ['く', new Set(['ク'])],
-  ['ケ', new Set(['け'])], ['け', new Set(['ケ'])],
-  ['コ', new Set(['こ'])], ['こ', new Set(['コ'])],
-  ['サ', new Set(['さ'])], ['さ', new Set(['サ'])],
-  ['シ', new Set(['し'])], ['し', new Set(['シ'])],
-  ['ス', new Set(['す'])], ['す', new Set(['ス'])],
-  ['セ', new Set(['せ'])], ['せ', new Set(['セ'])],
-  ['ソ', new Set(['そ'])], ['そ', new Set(['ソ'])],
-  ['タ', new Set(['た'])], ['た', new Set(['タ'])],
-  ['チ', new Set(['ち'])], ['ち', new Set(['チ'])],
-  ['ツ', new Set(['つ'])], ['つ', new Set(['ツ'])],
-  ['テ', new Set(['て'])], ['て', new Set(['テ'])],
-  ['ト', new Set(['と'])], ['と', new Set(['ト'])],
-  ['ハ', new Set(['は'])], ['は', new Set(['ハ'])],
-  ['ヒ', new Set(['ひ'])], ['ひ', new Set(['ヒ'])],
-  ['フ', new Set(['ふ'])], ['ふ', new Set(['フ'])],
-  ['ヘ', new Set(['へ'])], ['へ', new Set(['ヘ'])],
-  ['ホ', new Set(['ほ'])], ['ほ', new Set(['ホ'])],
-  ['マ', new Set(['ま'])], ['ま', new Set(['マ'])],
-  ['ミ', new Set(['み'])], ['み', new Set(['ミ'])],
-  ['ム', new Set(['む'])], ['む', new Set(['ム'])],
-  ['メ', new Set(['め'])], ['め', new Set(['メ'])],
-  ['モ', new Set(['も'])], ['も', new Set(['モ'])],
-  ['ヤ', new Set(['や'])], ['や', new Set(['ヤ'])],
-  ['ユ', new Set(['ゆ'])], ['ゆ', new Set(['ユ'])],
-  ['ヨ', new Set(['よ'])], ['よ', new Set(['ヨ'])],
-  ['ラ', new Set(['ら'])], ['ら', new Set(['ラ'])],
-  ['リ', new Set(['り'])], ['り', new Set(['リ'])],
-  ['ロ', new Set(['ろ'])], ['ろ', new Set(['ロ'])],
-  ['ワ', new Set(['わ'])], ['わ', new Set(['ワ'])]
-]);
-function isV81Kana(ch){ return /[ぁ-ゖァ-ヺー]/u.test(ch); }
-function isV81Kanji(ch){ return /\p{Script=Han}/u.test(ch); }
-function v81KanaEquivalent(targetCh, ocrCh){
-  if(targetCh===ocrCh) return true;
-  return V81_KANA_PAIRS.get(targetCh)?.has(ocrCh) || false;
-}
 function editDistance(a,b){const A=[...a],B=[...b],d=Array.from({length:A.length+1},()=>Array(B.length+1).fill(0));for(let i=0;i<=A.length;i++)d[i][0]=i;for(let j=0;j<=B.length;j++)d[0][j]=j;for(let i=1;i<=A.length;i++)for(let j=1;j<=B.length;j++)d[i][j]=Math.min(d[i-1][j]+1,d[i][j-1]+1,d[i-1][j-1]+(A[i-1]===B[j-1]?0:1));return d[A.length][B.length];}
 function sequenceSimilarity(a, b) {
   const A = [...a], B = [...b];
@@ -1411,45 +1227,9 @@ async function recognizeVariant(worker,inputCanvas,target,mode,scale,offsetX=0,o
     // symbols[].bbox はOCR用に拡大したcanvas(scale倍)の座標。境界線を追加した場合は
     // その分のoffsetも引いて元画像座標へ戻す。
     const scaleBbox=b=>b?{x0:(b.x0)/scale,y0:(b.y0)/scale,x1:(b.x1)/scale,y1:(b.y1)/scale}:null;
-    const symbols=hit.symbols.map(s=>({...s,bbox:scaleBbox(s.bbox),prevRawBbox:scaleBbox(s.prevRawBbox)}));
+    const symbols=hit.symbols.map(s=>({...s,bbox:scaleBbox(s.bbox)}));
     matches.push({x0:hit.targetBox.x0/scale,y0:hit.targetBox.y0/scale,x1:hit.targetBox.x1/scale,y1:hit.targetBox.y1/scale,mode,lineText,symbols});
 }}const words=(offsetX||offsetY)?shiftOcrBboxes(data.words||[],offsetX,offsetY):(data.words||[]);return {mode,lines,words,rawText:String(data.text||""),matches,near:findNearCandidates(lines,target)};}
-
-// 完全一致した箇所でも、Tesseractがページ全体を一度にOCRした際に
-// 文字1つ分だけ座標がズレて報告されることがある（周辺のノイズ・隣接文字の影響）。
-// 単語のbbox自体がそのズレた文字から組み立てられている場合、
-// symbolsLookValidの内部チェックだけではすり抜けてしまう。
-// なので、候補の周辺だけを切り出してノイズを減らし、高倍率で再OCRすることで
-// より位置ズレの少ないbboxを取り直す。見つからなければ元のboxをそのまま使う
-// （黒塗りが消えることは絶対にないようにする）。
-//
-// 注意：ここは必ず sourceImage（無加工の元画像）から直接切り出す。
-// 表示用canvasは黒塗り実行後は既に黒塗り済みになっているため、そこから切り出すと
-// 「既に黒く塗られた場所」を再OCRすることになり、見つからず「変更なし」という
-// 誤った（一見正しく見える）結果になる。
-function exactHitNeedsRefine(box){
-    const symbols = box?.symbols || [];
-    if (symbols.length < 2 || !box?.h || !box?.w) return true;
-    const entries = symbols.map(s => s?.bbox).filter(b => b && Number.isFinite(b.x0) && Number.isFinite(b.x1) && Number.isFinite(b.y0) && Number.isFinite(b.y1) && b.x1>b.x0 && b.y1>b.y0).map(b => ({b,w:b.x1-b.x0,h:b.y1-b.y0}));
-    if (entries.length < 2) return true;
-    const plausible = entries.every(e => e.h >= box.h*0.40 && e.h <= box.h*1.35 && e.w > 0 && e.w <= box.h*OCR_SYMBOL_MAX_WIDTH_HEIGHT_RATIO);
-    if (!plausible) return true;
-    const sx0=Math.min(...entries.map(e=>e.b.x0)), sx1=Math.max(...entries.map(e=>e.b.x1));
-    const sy0=Math.min(...entries.map(e=>e.b.y0)), sy1=Math.max(...entries.map(e=>e.b.y1));
-    const sw=sx1-sx0, sh=sy1-sy0;
-    if (sw < box.w*0.45 || sw > box.w*1.35) return true;
-    if (sh < box.h*0.40 || sh > box.h*1.30) return true;
-    if (entries.length===2){
-        const ratio=Math.max(entries[0].w,entries[1].w)/Math.max(1,Math.min(entries[0].w,entries[1].w));
-        if (ratio>2.2) return true;
-    }
-    return false;
-}
-
-async function refineExactHitBox(worker, box, target) {
-    // V90.19: 完全一致HITは生bboxをそのまま採用する。
-    return box;
-}
 
 const OCR_BORDER_PX = 10;
 
@@ -1465,7 +1245,7 @@ function makeWhiteBorderCanvas(src,pad){
 }
 
 function buildOcrCanvas(){
-  // V90.9: 小さめ画像は従来どおり2.5倍。大きな縦長画像だけ、
+  // 小さめ画像は2.5倍。大きな縦長画像だけ、
   // OCRキャンバスが約1100万pixelを超えない範囲まで自動的にscaleを下げる。
   // これでiPhone Safariのメモリ急増を抑えつつ、通常画像の精度は変えない。
   const baseScale=2.5;
@@ -1486,11 +1266,10 @@ function buildOcrCanvas(){
 async function collectOcrResults(worker,target){
   const {canvas:oc,scale}=buildOcrCanvas();
   const results=[];
-  const stats={primaryMs:0,fallbackMs:0,primaryHitCount:0,fallbackUsed:false,primaryName:"グレー＋コントラスト",fallbackNames:["二値化180","二値化220","反転"],fallbackSkippedForSpeed:false};
+  const stats={primaryMs:0,fallbackMs:0,primaryHitCount:0,fallbackUsed:false,primaryName:"グレー＋コントラスト",fallbackSkippedForSpeed:false};
 
-  // まず今回の実験で最も安定していた「グレー＋コントラスト」だけを実行。
-  // ここで1件でも正確に見つかれば、追加の全体OCRは省略する。
-  // ※診断用の速度実験版。見落としの有無を確認するため、V32は別に保存しておく。
+  // 主OCRは「グレー＋コントラスト」を1回だけ実行する。
+  // 重い全画面fallbackは使わず、後段の近似候補・局所OCR・補助探索へつなぐ。
   const primaryStarted=performance.now();
   status("実行中…");
   const primaryBase=makeOcrVariant(oc,stats.primaryName);
@@ -1505,14 +1284,11 @@ async function collectOcrResults(worker,target){
     stats.primaryMs=performance.now()-primaryStarted;
   }
 
-  // V90.19: コカゲの3文字グローバル救出をV90.12/14系の条件へ戻して再検証する。
-  // primary HITが0件でも追加の全画面OCRは挟まず、
-  // 元の近似候補群をそのまま候補救出へ渡す。
-  // 大画像でのSafariメモリ対策も維持する。
+  // primary HITが0件でも重い全画面OCRは追加せず、近似候補群をそのまま救出へ渡す。
   stats.fallbackUsed=false;
   stats.fallbackSkippedForSpeed = stats.primaryHitCount===0;
   stats.fallbackMs=0;
-  stats.fallbackReason = stats.primaryHitCount===0 ? "V90.19: 近似候補救出を優先して省略" : "不要";
+  stats.fallbackReason = stats.primaryHitCount===0 ? "近似候補救出を優先して省略" : "不要";
 
   // 色抽出OCRは主OCRのHIT数に関係なく1回だけ追加実行する。
   const colorStarted=performance.now();
@@ -1542,13 +1318,6 @@ function getCandidateBox(candidate, scale) {
     x1: Math.max(...xs) / scale,
     y1: Math.max(...ys) / scale
   };
-}
-
-function candidateLocationKey(candidate, scale) {
-  const b = getCandidateBox(candidate, scale);
-  if (!b) return null;
-  // 同じ文字列の候補が数pxずれて複数の前処理から出ても、同一地点としてまとめる。
-  return `${Math.round(b.x0 / 18)}:${Math.round(b.y0 / 18)}:${Math.round(b.x1 / 18)}:${Math.round(b.y1 / 18)}`;
 }
 
 function groupNearCandidates(results, scale) {
@@ -1621,7 +1390,7 @@ async function refineNearCandidates(worker, results, ocrCanvas, target, scale) {
   let fastRejected = 0;
   const MAX_REFINE_GROUPS = 8;
 
-  // V90.12:
+  // 3文字名の近似候補救出:
   // 3文字名は1文字誤認で67%まで落ちるため、「同一地点で2回」だけでなく、
   // 画像内の別地点でも同じ誤認文字列が繰り返された場合を強い根拠として扱う。
   // 同一group内の重複は1票にまとめ、別groupごとに1票だけ数える。
@@ -1865,7 +1634,7 @@ async function run(){
       x:b.x0, y:b.y0, w:b.x1-b.x0, h:b.y1-b.y0, symbols:b.symbols||[], source:"OCR"
     }));
 
-    // V90.19: 完全一致HITの高倍率再OCRは停止。
+    // 完全一致HITの高倍率再OCRは行わない。
     // symbol union + 一律8%余白だけで最終位置を決める。
     const exactRefineAttempted = 0;
     const exactRefineSkipped = paintBoxes.length;
@@ -1884,7 +1653,7 @@ async function run(){
         const area=Math.min(o.w*o.h,(b.x1-b.x0)*(b.y1-b.y0));
         return area>0 && inter/area>.45;
       });
-      if(!duplicate) paintBoxes.push({x:b.x0,y:b.y0,w:b.x1-b.x0,h:b.y1-b.y0,symbols:r.symbols||[],source:r.recovery||"再OCR",rescue:r.recovery==="近似候補救出"});
+      if(!duplicate) paintBoxes.push({x:b.x0,y:b.y0,w:b.x1-b.x0,h:b.y1-b.y0,symbols:r.symbols||[],source:r.recovery||"再OCR"});
     }
 
 
@@ -1910,7 +1679,7 @@ async function run(){
     }
 
 
-    // V90.7: 通常OCR/局所OCRで拾えなかった場所だけ、
+    // 通常OCR/局所OCRで拾えなかった場所だけ、
     // コントラスト補正→イタリックテンプレートを補助候補として追加する。
     status("OCR中…\nイタリック文字の取りこぼしを補助確認しています。");
     const italicVariantHeights = chooseItalicVariantHeights(regionScan.detected);
@@ -1918,7 +1687,7 @@ async function run(){
     for (const c of italicRescue.accepted) {
       paintBoxes.push({
         x:c.x, y:c.y, w:c.w, h:c.h,
-        symbols:[], source:"イタリック救出", rescue:false
+        symbols:[], source:"イタリック救出"
       });
     }
 
@@ -1933,7 +1702,7 @@ async function run(){
 
     pushManualHistory();
     for(const b of paintBoxes){
-      const rect=getOcrVisualRect({x:b.x,y:b.y,w:b.w,h:b.h},b.symbols||[],b.rescue===true);
+      const rect=getOcrVisualRect({x:b.x,y:b.y,w:b.w,h:b.h},b.symbols||[]);
       if(rect.w < 1 || rect.h < 1) continue;
       manualStamps.push({
         x:rect.x, y:rect.y, w:rect.w, h:rect.h,
@@ -1950,35 +1719,19 @@ async function run(){
 }
 
 
-// ===== V86 実験：14px Canvas文字テンプレート検索（グレー文字パス修正版） =====
-// OCRのbboxをテンプレートの横幅として引き伸ばさず、14pxで実際に描画した文字の
-// アルファ領域だけを切り出し、目標高さへ等倍比率で拡大して検索する。
-// 診断専用。自動黒塗りにはまだ接続しない。
+// ===== イタリック補助探索用テンプレート =====
+// 14pxで描画した文字のアルファ領域を切り出し、目標高さへ拡大して検索する。
 const TEMPLATE_FONT_STACK='-apple-system, BlinkMacSystemFont, "Helvetica Neue", "Hiragino Sans", "Yu Gothic", sans-serif';
 const TEMPLATE_BASE_FONT_SIZE=14;
 const TEMPLATE_TARGET_HEIGHT=32;
-const TEMPLATE_STEP=4;
-const TEMPLATE_SCORE_THRESHOLD=0.72;
-const TEMPLATE_MIN_BRIGHTNESS=105;
 const TEMPLATE_FG_WEIGHT=0.72;
 const TEMPLATE_BG_WEIGHT=0.28;
-const TEMPLATE_MIN_BG_SCORE=0.55;
 const TEMPLATE_SEARCH_LEFT_RATIO=0.10;
 const TEMPLATE_SEARCH_RIGHT_RATIO=0.02;
 const TEMPLATE_SEARCH_TOP_RATIO=0.12;
-const TEMPLATE_GRAY_TEXT_MIN=90;
-const TEMPLATE_GRAY_TEXT_MAX=210;
-const TEMPLATE_GRAY_BG_MAX=75;
-const TEMPLATE_GRAY_SCORE_THRESHOLD=0.70;
-const TEMPLATE_GRAY_MIN_BG_SCORE=0.50;
 
-// ===== V90.19 実験：コントラスト補正＋イタリック多段テンプレート診断 =====
-// 真緒のような画数の多い文字も考慮し、
-// コントラスト補正後の画像に対して
-// 1) テンプレート高さ 30 / 32 / 34px
-// 2) 傾き補正 0.00 / 0.08 / 0.16
-// を少数バリエーションで試す。
-// 本番は文字領域だけ粗探索し、HIT済み候補位置を事前スキップ。文字領域が0件の時だけ全画面fallback。診断単体は従来どおり全画面比較可能。
+// ===== コントラスト補正＋イタリック補助探索 =====
+// 文字領域を先に探索し、既存HITを除外しながら全画面を補完する。
 const ITALIC_VARIANT_HEIGHTS = [32, 34]; // 推定不能時の既定値
 const ITALIC_VARIANT_SKEWS = [0.00];
 const ITALIC_COARSE_STEP = 6;
@@ -2396,9 +2149,9 @@ function collectItalicRescueCandidates(source, text, existingBoxes=[], variantHe
   };
 }
 
-// ===== /V90.19 実験 =====
+// ===== /イタリック補助探索 =====
 
-// ===== /V83 実験 =====
+
 
 async function diagnoseOCR(){
   ocrDiagnostics.hidden=false;
@@ -2436,9 +2189,9 @@ async function diagnoseOCR(){
     for(const r of results){
       lines.push(`===== ${r.mode} / PSM 11 =====`,`HIT：${r.matches.length}件`);
       for(const m of r.matches){
-        const b={x0:m.x0*scale,y0:m.y0*scale,x1:m.x1*scale,y1:m.y1*scale};
+        const b={x0:m.x0,y0:m.y0,x1:m.x1,y1:m.y1};
         lines.push(`  HIT行：「${m.lineText}」`,`    target bbox=(${b.x0},${b.y0})-(${b.x1},${b.y1})`);
-        m.symbols.forEach((s,i)=>{const q=s.bbox;lines.push(`      symbol[${i}] 「${s.ch}」 raw=「${s.raw}」 bbox=(${q.x0},${q.y0})-(${q.x1},${q.y1})`);});
+        m.symbols.forEach((s,i)=>{const q=s.bbox;const src=s.bboxSource==="word-split"?" / word均等分割":"";lines.push(`      symbol[${i}] 「${s.ch}」 raw=「${s.raw}」 bbox=(${q.x0},${q.y0})-(${q.x1},${q.y1})${src}`);});
       }
       if(r.near.length)lines.push(`近似候補：${r.near.map(x=>`「${x.candidate}」${Math.round(x.similarity*100)}%`).join(" / ")}`);
       lines.push(`認識テキスト：${r.rawText.replace(/\n/g," / ")}`,"");
@@ -2466,7 +2219,7 @@ async function diagnoseOCR(){
     }
     if(!refined.length && !acceptedNear.length) lines.push('再OCR・近似候補救出で対象文字を確認できた候補地点はありません。');
 
-    lines.push("",`===== 完全一致の位置確認（生bbox＋固定余白） =====`);
+    lines.push("",`===== 完全一致の最終黒塗り位置 =====`);
     const exactMatches=mergeMatches(results);
     const verifyStarted=performance.now();
     let changedCount=0;
@@ -2475,17 +2228,17 @@ async function diagnoseOCR(){
       const after=before;
       const moved=Math.abs(after.x-before.x)>1||Math.abs(after.y-before.y)>1||Math.abs(after.w-before.w)>1||Math.abs(after.h-before.h)>1;
       if(moved)changedCount++;
-      lines.push(`「${m.lineText}」： 元bbox=(${Math.round(before.x)},${Math.round(before.y)},w${Math.round(before.w)},h${Math.round(before.h)}) → 検証後=(${Math.round(after.x)},${Math.round(after.y)},w${Math.round(after.w)},h${Math.round(after.h)}) ${moved?'※位置を修正':'変更なし'}`);
+      const bboxNote=(m.symbols||[]).some(s=>s.bboxSource==="word-split")?" / symbol異常→word均等分割":"";
+      lines.push(`「${m.lineText}」： 元bbox=(${Math.round(before.x)},${Math.round(before.y)},w${Math.round(before.w)},h${Math.round(before.h)}) → 使用bbox=(${Math.round(after.x)},${Math.round(after.y)},w${Math.round(after.w)},h${Math.round(after.h)}) ${moved?'※位置を修正':'変更なし'}${bboxNote}`);
       // 実際に黒塗りが描画される最終矩形も、同じ計算式で再現。
-      const finalRect=getOcrVisualRect(after, after.symbols||[]);
+      const finalRect=getOcrVisualRect(after, m.symbols||[]);
       lines.push(`　→ 最終黒塗り座標=(${Math.round(finalRect.x)},${Math.round(finalRect.y)},w${Math.round(finalRect.w)},h${Math.round(finalRect.h)})${finalRect.w<=4?' ※幅が極端に狭い(縦棒の疑いあり)':''}`);
     }
     const verifyElapsed=performance.now()-verifyStarted;
     lines.push(`検証時間：${(verifyElapsed/1000).toFixed(2)}秒 / 修正：${changedCount}件 / 対象：${exactMatches.length}件`);
 
-    // V67実験：V64の文字領域推定を維持し、通常OCRで見つからなかった領域だけ
-    // 前処理違いの局所OCRを追加する。
-    lines.push("",`===== 文字領域全走査＋局所OCR実験（V70） =====`);
+    // 診断でも本番と同じ文字領域検出を使って局所OCR結果を確認する。
+    lines.push("",`===== 文字領域全走査＋局所OCR =====`);
     const regionResult=await runTextRegionExperiment(worker,canvas,target);
     lines.push(`検出候補：${regionResult.detected.regions.length}領域 / 局所OCR実行：${regionResult.tested.length}領域 / 走査間隔：${regionResult.detected.sample}px / 通常：2倍・PSM7`);
     lines.push(`追加前処理：なし / 追加OCR実行：0回`);
@@ -2504,9 +2257,9 @@ async function diagnoseOCR(){
     });
     lines.push(`局所OCR時間：${(regionResult.elapsed/1000).toFixed(2)}秒`);
     lines.push(`色抽出OCR：${stats.colorHitCount||0}件 / ${(stats.colorMs/1000).toFixed(2)}秒`);
-    lines.push(`※ V68の全領域走査方式を診断用にも使用。V70本体では、この局所OCRのHITを追加の黒塗り候補として統合します。`);
+    lines.push(`※ この局所OCRのHITは、自動黒塗り候補にも統合します。`);
 
-    lines.push("",`===== V90.22 コントラスト＋イタリック救出診断 =====`);
+    lines.push("",`===== イタリック救出診断 =====`);
     lines.push(`方式：コントラスト補正 → イタリックテンプレート / 粗探索${ITALIC_COARSE_STEP}px → 局所再探索${ITALIC_REFINE_STEP}px`);
     lines.push(`テンプレートバリエーション：高さ ${diagnosticItalicHeights.join("/")}px（文字領域から自動推定）× 傾き ${ITALIC_VARIANT_SKEWS.map(v=>v.toFixed(2)).join("/")}`);
     const firstVariant=italicVariantResult.variants?.[0];
@@ -2519,10 +2272,10 @@ async function diagnoseOCR(){
     (italicVariantResult.merged||[]).slice(0,10).forEach((c,i)=>lines.push(`  統合候補${i+1}: score ${c.score.toFixed(3)} / 形状${c.fgScore.toFixed(3)} / 背景${c.bgScore.toFixed(3)} / ${c.label} / (${c.x},${c.y},w${c.w},h${c.h})`));
     lines.push(`本番採用候補：${italicProductionPreview.accepted.length}件 / 条件 score≥${ITALIC_RESCUE_SCORE_MIN.toFixed(2)}・形状≥${ITALIC_RESCUE_FG_MIN.toFixed(2)}・背景≥${ITALIC_RESCUE_BG_MIN.toFixed(2)}`);
     (italicProductionPreview.accepted||[]).slice(0,10).forEach((c,i)=>lines.push(`  本番候補${i+1}: score ${c.score.toFixed(3)} / 形状${c.fgScore.toFixed(3)} / 背景${c.bgScore.toFixed(3)} / (${c.x},${c.y},w${c.w},h${c.h})`));
-    lines.push(`※ V90.12では、3文字名の1文字誤認（例：コカゲ→コカグ）は、同じ地点で複数回または画像内の別地点で同じ誤認が2地点以上出た場合に近似候補救出します。オレンジ枠は本番採用候補だけです。`);
+    lines.push(`※ 3文字名の1文字誤認（例：コカゲ→コカグ）は、同じ誤認が複数地点で確認できた場合に近似候補救出します。オレンジ枠は本番採用候補だけです。`);
 
 
-    lines.push('', `===== V76 局所OCR・順序維持ロバスト一致実験 =====`);
+    lines.push('', `===== 局所OCR・順序維持ロバスト一致 =====`);
     const localRobust=[];
     for(const r of regionResult.tested){
       for(const v of (r.variants||[])){
@@ -2559,8 +2312,8 @@ async function diagnoseOCR(){
       `診断全体：${(totalElapsed/1000).toFixed(2)}秒`,
       `候補地点：${candidateGroups.length} / 色抽出HIT：${stats.colorHitCount||0} / 近似候補救出：${refine.fastRecovered} / 再OCR実行：${refine.attempted} / 再OCR追加パス：${refine.extraPasses} / 既存HITで省略：${refine.skippedExact}`,
       "",
-      `※ 今回は速度実験として、まずグレー＋コントラストだけを全体OCRします。`,
-      `※ V90.22では、探索方式はV90.20のまま維持し、イタリック採用条件だけを緩和しています。総合score 0.58以上・形状0.47以上・背景0.76以上。`,
+      `※ 全画面OCRはグレー＋コントラストを主経路にし、重いfallbackは省略します。`,
+      `※ イタリック救出は文字領域を先に確認し、既存HITを除外しながら全画面を補完探索します。`,
       `※ 大画像や強い近似候補がある場合は全画面fallbackを省略し、後段の局所救出へ進みます。`,
       `※ 候補地点は同じ位置付近の候補をまとめています。`,
       `※ 近似候補は、対象文字と同じ文字数で、3文字以上の対象なら「対象の1文字違い」程度を先に救出します。
@@ -2586,7 +2339,7 @@ async function diagnoseOCR(){
       const label=document.createElement('span'); label.className='ocr-debug-label'; label.textContent=`${r.mode}: ${target}`;
       box.appendChild(label); ocrDebugLayer.appendChild(box);
     }
-    // V90.10: オレンジ枠は「本番で実際に採用される候補」だけ表示する。
+    // オレンジ枠は「本番で実際に採用される候補」だけ表示する。
     // 閾値未満の生候補は診断テキストには残すが、画像上には出さない。
     for(const c of (italicProductionPreview.accepted||[])){
       const box=document.createElement('div');
@@ -2594,7 +2347,7 @@ async function diagnoseOCR(){
       box.style.left=`${tr.left+c.x*tr.scaleX}px`; box.style.top=`${tr.top+c.y*tr.scaleY}px`;
       box.style.width=`${c.w*tr.scaleX}px`; box.style.height=`${c.h*tr.scaleY}px`;
       const label=document.createElement('span'); label.className='ocr-debug-label';
-      label.textContent=`V90.19 本番候補 ${c.score.toFixed(2)}`;
+      label.textContent=`イタリック候補 ${c.score.toFixed(2)}`;
       box.appendChild(label); ocrDebugLayer.appendChild(box);
     }
 
@@ -2749,7 +2502,6 @@ function getRawManualPoint(event) {
     return getCanvasPoint(event);
 }
 
-// V86.1:
 // 新規描画時の指オフセットは画面表示上のCSS pxをcanvas座標へ変換する。
 // これにより等倍・拡大時のどちらでも、指から見た描画位置を同じ感覚に保つ。
 // 横方向は自由矩形・なぞり式とも指の実位置に合わせ、Y方向だけ上へずらす。
@@ -2891,7 +2643,6 @@ canvasWrap.addEventListener("pointerdown", event => {
 
     const isStampPlacement = stampMode.checked && getLastManualStamp();
 
-    // V87:
     // スタンプ配置は「ここに置きたい」というタップ位置を最優先し、オフセットを使わない。
     // 通常の手動描画だけY方向のオフセットを使う。
     dragStart = isStampPlacement
@@ -2917,7 +2668,7 @@ canvasWrap.addEventListener("pointerdown", event => {
 });
 
 canvasWrap.addEventListener("pointermove", event => {
-    // V90.19: PCでmouseupを取りこぼしても、ボタンを離したマウスには追従しない。
+    // PCでmouseupを取りこぼしても、ボタンを離したマウスには追従しない。
     if (event.pointerType === "mouse" && event.buttons === 0 && isDragging && editMode) {
         isDragging = false;
         dragStart = null;
@@ -3004,7 +2755,7 @@ function endPointer(event) {
         if (editMode.type === "move") applyMoveEdit(point);
         else applyResizeEdit(point);
 
-        // V90.19: PCマウスではpointerup後もeditMode/isDraggingが残ると、
+        // PCマウスではpointerup後もeditMode/isDraggingが残ると、
         // カーソル移動だけで黒塗りが追従し続ける。
         // 選択状態だけ残し、ドラッグ状態はここで必ず終了する。
         isDragging = false;
@@ -3153,8 +2904,7 @@ resetBtn.addEventListener("click", () => {
 manualBtn.addEventListener("click", startManualMode);
 manualDoneBtn.addEventListener("click", stopManualMode);
 
-// V87.1: 保存設定/履歴は定数とヘルパー定義が済んでから初期化する。
-// V87ではTDZ中のSETTINGS_STORAGE_KEYを参照して初期化が止まることがあった。
+// 保存設定/履歴は定数とヘルパー定義が済んでから初期化する。
 loadPreferences();
 renderTargetHistory();
 
