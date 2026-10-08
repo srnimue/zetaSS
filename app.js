@@ -295,29 +295,50 @@ function normalize(text) {
 // 位置の推定や多段補正はここでは行わず、怪しいsymbol列はextractLineUnits側で
 // word bboxの均等分割へフォールバックしてから渡す。
 function getOcrPaintBox(box, symbols = []) {
-    const valid = (symbols || [])
-        .map(s => s?.bbox)
-        .filter(b =>
-            b &&
-            Number.isFinite(b.x0) && Number.isFinite(b.x1) &&
-            Number.isFinite(b.y0) && Number.isFinite(b.y1) &&
-            b.x1 > b.x0 && b.y1 > b.y0
+    const entries = (symbols || [])
+        .map(s => ({ symbol:s, bbox:s?.bbox }))
+        .filter(e =>
+            e.bbox &&
+            Number.isFinite(e.bbox.x0) && Number.isFinite(e.bbox.x1) &&
+            Number.isFinite(e.bbox.y0) && Number.isFinite(e.bbox.y1) &&
+            e.bbox.x1 > e.bbox.x0 && e.bbox.y1 > e.bbox.y0
         );
 
-    if (!valid.length) return { ...box };
+    if (!entries.length) return { ...box };
 
+    const valid = entries.map(e => e.bbox);
     const x0 = Math.min(...valid.map(b => b.x0));
     const y0 = Math.min(...valid.map(b => b.y0));
     const x1 = Math.max(...valid.map(b => b.x1));
     const y1 = Math.max(...valid.map(b => b.y1));
-
-    return {
+    let out = {
         ...box,
         x: x0,
         y: y0,
         w: Math.max(1, x1 - x0),
         h: Math.max(1, y1 - y0)
     };
+
+    // 1〜3文字の日本語名で、symbol異常によりword均等分割へ落ちた場合だけ、
+    // word bbox自体が後続文字まで巻き込んでいないかを文字高さ×文字数で軽く確認する。
+    // 左端は絶対に削らず、過大な場合は右端だけ縮める。追加OCRは行わない。
+    const chars = entries.map(e => e.symbol?.ch).filter(Boolean);
+    const isShortJapaneseName = chars.length >= 1 && chars.length <= 3 &&
+        chars.every(ch => /[ぁ-ゖァ-ヺ一-龯々〆ヵヶ]/u.test(ch));
+    const usedWordSplit = entries.some(e => e.symbol?.bboxSource === 'word-split');
+    if (isShortJapaneseName && usedWordSplit) {
+        const maxWidth = out.h * chars.length * 1.18;
+        if (out.w > maxWidth) {
+            out = {
+                ...out,
+                w: Math.max(1, maxWidth),
+                shortNameWidthGuard: true,
+                originalWidth: x1 - x0
+            };
+        }
+    }
+
+    return out;
 }
 
 function getOcrVisualRect(box, symbols = []) {
@@ -1734,6 +1755,7 @@ const TEMPLATE_SEARCH_TOP_RATIO=0.12;
 // 文字領域を先に探索し、既存HITを除外しながら全画面を補完する。
 const ITALIC_VARIANT_HEIGHTS = [32, 34]; // 推定不能時の既定値
 const ITALIC_VARIANT_SKEWS = [0.00];
+const ITALIC_DIAGNOSTIC_SKEWS = [-0.10, 0.00, 0.10];
 const ITALIC_COARSE_STEP = 6;
 const ITALIC_REFINE_STEP = 2;
 const ITALIC_SECONDARY_OFFSET = 3;
@@ -2054,11 +2076,11 @@ function searchContrastItalicVariant(gray, sw, sh, tpl, config={}){
   };
 }
 
-function italicVariantDiagnosticSearch(source, text, variantHeights=ITALIC_VARIANT_HEIGHTS, searchConfig={}){
+function italicVariantDiagnosticSearch(source, text, variantHeights=ITALIC_VARIANT_HEIGHTS, searchConfig={}, variantSkews=ITALIC_VARIANT_SKEWS){
   const contrast=createGrayFromSource(source,true);
   const variants=[];
   for(const h of variantHeights){
-    for(const skew of ITALIC_VARIANT_SKEWS){
+    for(const skew of variantSkews){
       const tpl=buildTextTemplateStyled(text,{italic:true,targetHeight:h,skew});
       const searched=searchContrastItalicVariant(contrast.gray, contrast.sw, contrast.sh, tpl, {
         grayTextMin:95, grayTextMax:235, grayBgMax:84,
@@ -2172,7 +2194,7 @@ async function diagnoseOCR(){
     const {results,scale,ocrCanvas,stats}=await collectOcrResults(worker,target);
     const diagnosticTextRegions=detectTextLikeRegions(canvas);
     const diagnosticItalicHeights=chooseItalicVariantHeights(diagnosticTextRegions);
-    const italicVariantResult=italicVariantDiagnosticSearch(sourceImage,target,diagnosticItalicHeights);
+    const italicVariantResult=italicVariantDiagnosticSearch(sourceImage,target,diagnosticItalicHeights,{},ITALIC_DIAGNOSTIC_SKEWS);
     const italicProductionPreview=collectItalicRescueCandidates(sourceImage,target,[],diagnosticItalicHeights);
     const ocrElapsed=performance.now()-ocrStarted;
     const refineStarted=performance.now();
@@ -2229,7 +2251,9 @@ async function diagnoseOCR(){
       const moved=Math.abs(after.x-before.x)>1||Math.abs(after.y-before.y)>1||Math.abs(after.w-before.w)>1||Math.abs(after.h-before.h)>1;
       if(moved)changedCount++;
       const bboxNote=(m.symbols||[]).some(s=>s.bboxSource==="word-split")?" / symbol異常→word均等分割":"";
-      lines.push(`「${m.lineText}」： 元bbox=(${Math.round(before.x)},${Math.round(before.y)},w${Math.round(before.w)},h${Math.round(before.h)}) → 使用bbox=(${Math.round(after.x)},${Math.round(after.y)},w${Math.round(after.w)},h${Math.round(after.h)}) ${moved?'※位置を修正':'変更なし'}${bboxNote}`);
+      const paintBox=getOcrPaintBox(after,m.symbols||[]);
+      const widthGuardNote=paintBox.shortNameWidthGuard?` / 短名幅ガード ${Math.round(paintBox.originalWidth)}→${Math.round(paintBox.w)}px（左端固定）`:"";
+      lines.push(`「${m.lineText}」： 元bbox=(${Math.round(before.x)},${Math.round(before.y)},w${Math.round(before.w)},h${Math.round(before.h)}) → 使用bbox=(${Math.round(after.x)},${Math.round(after.y)},w${Math.round(after.w)},h${Math.round(after.h)}) ${moved?'※位置を修正':'変更なし'}${bboxNote}${widthGuardNote}`);
       // 実際に黒塗りが描画される最終矩形も、同じ計算式で再現。
       const finalRect=getOcrVisualRect(after, m.symbols||[]);
       lines.push(`　→ 最終黒塗り座標=(${Math.round(finalRect.x)},${Math.round(finalRect.y)},w${Math.round(finalRect.w)},h${Math.round(finalRect.h)})${finalRect.w<=4?' ※幅が極端に狭い(縦棒の疑いあり)':''}`);
@@ -2261,7 +2285,7 @@ async function diagnoseOCR(){
 
     lines.push("",`===== イタリック救出診断 =====`);
     lines.push(`方式：コントラスト補正 → イタリックテンプレート / 粗探索${ITALIC_COARSE_STEP}px → 局所再探索${ITALIC_REFINE_STEP}px`);
-    lines.push(`テンプレートバリエーション：高さ ${diagnosticItalicHeights.join("/")}px（文字領域から自動推定）× 傾き ${ITALIC_VARIANT_SKEWS.map(v=>v.toFixed(2)).join("/")}`);
+    lines.push(`テンプレートバリエーション：高さ ${diagnosticItalicHeights.join("/")}px（文字領域から自動推定）× 診断傾き ${ITALIC_DIAGNOSTIC_SKEWS.map(v=>v.toFixed(2)).join("/")}（本番は ${ITALIC_VARIANT_SKEWS.map(v=>v.toFixed(2)).join("/")}）`);
     const firstVariant=italicVariantResult.variants?.[0];
     lines.push(`探索範囲：x=${firstVariant?.searchXStart||0}〜${firstVariant?.searchXEnd||0} / y=${firstVariant?.searchYStart||0}〜${firstVariant?.searchYEnd||0}`);
     for(const v of (italicVariantResult.variants||[])){
