@@ -1941,9 +1941,9 @@ const ITALIC_REFINE_STEP = 2;
 const ITALIC_SECONDARY_OFFSET = 3;
 const ITALIC_COARSE_LIMIT = 10;
 const ITALIC_FINAL_LIMIT = 6;
-const ITALIC_RESCUE_SCORE_MIN = 0.62;
+const ITALIC_RESCUE_SCORE_MIN = 0.58;
 const ITALIC_RESCUE_FG_MIN = 0.47;
-const ITALIC_RESCUE_BG_MIN = 0.93;
+const ITALIC_RESCUE_BG_MIN = 0.76;
 const ITALIC_RESCUE_MAX_NEW = 3;
 
 
@@ -2461,7 +2461,7 @@ async function diagnoseOCR(){
     lines.push(`色抽出OCR：${stats.colorHitCount||0}件 / ${(stats.colorMs/1000).toFixed(2)}秒`);
     lines.push(`※ V68の全領域走査方式を診断用にも使用。V70本体では、この局所OCRのHITを追加の黒塗り候補として統合します。`);
 
-    lines.push("",`===== V90.20 コントラスト＋イタリック救出診断 =====`);
+    lines.push("",`===== V90.21 コントラスト＋イタリック救出診断 =====`);
     lines.push(`方式：コントラスト補正 → イタリックテンプレート / 粗探索${ITALIC_COARSE_STEP}px → 局所再探索${ITALIC_REFINE_STEP}px`);
     lines.push(`テンプレートバリエーション：高さ ${diagnosticItalicHeights.join("/")}px（文字領域から自動推定）× 傾き ${ITALIC_VARIANT_SKEWS.map(v=>v.toFixed(2)).join("/")}`);
     const firstVariant=italicVariantResult.variants?.[0];
@@ -2515,7 +2515,7 @@ async function diagnoseOCR(){
       `候補地点：${candidateGroups.length} / 色抽出HIT：${stats.colorHitCount||0} / 近似候補救出：${refine.fastRecovered} / 再OCR実行：${refine.attempted} / 再OCR追加パス：${refine.extraPasses} / 既存HITで省略：${refine.skippedExact}`,
       "",
       `※ 今回は速度実験として、まずグレー＋コントラストだけを全体OCRします。`,
-      `※ V90.20では、イタリック救出は「文字領域優先 → 全画面補完」の2段構成です。OCRで確定した領域は探索前に除外し、PC保存は共有シート優先ではなく保存/ダウンロードを優先します。`,
+      `※ V90.21では、探索方式はV90.20のまま維持し、イタリック採用条件だけを緩和しています。総合score 0.58以上・形状0.47以上・背景0.76以上。`,
       `※ 大画像や強い近似候補がある場合は全画面fallbackを省略し、後段の局所救出へ進みます。`,
       `※ 候補地点は同じ位置付近の候補をまとめています。`,
       `※ 近似候補は、対象文字と同じ文字数で、3文字以上の対象なら「対象の1文字違い」程度を先に救出します。
