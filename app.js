@@ -1402,7 +1402,7 @@ function exactHitNeedsRefine(box){
 }
 
 async function refineExactHitBox(worker, box, target) {
-    // V90.18: 完全一致HITは生bboxをそのまま採用する。
+    // V90.19: 完全一致HITは生bboxをそのまま採用する。
     return box;
 }
 
@@ -1460,14 +1460,14 @@ async function collectOcrResults(worker,target){
     stats.primaryMs=performance.now()-primaryStarted;
   }
 
-  // V90.18: コカゲの3文字グローバル救出をV90.12/14系の条件へ戻して再検証する。
+  // V90.19: コカゲの3文字グローバル救出をV90.12/14系の条件へ戻して再検証する。
   // primary HITが0件でも追加の全画面OCRは挟まず、
   // 元の近似候補群をそのまま候補救出へ渡す。
   // 大画像でのSafariメモリ対策も維持する。
   stats.fallbackUsed=false;
   stats.fallbackSkippedForSpeed = stats.primaryHitCount===0;
   stats.fallbackMs=0;
-  stats.fallbackReason = stats.primaryHitCount===0 ? "V90.18: 近似候補救出を優先して省略" : "不要";
+  stats.fallbackReason = stats.primaryHitCount===0 ? "V90.19: 近似候補救出を優先して省略" : "不要";
 
   // 色抽出OCRは主OCRのHIT数に関係なく1回だけ追加実行する。
   const colorStarted=performance.now();
@@ -1820,7 +1820,7 @@ async function run(){
       x:b.x0, y:b.y0, w:b.x1-b.x0, h:b.y1-b.y0, symbols:b.symbols||[], source:"OCR"
     }));
 
-    // V90.18: 完全一致HITの高倍率再OCRは停止。
+    // V90.19: 完全一致HITの高倍率再OCRは停止。
     // symbol union + 一律8%余白だけで最終位置を決める。
     const exactRefineAttempted = 0;
     const exactRefineSkipped = paintBoxes.length;
@@ -1869,7 +1869,7 @@ async function run(){
     // コントラスト補正→イタリックテンプレートを補助候補として追加する。
     status("OCR中…\nイタリック文字の取りこぼしを補助確認しています。");
     const italicVariantHeights = chooseItalicVariantHeights(regionScan.detected);
-    const italicRescue = collectItalicRescueCandidates(sourceImage, target, paintBoxes, italicVariantHeights);
+    const italicRescue = collectItalicRescueCandidates(sourceImage, target, paintBoxes, italicVariantHeights, regionScan.detected);
     for (const c of italicRescue.accepted) {
       paintBoxes.push({
         x:c.x, y:c.y, w:c.w, h:c.h,
@@ -1900,7 +1900,7 @@ async function run(){
     saveBtn.disabled=false; manualBtn.disabled=false;
     const italicAdded = italicRescue?.accepted?.length || 0;
     const localAdded = Math.max(0, paintBoxes.length - matches.length - italicAdded);
-    status(`黒塗り完了：${manualStamps.length}箇所\n通常OCR：${matches.length}箇所 / 追加局所OCR：${localAdded}箇所 / イタリック救出：${italicAdded}箇所\n位置再確認：${exactRefineAttempted}件 / 省略：${exactRefineSkipped}件${stats.fallbackSkippedForSpeed ? " / 重い全画面fallback省略" : ""}`);
+    status(`黒塗り完了：${manualStamps.length}箇所\n通常OCR：${matches.length}箇所 / 追加局所OCR：${localAdded}箇所 / イタリック救出：${italicAdded}箇所\nイタリック探索：${italicRescue.searchMode} ${italicRescue.searchRegionCount}領域 / 評価${italicRescue.scoredPositions}地点 / HIT済み省略${italicRescue.skippedExisting}地点\n位置再確認：${exactRefineAttempted}件 / 省略：${exactRefineSkipped}件${stats.fallbackSkippedForSpeed ? " / 重い全画面fallback省略" : ""}`);
   }catch(error){status("OCRでエラーが発生しました。下のエラー詳細を確認してください。",error);}
 }
 
@@ -1927,13 +1927,13 @@ const TEMPLATE_GRAY_BG_MAX=75;
 const TEMPLATE_GRAY_SCORE_THRESHOLD=0.70;
 const TEMPLATE_GRAY_MIN_BG_SCORE=0.50;
 
-// ===== V90.18 実験：コントラスト補正＋イタリック多段テンプレート診断 =====
+// ===== V90.19 実験：コントラスト補正＋イタリック多段テンプレート診断 =====
 // 真緒のような画数の多い文字も考慮し、
 // コントラスト補正後の画像に対して
 // 1) テンプレート高さ 30 / 32 / 34px
 // 2) 傾き補正 0.00 / 0.08 / 0.16
 // を少数バリエーションで試す。
-// 全画面は粗探索(step 6)だけ行い、良さそうな候補の周辺だけ局所再探索(step 2)する。
+// 本番は文字領域だけ粗探索し、HIT済み候補位置を事前スキップ。文字領域が0件の時だけ全画面fallback。診断単体は従来どおり全画面比較可能。
 const ITALIC_VARIANT_HEIGHTS = [32, 34]; // 推定不能時の既定値
 const ITALIC_VARIANT_SKEWS = [0.00];
 const ITALIC_COARSE_STEP = 6;
@@ -2104,6 +2104,59 @@ function buildScanPositions(start, end, step, offset=0){
   return uniq;
 }
 
+
+function templateBoxOverlapsExisting(x, y, w, h, existingBoxes=[]) {
+  return existingBoxes.some(o => {
+    const ox=o.x ?? o.x0 ?? 0;
+    const oy=o.y ?? o.y0 ?? 0;
+    const ow=o.w ?? ((o.x1??0)-(o.x0??0));
+    const oh=o.h ?? ((o.y1??0)-(o.y0??0));
+    if(ow<=0 || oh<=0) return false;
+    const ix0=Math.max(ox,x), iy0=Math.max(oy,y);
+    const ix1=Math.min(ox+ow,x+w), iy1=Math.min(oy+oh,y+h);
+    if(ix1<=ix0 || iy1<=iy0) return false;
+    const inter=(ix1-ix0)*(iy1-iy0);
+    const minArea=Math.min(Math.max(1,ow*oh), Math.max(1,w*h));
+    return inter/minArea>=0.35;
+  });
+}
+
+function buildRegionLimitedPositions(regions, tpl, sw, sh) {
+  const margin = 18;
+  const xs = new Set();
+  const ys = new Set();
+
+  for (const r of (regions || [])) {
+    const x0 = Math.max(0, Math.floor(r.x - margin));
+    const y0 = Math.max(0, Math.floor(r.y - margin));
+    const x1 = Math.min(sw - tpl.w, Math.ceil(r.x + r.w + margin - tpl.w));
+    const y1 = Math.min(sh - tpl.h, Math.ceil(r.y + r.h + margin - tpl.h));
+    if (x1 < x0 || y1 < y0) continue;
+
+    for (const x of buildScanPositions(x0, x1, ITALIC_COARSE_STEP, 0)) xs.add(x);
+    for (const x of buildScanPositions(x0, x1, ITALIC_COARSE_STEP, ITALIC_SECONDARY_OFFSET)) xs.add(x);
+    for (const y of buildScanPositions(y0, y1, ITALIC_COARSE_STEP, 0)) ys.add(y);
+    for (const y of buildScanPositions(y0, y1, ITALIC_COARSE_STEP, ITALIC_SECONDARY_OFFSET)) ys.add(y);
+  }
+
+  return {
+    xPositions:[...xs].sort((a,b)=>a-b),
+    yPositions:[...ys].sort((a,b)=>a-b)
+  };
+}
+
+function candidateTouchesSearchRegion(x, y, w, h, regions=[]) {
+  if (!regions.length) return true;
+  const cx=x+w/2, cy=y+h/2;
+  const margin=18;
+  return regions.some(r =>
+    cx >= r.x-margin &&
+    cx <= r.x+r.w+margin &&
+    cy >= r.y-margin &&
+    cy <= r.y+r.h+margin
+  );
+}
+
 function searchContrastItalicVariant(gray, sw, sh, tpl, config={}){
   if(!tpl?.w || tpl.w>=sw || tpl.h>=sh){
     return {tpl, coarsePassCount:0, candidates:[], searchXStart:0, searchXEnd:sw, searchYStart:0, searchYEnd:sh};
@@ -2133,14 +2186,27 @@ function searchContrastItalicVariant(gray, sw, sh, tpl, config={}){
 
   const coarse=[];
   let coarsePassCount=0;
-  const yPositions=[...new Set([
-    ...buildScanPositions(searchYStart, searchYEnd, ITALIC_COARSE_STEP, 0),
-    ...buildScanPositions(searchYStart, searchYEnd, ITALIC_COARSE_STEP, ITALIC_SECONDARY_OFFSET)
-  ])].sort((a,b)=>a-b);
-  const xPositions=[...new Set([
-    ...buildScanPositions(searchXStart, searchXEnd, ITALIC_COARSE_STEP, 0),
-    ...buildScanPositions(searchXStart, searchXEnd, ITALIC_COARSE_STEP, ITALIC_SECONDARY_OFFSET)
-  ])].sort((a,b)=>a-b);
+  let scoredPositionCount=0;
+  let skippedExistingCount=0;
+  const searchRegions = Array.isArray(config.searchRegions) ? config.searchRegions : [];
+  const existingBoxes = Array.isArray(config.existingBoxes) ? config.existingBoxes : [];
+  const regionLimited = searchRegions.length > 0;
+
+  let yPositions, xPositions;
+  if(regionLimited){
+    const regionPositions=buildRegionLimitedPositions(searchRegions,tpl,sw,sh);
+    yPositions=regionPositions.yPositions;
+    xPositions=regionPositions.xPositions;
+  }else{
+    yPositions=[...new Set([
+      ...buildScanPositions(searchYStart, searchYEnd, ITALIC_COARSE_STEP, 0),
+      ...buildScanPositions(searchYStart, searchYEnd, ITALIC_COARSE_STEP, ITALIC_SECONDARY_OFFSET)
+    ])].sort((a,b)=>a-b);
+    xPositions=[...new Set([
+      ...buildScanPositions(searchXStart, searchXEnd, ITALIC_COARSE_STEP, 0),
+      ...buildScanPositions(searchXStart, searchXEnd, ITALIC_COARSE_STEP, ITALIC_SECONDARY_OFFSET)
+    ])].sort((a,b)=>a-b);
+  }
 
   for(const y of yPositions){
     let rowOk=false;
@@ -2150,6 +2216,12 @@ function searchContrastItalicVariant(gray, sw, sh, tpl, config={}){
     if(!rowOk) continue;
 
     for(const x of xPositions){
+      if(regionLimited && !candidateTouchesSearchRegion(x,y,tpl.w,tpl.h,searchRegions)) continue;
+      if(existingBoxes.length && templateBoxOverlapsExisting(x,y,tpl.w,tpl.h,existingBoxes)){
+        skippedExistingCount++;
+        continue;
+      }
+      scoredPositionCount++;
       const s=scoreItalicCandidate(gray, sw, x, y, tpl, config);
       if(s.score>=coarseThreshold && s.bgScore>=coarseBgMin){
         coarsePassCount++;
@@ -2165,6 +2237,8 @@ function searchContrastItalicVariant(gray, sw, sh, tpl, config={}){
     const y0=Math.max(searchYStart, seed.y-10), y1=Math.min(searchYEnd, seed.y+10);
     for(let y=y0;y<=y1;y+=ITALIC_REFINE_STEP){
       for(let x=x0;x<=x1;x+=ITALIC_REFINE_STEP){
+        if(regionLimited && !candidateTouchesSearchRegion(x,y,tpl.w,tpl.h,searchRegions)) continue;
+        if(existingBoxes.length && templateBoxOverlapsExisting(x,y,tpl.w,tpl.h,existingBoxes)) continue;
         const s=scoreItalicCandidate(gray, sw, x, y, tpl, config);
         if(s.score>=finalThreshold && s.bgScore>=finalBgMin){
           refined.push({x,y,w:tpl.w,h:tpl.h,...s});
@@ -2174,10 +2248,15 @@ function searchContrastItalicVariant(gray, sw, sh, tpl, config={}){
   }
 
   const finalCandidates=dedupeTemplateCandidates(refined, ITALIC_FINAL_LIMIT);
-  return {tpl, coarsePassCount, candidates:finalCandidates, searchXStart, searchXEnd, searchYStart, searchYEnd};
+  return {
+    tpl, coarsePassCount, candidates:finalCandidates,
+    searchXStart, searchXEnd, searchYStart, searchYEnd,
+    regionLimited, searchRegionCount:searchRegions.length,
+    scoredPositionCount, skippedExistingCount
+  };
 }
 
-function italicVariantDiagnosticSearch(source, text, variantHeights=ITALIC_VARIANT_HEIGHTS){
+function italicVariantDiagnosticSearch(source, text, variantHeights=ITALIC_VARIANT_HEIGHTS, searchConfig={}){
   const contrast=createGrayFromSource(source,true);
   const variants=[];
   for(const h of variantHeights){
@@ -2186,7 +2265,9 @@ function italicVariantDiagnosticSearch(source, text, variantHeights=ITALIC_VARIA
       const searched=searchContrastItalicVariant(contrast.gray, contrast.sw, contrast.sh, tpl, {
         grayTextMin:95, grayTextMax:235, grayBgMax:84,
         coarseThreshold:0.57, coarseBgMin:0.42,
-        finalThreshold:0.60, finalBgMin:0.44
+        finalThreshold:0.60, finalBgMin:0.44,
+        searchRegions: searchConfig.searchRegions || [],
+        existingBoxes: searchConfig.existingBoxes || []
       });
       searched.label=`H${h} / skew ${skew.toFixed(2)}`;
       searched.key=`h${h}_s${Math.round(skew*100)}`;
@@ -2209,8 +2290,18 @@ function italicVariantDiagnosticSearch(source, text, variantHeights=ITALIC_VARIA
   return {variants, merged};
 }
 
-function collectItalicRescueCandidates(source, text, existingBoxes=[], variantHeights=ITALIC_VARIANT_HEIGHTS){
-  const result=italicVariantDiagnosticSearch(source,text,variantHeights);
+function collectItalicRescueCandidates(source, text, existingBoxes=[], variantHeights=ITALIC_VARIANT_HEIGHTS, detected=null){
+  const regions=(detected?.regions||[]).filter(r=>r && r.w>0 && r.h>0);
+  const useRegionLimited = regions.length > 0;
+
+  // 文字領域が1つも取れなかった場合だけ、従来の全画面探索へ戻す。
+  // 領域が取れている通常ケースでは、文字行だけを探索して背景の大半を見ない。
+  const result=italicVariantDiagnosticSearch(
+    source,
+    text,
+    variantHeights,
+    useRegionLimited ? {searchRegions:regions, existingBoxes} : {existingBoxes}
+  );
   const accepted=[];
 
   function overlapsExisting(c){
@@ -2236,10 +2327,21 @@ function collectItalicRescueCandidates(source, text, existingBoxes=[], variantHe
     accepted.push({...c, source:"イタリック救出"});
     if(accepted.length>=ITALIC_RESCUE_MAX_NEW) break;
   }
-  return {result, accepted};
+
+  const variants=result.variants||[];
+  const scoredPositions=variants.reduce((n,v)=>n+(v.scoredPositionCount||0),0);
+  const skippedExisting=variants.reduce((n,v)=>n+(v.skippedExistingCount||0),0);
+  return {
+    result,
+    accepted,
+    searchMode: useRegionLimited ? "文字領域限定" : "全画面fallback",
+    searchRegionCount: regions.length,
+    scoredPositions,
+    skippedExisting
+  };
 }
 
-// ===== /V90.18 実験 =====
+// ===== /V90.19 実験 =====
 
 // ===== /V83 実験 =====
 
@@ -2349,7 +2451,7 @@ async function diagnoseOCR(){
     lines.push(`色抽出OCR：${stats.colorHitCount||0}件 / ${(stats.colorMs/1000).toFixed(2)}秒`);
     lines.push(`※ V68の全領域走査方式を診断用にも使用。V70本体では、この局所OCRのHITを追加の黒塗り候補として統合します。`);
 
-    lines.push("",`===== V90.18 コントラスト＋イタリック救出診断 =====`);
+    lines.push("",`===== V90.19 コントラスト＋イタリック救出診断 =====`);
     lines.push(`方式：コントラスト補正 → イタリックテンプレート / 粗探索${ITALIC_COARSE_STEP}px → 局所再探索${ITALIC_REFINE_STEP}px`);
     lines.push(`テンプレートバリエーション：高さ ${diagnosticItalicHeights.join("/")}px（文字領域から自動推定）× 傾き ${ITALIC_VARIANT_SKEWS.map(v=>v.toFixed(2)).join("/")}`);
     const firstVariant=italicVariantResult.variants?.[0];
@@ -2403,7 +2505,7 @@ async function diagnoseOCR(){
       `候補地点：${candidateGroups.length} / 色抽出HIT：${stats.colorHitCount||0} / 近似候補救出：${refine.fastRecovered} / 再OCR実行：${refine.attempted} / 再OCR追加パス：${refine.extraPasses} / 既存HITで省略：${refine.skippedExact}`,
       "",
       `※ 今回は速度実験として、まずグレー＋コントラストだけを全体OCRします。`,
-      `※ V90.18では、コカゲ再検証のため追加全画面OCRを挟まず、V90.12/14系の近似候補救出条件へ戻しています。`,
+      `※ V90.19では、コカゲ再検証のため追加全画面OCRを挟まず、V90.12/14系の近似候補救出条件へ戻しています。`,
       `※ 大画像や強い近似候補がある場合は全画面fallbackを省略し、後段の局所救出へ進みます。`,
       `※ 候補地点は同じ位置付近の候補をまとめています。`,
       `※ 近似候補は、対象文字と同じ文字数で、3文字以上の対象なら「対象の1文字違い」程度を先に救出します。
@@ -2437,7 +2539,7 @@ async function diagnoseOCR(){
       box.style.left=`${tr.left+c.x*tr.scaleX}px`; box.style.top=`${tr.top+c.y*tr.scaleY}px`;
       box.style.width=`${c.w*tr.scaleX}px`; box.style.height=`${c.h*tr.scaleY}px`;
       const label=document.createElement('span'); label.className='ocr-debug-label';
-      label.textContent=`V90.18 本番候補 ${c.score.toFixed(2)}`;
+      label.textContent=`V90.19 本番候補 ${c.score.toFixed(2)}`;
       box.appendChild(label); ocrDebugLayer.appendChild(box);
     }
 
@@ -2760,7 +2862,7 @@ canvasWrap.addEventListener("pointerdown", event => {
 });
 
 canvasWrap.addEventListener("pointermove", event => {
-    // V90.18: PCでmouseupを取りこぼしても、ボタンを離したマウスには追従しない。
+    // V90.19: PCでmouseupを取りこぼしても、ボタンを離したマウスには追従しない。
     if (event.pointerType === "mouse" && event.buttons === 0 && isDragging && editMode) {
         isDragging = false;
         dragStart = null;
@@ -2847,7 +2949,7 @@ function endPointer(event) {
         if (editMode.type === "move") applyMoveEdit(point);
         else applyResizeEdit(point);
 
-        // V90.18: PCマウスではpointerup後もeditMode/isDraggingが残ると、
+        // V90.19: PCマウスではpointerup後もeditMode/isDraggingが残ると、
         // カーソル移動だけで黒塗りが追従し続ける。
         // 選択状態だけ残し、ドラッグ状態はここで必ず終了する。
         isDragging = false;
