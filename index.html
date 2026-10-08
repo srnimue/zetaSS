@@ -3,8 +3,8 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>スクショ黒塗りツール V90.24</title>
-<link rel="stylesheet" href="style.css?v=90240">
+<title>スクショ黒塗りツール V90.25</title>
+<link rel="stylesheet" href="style.css?v=90250">
 <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
 </head>
 <body>
@@ -33,7 +33,7 @@
 
 <button id="manualDoneBtn" class="secondary" type="button" hidden>手動黒塗り終了</button>
 
-<label class="checkbox standalone-stamp">
+<label id="stampModeWrap" class="checkbox standalone-stamp" hidden>
   <input id="stampMode" type="checkbox" disabled>
   スタンプモード
 </label>
@@ -110,6 +110,6 @@
 <pre id="errorDetails" class="error" hidden></pre>
 <pre id="ocrDiagnostics" class="diagnostics" hidden></pre>
 </main>
-<script src="app.js?v=90240"></script>
+<script src="app.js?v=90250"></script>
 </body>
 </html>

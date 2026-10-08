@@ -9,6 +9,7 @@ const targetHistory = $("targetHistory");
 const redactionMode = $("redactionMode");
 const redactionColor = $("redactionColor");
 const stampMode = $("stampMode");
+const stampModeWrap = $("stampModeWrap");
 const manualDrawMode = $("manualDrawMode");
 const redactBtn = $("redactBtn");
 const diagnoseBtn = $("diagnoseBtn");
@@ -343,12 +344,22 @@ function getOcrPaintBox(box, symbols = []) {
 
 function getOcrVisualRect(box, symbols = []) {
     const paintBox = getOcrPaintBox(box, symbols);
-    const padding = Math.max(2, Math.round(paintBox.h * 0.08));
+    const chars = (symbols || []).map(s => s?.ch).filter(Boolean);
+    const isShortJapaneseName = chars.length >= 1 && chars.length <= 3 &&
+        chars.every(ch => /[ぁ-ゖァ-ヺ一-龯々〆ヵヶ]/u.test(ch));
 
-    const left = Math.max(0, Math.round(paintBox.x - padding));
-    const top = Math.max(0, Math.round(paintBox.y - padding));
-    const right = Math.min(canvas.width, Math.round(paintBox.x + paintBox.w + padding));
-    const bottom = Math.min(canvas.height, Math.round(paintBox.y + paintBox.h + padding));
+    const verticalPadding = Math.max(2, Math.round(paintBox.h * 0.08));
+    const leftPadding = isShortJapaneseName
+        ? Math.max(3, Math.round(paintBox.h * 0.14))
+        : Math.max(2, Math.round(paintBox.h * 0.08));
+    const rightPadding = isShortJapaneseName
+        ? Math.max(1, Math.round(paintBox.h * 0.03))
+        : Math.max(2, Math.round(paintBox.h * 0.08));
+
+    const left = Math.max(0, Math.round(paintBox.x - leftPadding));
+    const top = Math.max(0, Math.round(paintBox.y - verticalPadding));
+    const right = Math.min(canvas.width, Math.round(paintBox.x + paintBox.w + rightPadding));
+    const bottom = Math.min(canvas.height, Math.round(paintBox.y + paintBox.h + verticalPadding));
 
     return {
         x: left,
@@ -429,11 +440,16 @@ function getLastManualStamp() {
     return null;
 }
 
+function updateStampModeUI() {
+    const lastManual = getLastManualStamp();
+    if (stampModeWrap) stampModeWrap.hidden = !manualMode;
+    if (stampMode) stampMode.disabled = !manualMode || !lastManual;
+    if ((!manualMode || !lastManual) && stampMode) stampMode.checked = false;
+}
+
 function updateUndoButton() {
     undoBtn.disabled = manualHistory.length === 0;
-    const lastManual = getLastManualStamp();
-    stampMode.disabled = !lastManual;
-    if (!lastManual) stampMode.checked = false;
+    updateStampModeUI();
 }
 
 function snapshotManualStamps() {
@@ -2461,8 +2477,10 @@ function stopManualMode() {
     stampTapStart = null;
     selection.hidden = true;
     hideManualDeleteButton();
+    if (stampMode) stampMode.checked = false;
     manualDoneBtn.hidden = true;
     manualBtn.disabled = !sourceImage;
+    updateStampModeUI();
     if (sourceImage) status(`手動黒塗り終了：追加した黒塗り ${manualStamps.length}箇所`);
 }
 
@@ -3049,3 +3067,5 @@ async function saveImage() {
 saveBtn.addEventListener("click", saveImage);
 
 window.addEventListener("beforeunload", () => worker?.terminate());
+
+updateStampModeUI();
