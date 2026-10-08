@@ -390,3 +390,5 @@ body.help-dialog-open{
 .standalone-stamp{
   margin:10px 0 2px;
 }
+
+.standalone-stamp[hidden]{ display:none !important; }

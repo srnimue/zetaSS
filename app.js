@@ -2466,6 +2466,7 @@ function startManualMode() {
     document.body.classList.add("manual-mode");
     manualDoneBtn.hidden = false;
     manualBtn.disabled = true;
+    updateStampModeUI();
     status(`手動黒塗りモードです。\n描画方法：${manualDrawMode?.value === "trace" ? "なぞり式" : "自由矩形"}`);
 }
 
