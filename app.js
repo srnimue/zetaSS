@@ -314,20 +314,65 @@ const OCR_LEFT_BOUNDARY_SAFE_MARGIN = 1; // 左境界は必ず1文字目bboxの�
 
 function getOcrPaintBox(box, symbols = []) {
     const valid = (symbols || [])
-        .map(s => s?.bbox)
-        .filter(b =>
-            b &&
-            Number.isFinite(b.x0) && Number.isFinite(b.x1) &&
-            Number.isFinite(b.y0) && Number.isFinite(b.y1) &&
-            b.x1 > b.x0 && b.y1 > b.y0
-        );
+        .map((s, idx) => ({ idx, bbox: s?.bbox }))
+        .filter(e => {
+            const b=e.bbox;
+            return b &&
+                Number.isFinite(b.x0) && Number.isFinite(b.x1) &&
+                Number.isFinite(b.y0) && Number.isFinite(b.y1) &&
+                b.x1 > b.x0 && b.y1 > b.y0;
+        })
+        .map(e => ({...e, w:e.bbox.x1-e.bbox.x0, h:e.bbox.y1-e.bbox.y0}));
 
     if (!valid.length) return { ...box };
 
-    const x0 = Math.min(...valid.map(b => b.x0));
-    const y0 = Math.min(...valid.map(b => b.y0));
-    const x1 = Math.max(...valid.map(b => b.x1));
-    const y1 = Math.max(...valid.map(b => b.y1));
+    // V90.22: 名前用途を優先し、1〜3文字だけ軽量な幅外れ値補正を行う。
+    // OCRで1文字だけ異常に横長なbboxが返ると隣接文字まで巻き込むため、
+    // 明らかな外れ値だけを隣の正常文字幅から縮める。追加OCRは行わない。
+    const adjusted = valid.map(e => ({...e, bbox:{...e.bbox}}));
+    if (adjusted.length >= 2 && adjusted.length <= 3) {
+        const widths=adjusted.map(e=>e.w);
+        const sorted=[...widths].sort((a,b)=>a-b);
+        const referenceWidth=adjusted.length===2
+            ? Math.min(...widths)
+            : (sorted[0]+sorted[1])/2;
+        const outlierIndexes=adjusted
+            .map((e,i)=>e.w > referenceWidth*2.2 ? i : -1)
+            .filter(i=>i>=0);
+
+        if (outlierIndexes.length===1 && referenceWidth>0) {
+            const i=outlierIndexes[0];
+            const est=Math.max(1, referenceWidth*1.15);
+            const cur=adjusted[i].bbox;
+
+            if (i===0) {
+                // 先頭文字は次の文字側に近い右端を残し、左端だけ縮める。
+                cur.x0=Math.max(0, cur.x1-est);
+            } else if (i===adjusted.length-1) {
+                // 末尾文字は前の文字側に近い左端を残し、右端だけ縮める。
+                cur.x1=cur.x0+est;
+            } else {
+                // 3文字名の中央だけ異常な場合は、左右の正常文字の間へ収める。
+                const prev=adjusted[i-1].bbox;
+                const next=adjusted[i+1].bbox;
+                const available=Math.max(1, next.x0-prev.x1);
+                if (available >= referenceWidth*0.55 && available <= referenceWidth*1.8) {
+                    cur.x0=prev.x1;
+                    cur.x1=next.x0;
+                } else {
+                    const center=(cur.x0+cur.x1)/2;
+                    cur.x0=Math.max(0, center-est/2);
+                    cur.x1=cur.x0+est;
+                }
+            }
+        }
+    }
+
+    const boxes=adjusted.map(e=>e.bbox);
+    const x0 = Math.min(...boxes.map(b => b.x0));
+    const y0 = Math.min(...boxes.map(b => b.y0));
+    const x1 = Math.max(...boxes.map(b => b.x1));
+    const y1 = Math.max(...boxes.map(b => b.y1));
 
     return {
         ...box,
@@ -1941,9 +1986,9 @@ const ITALIC_REFINE_STEP = 2;
 const ITALIC_SECONDARY_OFFSET = 3;
 const ITALIC_COARSE_LIMIT = 10;
 const ITALIC_FINAL_LIMIT = 6;
-const ITALIC_RESCUE_SCORE_MIN = 0.58;
+const ITALIC_RESCUE_SCORE_MIN = 0.62;
 const ITALIC_RESCUE_FG_MIN = 0.47;
-const ITALIC_RESCUE_BG_MIN = 0.76;
+const ITALIC_RESCUE_BG_MIN = 0.93;
 const ITALIC_RESCUE_MAX_NEW = 3;
 
 
@@ -2461,7 +2506,7 @@ async function diagnoseOCR(){
     lines.push(`色抽出OCR：${stats.colorHitCount||0}件 / ${(stats.colorMs/1000).toFixed(2)}秒`);
     lines.push(`※ V68の全領域走査方式を診断用にも使用。V70本体では、この局所OCRのHITを追加の黒塗り候補として統合します。`);
 
-    lines.push("",`===== V90.21 コントラスト＋イタリック救出診断 =====`);
+    lines.push("",`===== V90.22 コントラスト＋イタリック救出診断 =====`);
     lines.push(`方式：コントラスト補正 → イタリックテンプレート / 粗探索${ITALIC_COARSE_STEP}px → 局所再探索${ITALIC_REFINE_STEP}px`);
     lines.push(`テンプレートバリエーション：高さ ${diagnosticItalicHeights.join("/")}px（文字領域から自動推定）× 傾き ${ITALIC_VARIANT_SKEWS.map(v=>v.toFixed(2)).join("/")}`);
     const firstVariant=italicVariantResult.variants?.[0];
@@ -2515,7 +2560,7 @@ async function diagnoseOCR(){
       `候補地点：${candidateGroups.length} / 色抽出HIT：${stats.colorHitCount||0} / 近似候補救出：${refine.fastRecovered} / 再OCR実行：${refine.attempted} / 再OCR追加パス：${refine.extraPasses} / 既存HITで省略：${refine.skippedExact}`,
       "",
       `※ 今回は速度実験として、まずグレー＋コントラストだけを全体OCRします。`,
-      `※ V90.21では、探索方式はV90.20のまま維持し、イタリック採用条件だけを緩和しています。総合score 0.58以上・形状0.47以上・背景0.76以上。`,
+      `※ V90.22では、探索方式はV90.20のまま維持し、イタリック採用条件だけを緩和しています。総合score 0.58以上・形状0.47以上・背景0.76以上。`,
       `※ 大画像や強い近似候補がある場合は全画面fallbackを省略し、後段の局所救出へ進みます。`,
       `※ 候補地点は同じ位置付近の候補をまとめています。`,
       `※ 近似候補は、対象文字と同じ文字数で、3文字以上の対象なら「対象の1文字違い」程度を先に救出します。
