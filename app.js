@@ -364,9 +364,30 @@ function getOcrPaintBox(box, symbols = []) {
             if (good.idx === 1) {
                 const estX1 = good.bbox.x0 - gap;
                 const estX0 = Math.max(0, estX1 - estWidth);
-                out.x = estX0;
+
+                // V90.15:
+                // 2文字目だけを基準に逆算すると、1文字目側へ十分戻れず
+                // 「アイ」の「イ」基準のように右へズレることがある。
+                // 元target bboxと1文字目bboxを“左端の保険”として残し、
+                // 逆算だけで左端を大きく右へ送らない。
+                let protectedLeft = estX0;
+                const originalLeft = Math.max(0, box.x);
+                const maxRightDrift = Math.max(2, box.h * 0.15);
+                protectedLeft = Math.min(protectedLeft, originalLeft + maxRightDrift);
+
+                if (first && Number.isFinite(first.x0)) {
+                    // 1文字目bboxが極端な外れ値でなければ、その左端も保持する。
+                    const firstWithinReasonableRange =
+                        first.x0 >= originalLeft - box.h * 0.55 &&
+                        first.x0 <= originalLeft + box.w * 0.70;
+                    if (firstWithinReasonableRange) {
+                        protectedLeft = Math.min(protectedLeft, Math.max(0, first.x0));
+                    }
+                }
+
+                out.x = Math.max(0, protectedLeft);
                 out.y = top;
-                out.w = Math.max(1, good.bbox.x1 - estX0);
+                out.w = Math.max(1, good.bbox.x1 - out.x);
                 out.h = bottom - top;
             } else {
                 const estX0 = good.bbox.x1 + gap;
@@ -1202,14 +1223,32 @@ async function runTextRegionExperiment(worker,sourceCanvas,target) {
 // V70本採用用：V68と同じ文字領域検出＋全領域局所OCRを、
 // 実際の自動黒塗り候補として返す。OCRのbboxは2倍拡大した局所画像上の
 // 座標なので、元画像の領域座標へ戻してから既存のmergeMatchesへ渡す。
-async function collectTextRegionMatches(worker, sourceCanvas, target) {
+async function collectTextRegionMatches(worker, sourceCanvas, target, existingBoxes=[]) {
   const detected = detectTextLikeRegions(sourceCanvas);
   const SCALE = 2;
   const matches = [];
   const tested = [];
   const started = performance.now();
 
+  let skippedCovered = 0;
   for (const r of detected.regions) {
+    // V90.15: すでに通常OCR/近似救出で確定した場所を含む文字領域は、
+    // 同じ場所へもう一度局所OCRをかけても得るものが少ないので省略する。
+    const coveredByExisting = existingBoxes.some(o => {
+      const ix0=Math.max(r.x,o.x), iy0=Math.max(r.y,o.y);
+      const ix1=Math.min(r.x+r.w,o.x+o.w), iy1=Math.min(r.y+r.h,o.y+o.h);
+      if(ix1<=ix0 || iy1<=iy0) return false;
+      const inter=(ix1-ix0)*(iy1-iy0);
+      const boxArea=Math.max(1,o.w*o.h);
+      // 既存HITの大半がこの文字領域内に入っていれば、その領域は走査済み扱い。
+      return inter/boxArea >= 0.72;
+    });
+    if (coveredByExisting) {
+      skippedCovered++;
+      tested.push({...r, hit:false, raw:"SKIP:既存HIT領域", matches:[], lineData:[], skippedCovered:true});
+      continue;
+    }
+
     const crop = document.createElement('canvas');
     crop.width = Math.max(1, Math.round(r.w * SCALE));
     crop.height = Math.max(1, Math.round(r.h * SCALE));
@@ -1246,7 +1285,7 @@ async function collectTextRegionMatches(worker, sourceCanvas, target) {
     crop.height = 1;
   }
 
-  return {detected, tested, matches, elapsed: performance.now() - started};
+  return {detected, tested, matches, skippedCovered, elapsed: performance.now() - started};
 }
 
 // V81: かな限定の誤認識救出。V74の「1文字違いなら何でも候補」より
@@ -1617,14 +1656,43 @@ async function collectOcrResults(worker,target){
     stats.primaryMs=performance.now()-primaryStarted;
   }
 
-  // V90.14 速度・安定性優先:
-  // primary HITが0件でも、二値化180/220/反転の「全画面OCR 3連打」は行わない。
-  // iPhone Safariでは縦長画像の2.5倍キャンバスが非常に大きくなり、
-  // ここで複数の全画面OCRを連続実行するとメモリ圧迫・タブクラッシュの原因になる。
-  // 代わりに、この後の色抽出OCR・近似候補・文字領域局所OCR・イタリック救出へ渡す。
+  // V90.15: フォールバックは「0か3回」ではなく、必要な時だけ1回。
+  // primary HIT=0 でも67%前後の近似候補があるなら後段救出へ任せる。
+  // 候補すら弱く、かつOCRキャンバスが大きすぎない時だけ二値化180を1回追加する。
   stats.fallbackUsed=false;
-  stats.fallbackSkippedForSpeed = stats.primaryHitCount===0;
+  stats.fallbackSkippedForSpeed=false;
   stats.fallbackMs=0;
+  stats.fallbackReason="";
+
+  const primaryResult = results[0];
+  const primaryBestNear = Math.max(0, ...(primaryResult?.near || []).map(n => Number(n.similarity) || 0));
+  const ocrPixels = oc.width * oc.height;
+  const allowSingleFallback =
+      stats.primaryHitCount === 0 &&
+      primaryBestNear < 0.66 &&
+      ocrPixels <= 8500000;
+
+  if (allowSingleFallback) {
+    const fallbackStarted=performance.now();
+    status("OCR中…\n補助OCRを1回だけ確認しています。");
+    const name="二値化180";
+    const baseVariant=makeOcrVariant(oc,name);
+    const variant=makeWhiteBorderCanvas(baseVariant,OCR_BORDER_PX*scale);
+    try {
+      results.push(await recognizeVariant(worker,variant,target,name,scale,OCR_BORDER_PX*scale,OCR_BORDER_PX*scale));
+      stats.fallbackUsed=true;
+      stats.fallbackReason="候補が弱いため二値化180を1回";
+    } finally {
+      variant.width=1; variant.height=1;
+      if(baseVariant!==oc){baseVariant.width=1;baseVariant.height=1;}
+      stats.fallbackMs=performance.now()-fallbackStarted;
+    }
+  } else if (stats.primaryHitCount === 0) {
+    stats.fallbackSkippedForSpeed=true;
+    stats.fallbackReason = primaryBestNear >= 0.66
+      ? "近似候補あり・後段救出を優先"
+      : "大画像のため省略";
+  }
 
   // V82.1: 過去の色抽出実験でヒットしたケースを退行させないため、
   // 色抽出OCRは主OCRのHIT数に関係なく1回だけ追加実行する。
@@ -2010,7 +2078,7 @@ async function run(){
     // V70：V68の「文字領域全走査＋局所OCR」を正式な追加検出ルートとして使用。
     // 全体OCRで拾えなかった文字も、文字っぽい領域内のPSM7 OCRで拾えた場合は追加する。
     status("OCR中…\n文字領域を追加走査しています。");
-    const regionScan = await collectTextRegionMatches(worker, canvas, target);
+    const regionScan = await collectTextRegionMatches(worker, canvas, target, paintBoxes);
     for (const b of regionScan.matches) {
       const duplicate = paintBoxes.some(o => {
         const ix0 = Math.max(o.x, b.x0), iy0 = Math.max(o.y, b.y0);
@@ -2064,7 +2132,7 @@ async function run(){
     saveBtn.disabled=false; manualBtn.disabled=false;
     const italicAdded = italicRescue?.accepted?.length || 0;
     const localAdded = Math.max(0, paintBoxes.length - matches.length - italicAdded);
-    status(`黒塗り完了：${manualStamps.length}箇所\n通常OCR：${matches.length}箇所 / 追加局所OCR：${localAdded}箇所 / イタリック救出：${italicAdded}箇所\n位置再確認：${exactRefineAttempted}件 / 省略：${exactRefineSkipped}件${stats.fallbackSkippedForSpeed ? " / 重い全画面fallback省略" : ""}`);
+    status(`黒塗り完了：${manualStamps.length}箇所\n通常OCR：${matches.length}箇所 / 追加局所OCR：${localAdded}箇所 / イタリック救出：${italicAdded}箇所\n位置再確認：${exactRefineAttempted}件 / 省略：${exactRefineSkipped}件 / 局所OCR省略：${regionScan.skippedCovered||0}領域${stats.fallbackUsed ? " / 補助OCR1回" : (stats.fallbackSkippedForSpeed ? " / 補助OCR省略" : "")}`);
   }catch(error){status("OCRでエラーが発生しました。下のエラー詳細を確認してください。",error);}
 }
 
@@ -2091,7 +2159,7 @@ const TEMPLATE_GRAY_BG_MAX=75;
 const TEMPLATE_GRAY_SCORE_THRESHOLD=0.70;
 const TEMPLATE_GRAY_MIN_BG_SCORE=0.50;
 
-// ===== V90.14 実験：コントラスト補正＋イタリック多段テンプレート診断 =====
+// ===== V90.15 実験：コントラスト補正＋イタリック多段テンプレート診断 =====
 // 真緒のような画数の多い文字も考慮し、
 // コントラスト補正後の画像に対して
 // 1) テンプレート高さ 30 / 32 / 34px
@@ -2403,7 +2471,7 @@ function collectItalicRescueCandidates(source, text, existingBoxes=[], variantHe
   return {result, accepted};
 }
 
-// ===== /V90.14 実験 =====
+// ===== /V90.15 実験 =====
 
 // ===== /V83 実験 =====
 
@@ -2524,7 +2592,7 @@ async function diagnoseOCR(){
     lines.push(`色抽出OCR：${stats.colorHitCount||0}件 / ${(stats.colorMs/1000).toFixed(2)}秒`);
     lines.push(`※ V68の全領域走査方式を診断用にも使用。V70本体では、この局所OCRのHITを追加の黒塗り候補として統合します。`);
 
-    lines.push("",`===== V90.14 コントラスト＋イタリック救出診断 =====`);
+    lines.push("",`===== V90.15 コントラスト＋イタリック救出診断 =====`);
     lines.push(`方式：コントラスト補正 → イタリックテンプレート / 粗探索${ITALIC_COARSE_STEP}px → 局所再探索${ITALIC_REFINE_STEP}px`);
     lines.push(`テンプレートバリエーション：高さ ${diagnosticItalicHeights.join("/")}px（文字領域から自動推定）× 傾き ${ITALIC_VARIANT_SKEWS.map(v=>v.toFixed(2)).join("/")}`);
     const firstVariant=italicVariantResult.variants?.[0];
@@ -2572,14 +2640,14 @@ async function diagnoseOCR(){
     lines.push("",`===== 処理時間 =====`,
       `OCR全体：${(ocrElapsed/1000).toFixed(2)}秒`,
       `  第1段階（グレー＋コントラスト）：${(stats.primaryMs/1000).toFixed(2)}秒 / HIT ${stats.primaryHitCount}件`,
-      `  追加全体OCR：${stats.fallbackSkippedForSpeed ? "0.00秒 / V90.9速度優先で省略" : (stats.fallbackUsed ? (stats.fallbackMs/1000).toFixed(2)+"秒 / 実行" : "0.00秒 / 省略")}`,
+      `  追加全体OCR：${stats.fallbackUsed ? (stats.fallbackMs/1000).toFixed(2)+"秒 / "+stats.fallbackReason : (stats.fallbackSkippedForSpeed ? "0.00秒 / "+stats.fallbackReason : "0.00秒 / 不要")}`,
       `候補再OCR：${(refineElapsed/1000).toFixed(2)}秒`,
       `診断全体：${(totalElapsed/1000).toFixed(2)}秒`,
       `候補地点：${candidateGroups.length} / 色抽出HIT：${stats.colorHitCount||0} / 近似候補救出：${refine.fastRecovered} / 再OCR実行：${refine.attempted} / 再OCR追加パス：${refine.extraPasses} / 既存HITで省略：${refine.skippedExact}`,
       "",
       `※ 今回は速度実験として、まずグレー＋コントラストだけを全体OCRします。`,
-      `※ V90.9では、二値化180・220・反転の全画面OCRは速度・メモリ優先で本番経路から省略します。`,
-      `※ HITが0件でも、色抽出OCR・候補再OCR・文字領域局所OCR・イタリック救出へ進みます。`,
+      `※ V90.15では、primary HIT=0かつ強い近似候補がない場合だけ、画像サイズを見て二値化180を1回だけ追加します。`,
+      `※ 大画像や強い近似候補がある場合は全画面fallbackを省略し、後段の局所救出へ進みます。`,
       `※ 候補地点は同じ位置付近の候補をまとめています。`,
       `※ 近似候補は、対象文字と同じ文字数で、3文字以上の対象なら「対象の1文字違い」程度を先に救出します。
 ※ 近似候補の黒塗り範囲は、候補地点全体ではなく採用候補自身のbboxを使います。`,
@@ -2612,7 +2680,7 @@ async function diagnoseOCR(){
       box.style.left=`${tr.left+c.x*tr.scaleX}px`; box.style.top=`${tr.top+c.y*tr.scaleY}px`;
       box.style.width=`${c.w*tr.scaleX}px`; box.style.height=`${c.h*tr.scaleY}px`;
       const label=document.createElement('span'); label.className='ocr-debug-label';
-      label.textContent=`V90.14 本番候補 ${c.score.toFixed(2)}`;
+      label.textContent=`V90.15 本番候補 ${c.score.toFixed(2)}`;
       box.appendChild(label); ocrDebugLayer.appendChild(box);
     }
 
