@@ -313,143 +313,46 @@ const OCR_PREV_GAP_REANCHOR = 2; // 位置ズレを疑った時、直前シン�
 const OCR_LEFT_BOUNDARY_SAFE_MARGIN = 1; // 左境界は必ず1文字目bboxの内側に食い込まないよう、この分だけ手前で止める(px)
 
 function getOcrPaintBox(box, symbols = []) {
-    const out = { ...box };
     const valid = (symbols || [])
         .map(s => s?.bbox)
-        .filter(b => b && Number.isFinite(b.x0) && Number.isFinite(b.x1) && Number.isFinite(b.y0) && Number.isFinite(b.y1) && b.x1 > b.x0 && b.y1 > b.y0);
+        .filter(b =>
+            b &&
+            Number.isFinite(b.x0) && Number.isFinite(b.x1) &&
+            Number.isFinite(b.y0) && Number.isFinite(b.y1) &&
+            b.x1 > b.x0 && b.y1 > b.y0
+        );
 
-    if (valid.length) {
-        const x0 = Math.min(...valid.map(b => b.x0));
-        const y0 = Math.min(...valid.map(b => b.y0));
-        const x1 = Math.max(...valid.map(b => b.x1));
-        const y1 = Math.max(...valid.map(b => b.y1));
-        out.x = x0;
-        out.y = y0;
-        out.w = Math.max(1, x1 - x0);
-        out.h = Math.max(1, y1 - y0);
-    }
-    return out;
+    if (!valid.length) return { ...box };
+
+    const x0 = Math.min(...valid.map(b => b.x0));
+    const y0 = Math.min(...valid.map(b => b.y0));
+    const x1 = Math.max(...valid.map(b => b.x1));
+    const y1 = Math.max(...valid.map(b => b.y1));
+
+    return {
+        ...box,
+        x: x0,
+        y: y0,
+        w: Math.max(1, x1 - x0),
+        h: Math.max(1, y1 - y0)
+    };
 }
 
 function getOcrVisualRect(box, symbols = [], rescue = false) {
     const paintBox = getOcrPaintBox(box, symbols);
-    const basePad = Math.max(2, Math.round(paintBox.h * 0.08));
-    const rescuePad = rescue ? Math.max(2, Math.round(paintBox.h * 0.06)) : 0;
-    const pad = basePad + rescuePad;
-    const left = Math.max(0, Math.round(paintBox.x - pad));
-    const top = Math.max(0, Math.round(paintBox.y - pad));
-    const right = Math.min(canvas.width, Math.round(paintBox.x + paintBox.w + pad));
-    const bottom = Math.min(canvas.height, Math.round(paintBox.y + paintBox.h + pad));
+    const padding = Math.max(2, Math.round(paintBox.h * 0.08));
+
+    const left = Math.max(0, Math.round(paintBox.x - padding));
+    const top = Math.max(0, Math.round(paintBox.y - padding));
+    const right = Math.min(canvas.width, Math.round(paintBox.x + paintBox.w + padding));
+    const bottom = Math.min(canvas.height, Math.round(paintBox.y + paintBox.h + padding));
+
     return {
         x: left,
         y: top,
         w: Math.max(1, right - left),
         h: Math.max(1, bottom - top)
     };
-}
-
-
-// V90.18:
-// OCR bboxは「この辺に文字がある」という粗い位置として扱い、
-// 最終黒塗り矩形は実画像ピクセルを局所的に見て左右端を取り直す。
-// 背景平均との差分を見るため、白文字・黒文字の両方に対応しやすい。
-function refineRedactionRectByPixels(sourceCanvas, rect) {
-    if (!sourceCanvas || !rect || rect.w < 4 || rect.h < 4) return rect;
-
-    const expandX = Math.max(8, Math.round(rect.h * 0.45));
-    const expandY = Math.max(2, Math.round(rect.h * 0.15));
-    const rx = Math.max(0, Math.floor(rect.x - expandX));
-    const ry = Math.max(0, Math.floor(rect.y - expandY));
-    const rw = Math.min(sourceCanvas.width - rx, Math.ceil(rect.w + expandX * 2));
-    const rh = Math.min(sourceCanvas.height - ry, Math.ceil(rect.h + expandY * 2));
-    if (rw < 4 || rh < 4) return rect;
-
-    const ctx = sourceCanvas.getContext("2d", { willReadFrequently: true });
-    if (!ctx) return rect;
-
-    let data;
-    try {
-        data = ctx.getImageData(rx, ry, rw, rh).data;
-    } catch {
-        return rect;
-    }
-
-    const lumaAt = (x, y) => {
-        const i = (y * rw + x) * 4;
-        return data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114;
-    };
-
-    let borderSum = 0, borderCount = 0;
-    for (let x = 0; x < rw; x++) {
-        borderSum += lumaAt(x, 0) + lumaAt(x, rh - 1);
-        borderCount += 2;
-    }
-    for (let y = 1; y < rh - 1; y++) {
-        borderSum += lumaAt(0, y) + lumaAt(rw - 1, y);
-        borderCount += 2;
-    }
-    const bg = borderCount ? borderSum / borderCount : 255;
-
-    const devThreshold = 24;
-    const colCounts = new Uint16Array(rw);
-    const rowCounts = new Uint16Array(rh);
-    let maxCol = 0, maxRow = 0;
-    let strongPixelCount = 0;
-
-    for (let y = 0; y < rh; y++) {
-        for (let x = 0; x < rw; x++) {
-            const dev = Math.abs(lumaAt(x, y) - bg);
-            if (dev < devThreshold) continue;
-            colCounts[x]++;
-            rowCounts[y]++;
-            strongPixelCount++;
-            if (colCounts[x] > maxCol) maxCol = colCounts[x];
-            if (rowCounts[y] > maxRow) maxRow = rowCounts[y];
-        }
-    }
-
-    if (strongPixelCount < Math.max(12, rect.w * 0.4)) return rect;
-
-    const colNeed = Math.max(2, Math.min(maxCol, Math.round(rh * 0.11)));
-    const rowNeed = Math.max(2, Math.min(maxRow, Math.round(rw * 0.04)));
-
-    let left = -1, right = -1, top = -1, bottom = -1;
-    for (let x = 0; x < rw; x++) {
-        if (colCounts[x] >= colNeed) { left = x; break; }
-    }
-    for (let x = rw - 1; x >= 0; x--) {
-        if (colCounts[x] >= colNeed) { right = x; break; }
-    }
-    for (let y = 0; y < rh; y++) {
-        if (rowCounts[y] >= rowNeed) { top = y; break; }
-    }
-    for (let y = rh - 1; y >= 0; y--) {
-        if (rowCounts[y] >= rowNeed) { bottom = y; break; }
-    }
-
-    if (left < 0 || right < left) return rect;
-
-    const contentW = right - left + 1;
-    const minW = Math.max(8, rect.w * 0.45);
-    const maxW = Math.max(rect.w * 1.35, rect.w + 24);
-    if (contentW < minW || contentW > maxW) return rect;
-
-    const out = { ...rect };
-    out.x = Math.max(0, rx + left - 4);
-    out.w = Math.min(sourceCanvas.width - out.x, contentW + 8);
-
-    if (top >= 0 && bottom >= top) {
-        const contentH = bottom - top + 1;
-        if (contentH >= rect.h * 0.45 && contentH <= rect.h * 1.4) {
-            out.y = Math.max(0, ry + top - 3);
-            out.h = Math.min(sourceCanvas.height - out.y, contentH + 6);
-        }
-    }
-
-    const centerShift = Math.abs((out.x + out.w / 2) - (rect.x + rect.w / 2));
-    if (centerShift > Math.max(18, rect.w * 0.38)) return rect;
-
-    return out;
 }
 
 function paintOcr(box, text = "", symbols = [], rescue = false, style = null) {
@@ -1499,7 +1402,166 @@ function exactHitNeedsRefine(box){
 }
 
 async function refineExactHitBox(worker, box, target) {
+    // V90.18: 完全一致HITは生bboxをそのまま採用する。
     return box;
+}
+
+const OCR_BORDER_PX = 10;
+
+function makeWhiteBorderCanvas(src,pad){
+  const c=document.createElement("canvas");
+  c.width=src.width+pad*2;
+  c.height=src.height+pad*2;
+  const g=c.getContext("2d");
+  g.fillStyle="#fff";
+  g.fillRect(0,0,c.width,c.height);
+  g.drawImage(src,pad,pad);
+  return c;
+}
+
+function buildOcrCanvas(){
+  // V90.9: 小さめ画像は従来どおり2.5倍。大きな縦長画像だけ、
+  // OCRキャンバスが約1100万pixelを超えない範囲まで自動的にscaleを下げる。
+  // これでiPhone Safariのメモリ急増を抑えつつ、通常画像の精度は変えない。
+  const baseScale=2.5;
+  const maxOcrPixels=11000000;
+  const srcPixels=Math.max(1,canvas.width*canvas.height);
+  const safeScale=Math.sqrt(maxOcrPixels/srcPixels);
+  const scale=Math.max(1.8,Math.min(baseScale,safeScale));
+  const oc=document.createElement("canvas");
+  oc.width=Math.round(canvas.width*scale);
+  oc.height=Math.round(canvas.height*scale);
+  const c=oc.getContext("2d");
+  c.imageSmoothingEnabled=true;
+  c.imageSmoothingQuality="high";
+  c.drawImage(sourceImage,0,0,oc.width,oc.height);
+  return {canvas:oc,scale};
+}
+
+async function collectOcrResults(worker,target){
+  const {canvas:oc,scale}=buildOcrCanvas();
+  const results=[];
+  const stats={primaryMs:0,fallbackMs:0,primaryHitCount:0,fallbackUsed:false,primaryName:"グレー＋コントラスト",fallbackNames:["二値化180","二値化220","反転"],fallbackSkippedForSpeed:false};
+
+  // まず今回の実験で最も安定していた「グレー＋コントラスト」だけを実行。
+  // ここで1件でも正確に見つかれば、追加の全体OCRは省略する。
+  // ※診断用の速度実験版。見落としの有無を確認するため、V32は別に保存しておく。
+  const primaryStarted=performance.now();
+  status("実行中…");
+  const primaryBase=makeOcrVariant(oc,stats.primaryName);
+  const primaryVariant=makeWhiteBorderCanvas(primaryBase,OCR_BORDER_PX*scale);
+  try {
+    const primary=await recognizeVariant(worker,primaryVariant,target,stats.primaryName,scale,OCR_BORDER_PX*scale,OCR_BORDER_PX*scale);
+    results.push(primary);
+    stats.primaryHitCount=primary.matches.length;
+  } finally {
+    primaryVariant.width=1;primaryVariant.height=1;
+    if(primaryBase!==oc){primaryBase.width=1;primaryBase.height=1;}
+    stats.primaryMs=performance.now()-primaryStarted;
+  }
+
+  // V90.18: コカゲの3文字グローバル救出をV90.12/14系の条件へ戻して再検証する。
+  // primary HITが0件でも追加の全画面OCRは挟まず、
+  // 元の近似候補群をそのまま候補救出へ渡す。
+  // 大画像でのSafariメモリ対策も維持する。
+  stats.fallbackUsed=false;
+  stats.fallbackSkippedForSpeed = stats.primaryHitCount===0;
+  stats.fallbackMs=0;
+  stats.fallbackReason = stats.primaryHitCount===0 ? "V90.18: 近似候補救出を優先して省略" : "不要";
+
+  // 色抽出OCRは主OCRのHIT数に関係なく1回だけ追加実行する。
+  const colorStarted=performance.now();
+  const colorBase=makeOcrVariant(oc,"色抽出");
+  const colorVariant=makeWhiteBorderCanvas(colorBase,OCR_BORDER_PX*scale);
+  try {
+    const color=await recognizeVariant(worker,colorVariant,target,"色抽出",scale,OCR_BORDER_PX*scale,OCR_BORDER_PX*scale);
+    results.push(color);
+    stats.colorHitCount=color.matches.length;
+  } finally {
+    colorVariant.width=1;colorVariant.height=1;
+    if(colorBase!==oc){colorBase.width=1;colorBase.height=1;}
+  }
+  stats.colorMs=performance.now()-colorStarted;
+
+  return {results,scale,ocrCanvas:oc,stats};
+}
+
+function getCandidateBox(candidate, scale) {
+  const units = candidate.units || [];
+  if (!units.length) return null;
+  const xs = units.flatMap(u => [u.bbox.x0, u.bbox.x1]);
+  const ys = units.flatMap(u => [u.bbox.y0, u.bbox.y1]);
+  return {
+    x0: Math.min(...xs) / scale,
+    y0: Math.min(...ys) / scale,
+    x1: Math.max(...xs) / scale,
+    y1: Math.max(...ys) / scale
+  };
+}
+
+function candidateLocationKey(candidate, scale) {
+  const b = getCandidateBox(candidate, scale);
+  if (!b) return null;
+  // 同じ文字列の候補が数pxずれて複数の前処理から出ても、同一地点としてまとめる。
+  return `${Math.round(b.x0 / 18)}:${Math.round(b.y0 / 18)}:${Math.round(b.x1 / 18)}:${Math.round(b.y1 / 18)}`;
+}
+
+function groupNearCandidates(results, scale) {
+  const groups = [];
+  for (const result of results) {
+    for (const candidate of result.near || []) {
+      if (candidate.similarity >= 0.999) continue;
+      const box = getCandidateBox(candidate, scale);
+      if (!box) continue;
+      let group = groups.find(g => {
+        const a = g.box, b = box;
+        const cxA = (a.x0 + a.x1) / 2, cyA = (a.y0 + a.y1) / 2;
+        const cxB = (b.x0 + b.x1) / 2, cyB = (b.y0 + b.y1) / 2;
+        const w = Math.max(a.x1 - a.x0, b.x1 - b.x0, 1);
+        const h = Math.max(a.y1 - a.y0, b.y1 - b.y0, 1);
+        return Math.abs(cxA - cxB) <= Math.max(28, w * 0.45) &&
+               Math.abs(cyA - cyB) <= Math.max(28, h * 0.65);
+      });
+      if (!group) {
+        group = { box, candidates: [], modes: new Set() };
+        groups.push(group);
+      }
+      group.candidates.push({...candidate, mode: result.mode});
+      group.modes.add(result.mode);
+      group.box = {
+        x0: Math.min(group.box.x0, box.x0),
+        y0: Math.min(group.box.y0, box.y0),
+        x1: Math.max(group.box.x1, box.x1),
+        y1: Math.max(group.box.y1, box.y1)
+      };
+    }
+  }
+  groups.sort((a, b) => {
+    const sa = Math.max(...a.candidates.map(c => c.similarity));
+    const sb = Math.max(...b.candidates.map(c => c.similarity));
+    return sb - sa;
+  });
+  return groups;
+}
+
+function makeGroupCandidate(group) {
+  const best = [...group.candidates].sort((a,b) => b.similarity - a.similarity)[0];
+  return {...best, box: group.box, candidateCount: group.candidates.length, modeCount: group.modes.size};
+}
+
+function groupTouchesExactHit(group, results) {
+  const hits = results.flatMap(r => r.matches || []);
+  if (!hits.length) return false;
+  const a = group.box;
+  const acx = (a.x0 + a.x1) / 2, acy = (a.y0 + a.y1) / 2;
+  return hits.some(h => {
+    const b = {x0:h.x0,y0:h.y0,x1:h.x1,y1:h.y1};
+    const bcx = (b.x0 + b.x1) / 2, bcy = (b.y0 + b.y1) / 2;
+    const aw = Math.max(1, a.x1-a.x0), ah = Math.max(1, a.y1-a.y0);
+    const bw = Math.max(1, b.x1-b.x0), bh = Math.max(1, b.y1-b.y0);
+    return Math.abs(acx-bcx) <= Math.max(24, Math.max(aw,bw)*0.55) &&
+           Math.abs(acy-bcy) <= Math.max(24, Math.max(ah,bh)*0.70);
+  });
 }
 
 async function refineNearCandidates(worker, results, ocrCanvas, target, scale) {
@@ -1757,10 +1819,11 @@ async function run(){
     const paintBoxes=matches.map(b=>({
       x:b.x0, y:b.y0, w:b.x1-b.x0, h:b.y1-b.y0, symbols:b.symbols||[], source:"OCR"
     }));
+
     // V90.18: 完全一致HITの高倍率再OCRは停止。
-    // 位置はOCRのsymbol union + 固定余白だけで決め、速度と安定性を優先する。
-    let exactRefineAttempted = 0;
-    let exactRefineSkipped = paintBoxes.length;
+    // symbol union + 一律8%余白だけで最終位置を決める。
+    const exactRefineAttempted = 0;
+    const exactRefineSkipped = paintBoxes.length;
 
     // 通常OCRで拾えなかった候補だけ、V33の局所再OCRを実行。
     // 再OCRで対象文字を確認できた地点は、その候補文字のbboxを黒塗り範囲として追加する。
@@ -2246,17 +2309,17 @@ async function diagnoseOCR(){
     }
     if(!refined.length && !acceptedNear.length) lines.push('再OCR・近似候補救出で対象文字を確認できた候補地点はありません。');
 
-    lines.push("",`===== 完全一致の位置検証（簡易） =====`);
+    lines.push("",`===== 完全一致の位置確認（生bbox＋固定余白） =====`);
     const exactMatches=mergeMatches(results);
     const verifyStarted=performance.now();
     let changedCount=0;
     for(const m of exactMatches){
       const before={x:m.x0,y:m.y0,w:m.x1-m.x0,h:m.y1-m.y0};
-      const after=await refineExactHitBox(worker,before,target);
+      const after=before;
       const moved=Math.abs(after.x-before.x)>1||Math.abs(after.y-before.y)>1||Math.abs(after.w-before.w)>1||Math.abs(after.h-before.h)>1;
       if(moved)changedCount++;
       lines.push(`「${m.lineText}」： 元bbox=(${Math.round(before.x)},${Math.round(before.y)},w${Math.round(before.w)},h${Math.round(before.h)}) → 検証後=(${Math.round(after.x)},${Math.round(after.y)},w${Math.round(after.w)},h${Math.round(after.h)}) ${moved?'※位置を修正':'変更なし'}`);
-      // 実際に黒塗りが描画される最終矩形も、同じ計算式でここに再現しておく。
+      // 実際に黒塗りが描画される最終矩形も、同じ計算式で再現。
       const finalRect=getOcrVisualRect(after, after.symbols||[]);
       lines.push(`　→ 最終黒塗り座標=(${Math.round(finalRect.x)},${Math.round(finalRect.y)},w${Math.round(finalRect.w)},h${Math.round(finalRect.h)})${finalRect.w<=4?' ※幅が極端に狭い(縦棒の疑いあり)':''}`);
     }
