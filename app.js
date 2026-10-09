@@ -428,20 +428,35 @@ function getOcrVisualRect(box, symbols = [], meta = {}) {
         }
     }
 
-    // V91.1: 1〜3文字の日本語名は、OCR bboxが1文字分だけになったり、
-    // 逆に後続文字まで巻き込んだりすることがある。文字高さ×文字数を基準に、
-    // 明らかに細すぎる/広すぎる横幅だけを正常化する。
-    // 細すぎる場合は不足分を左70%・右30%へ配分して、先頭文字の露出を優先して防ぐ。
-    // 広すぎる場合は左端を維持したまま右端だけ縮める。
+    // 1〜3文字の日本語名は、明らかに細すぎる/広すぎる横幅だけを正常化する。
+    // 基本は文字高さ×文字数を使い、word-splitではない実測symbol幅が揃っている時だけ
+    // 中央値を補助的に使う。expand-left後は左paddingを二重加算しない。
     if (isShortJapaneseName && paintBox.h > 0) {
-        const expectedW = paintBox.h * chars.length * 1.02;
-        const minReasonableW = expectedW * 0.78;
-        const maxReasonableW = expectedW * 1.30;
+        const measuredWidths = (symbols || [])
+            .filter(s => s?.bbox && s?.bboxSource !== 'word-split')
+            .map(s => s.bbox.x1 - s.bbox.x0)
+            .filter(w => Number.isFinite(w) && w > 0);
+        let expectedW = paintBox.h * chars.length * CONFIG.bbox.shortNameExpectedWidthRatio;
+        if (measuredWidths.length >= 2) {
+            const maxW = Math.max(...measuredWidths);
+            const minW = Math.min(...measuredWidths);
+            const isConsistent = minW > 0 &&
+                (maxW / minW) <= CONFIG.bbox.shortNameSymbolConsistencyMaxRatio;
+            if (isConsistent) {
+                const medianCharW = getMedian(measuredWidths);
+                if (medianCharW > 0) {
+                    expectedW = medianCharW * chars.length * CONFIG.bbox.shortNameConsistentMedianRatio;
+                }
+            }
+        }
+
+        const minReasonableW = expectedW * CONFIG.bbox.shortNameMinReasonableRatio;
+        const maxReasonableW = expectedW * CONFIG.bbox.shortNameMaxReasonableRatio;
         if (paintBox.w < minReasonableW) {
             const extra = Math.max(0, expectedW - paintBox.w);
             paintBox = {
                 ...paintBox,
-                x: Math.max(0, paintBox.x - extra * 0.70),
+                x: Math.max(0, paintBox.x - extra * CONFIG.bbox.shortNameExpandLeftShare),
                 w: expectedW,
                 shortNameWidthNormalized: 'expand-left'
             };
@@ -456,7 +471,9 @@ function getOcrVisualRect(box, symbols = [], meta = {}) {
 
     const verticalPadding = Math.max(2, Math.round(paintBox.h * 0.08));
     const leftPadding = isShortJapaneseName
-        ? Math.max(4, Math.round(paintBox.h * 0.16))
+        ? (paintBox.shortNameWidthNormalized === 'expand-left'
+            ? CONFIG.bbox.shortNameExpandLeftPadding
+            : Math.max(4, Math.round(paintBox.h * 0.16)))
         : Math.max(2, Math.round(paintBox.h * 0.08));
 
     // 短名は右側に敬称・「ちゃん」等が続くことが多いので、
