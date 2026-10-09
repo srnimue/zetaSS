@@ -509,6 +509,6 @@ export function makeWhiteBorderCanvas(src,pad){
   return c;
 }
 
-const ANALYSIS_CANVAS_MAX_WIDTH = 1000;
-const ANALYSIS_CANVAS_MAX_PIXELS = 2500000;
+export const ANALYSIS_CANVAS_MAX_WIDTH = 1000;
+export const ANALYSIS_CANVAS_MAX_PIXELS = 2500000;
 
