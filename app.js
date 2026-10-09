@@ -1006,41 +1006,53 @@ async function collectTextRegionMatches(worker, sourceCanvas, target, coordScale
     cctx.drawImage(sourceCanvas, r.x, r.y, r.w, r.h, 0, 0, crop.width, crop.height);
 
     const normal = await recognizeLocalRegionVariant(worker, crop, target, '通常');
+    const variants = [normal];
+    let extra = null;
+    // 白背景＋暗文字の取りこぼし対策。通常の局所OCRで外れた領域だけ、
+    // 二値化180を1回だけ追加する。通常HIT済みの領域には追加OCRしない。
+    if (!normal.hit) {
+      extra = await recognizeLocalRegionVariant(worker, crop, target, '二値化180');
+      variants.push(extra);
+    }
+
     const regionMatches = [];
-    for (const hit of normal.matches || []) {
-      const b = hit.targetBox;
-      regionMatches.push({
-        x0: (r.x + b.x0 / SCALE) / coordScale,
-        y0: (r.y + b.y0 / SCALE) / coordScale,
-        x1: (r.x + b.x1 / SCALE) / coordScale,
-        y1: (r.y + b.y1 / SCALE) / coordScale,
-        symbols: (hit.symbols || []).map(u => ({
-          ...u,
-          bbox: {
-            x0: (r.x + u.bbox.x0 / SCALE) / coordScale,
-            y0: (r.y + u.bbox.y0 / SCALE) / coordScale,
-            x1: (r.x + u.bbox.x1 / SCALE) / coordScale,
-            y1: (r.y + u.bbox.y1 / SCALE) / coordScale
-          }
-        })),
-        lineText: normal.raw,
-        source: '局所OCR'
-      });
+    for (const variant of variants) {
+      for (const hit of variant.matches || []) {
+        const b = hit.targetBox;
+        regionMatches.push({
+          x0: (r.x + b.x0 / SCALE) / coordScale,
+          y0: (r.y + b.y0 / SCALE) / coordScale,
+          x1: (r.x + b.x1 / SCALE) / coordScale,
+          y1: (r.y + b.y1 / SCALE) / coordScale,
+          symbols: (hit.symbols || []).map(u => ({
+            ...u,
+            bbox: {
+              x0: (r.x + u.bbox.x0 / SCALE) / coordScale,
+              y0: (r.y + u.bbox.y0 / SCALE) / coordScale,
+              x1: (r.x + u.bbox.x1 / SCALE) / coordScale,
+              y1: (r.y + u.bbox.y1 / SCALE) / coordScale
+            }
+          })),
+          lineText: variant.raw,
+          source: variant.mode === '通常' ? '局所OCR' : `局所OCR:${variant.mode}`
+        });
+      }
     }
     matches.push(...regionMatches);
+    const anyHit = variants.some(v => v.hit);
     tested.push({
       ...r,
       x: r.x / coordScale,
       y: r.y / coordScale,
       w: r.w / coordScale,
       h: r.h / coordScale,
-      hit: normal.hit,
+      hit: anyHit,
       baseHit: normal.hit,
-      extraHit: false,
-      variants: [normal],
+      extraHit: !normal.hit && !!extra?.hit,
+      variants,
       raw: normal.raw,
       matches: regionMatches,
-      lineData: normal.lineData || []
+      lineData: variants.flatMap(v => v.lineData || [])
     });
     crop.width = 1;
     crop.height = 1;
@@ -1051,8 +1063,8 @@ async function collectTextRegionMatches(worker, sourceCanvas, target, coordScale
     tested,
     matches,
     elapsed: performance.now() - started,
-    extraRuns: 0,
-    extraModes: []
+    extraRuns: tested.filter(r => r.variants.length > 1).length,
+    extraModes: tested.some(r => r.variants.some(v => v.mode === '二値化180')) ? ['二値化180'] : []
   };
 }
 
@@ -1849,7 +1861,7 @@ async function diagnoseOCR(){
     lines.push("",`===== 文字領域全走査＋局所OCR =====`);
     const regionResult=await collectTextRegionMatches(ocrWorker,analysisCanvas,target,analysisScale);
     lines.push(`検出候補：${regionResult.detected.regions.length}領域 / 局所OCR実行：${regionResult.tested.length}領域 / 走査間隔：${regionResult.detected.sample}px / 通常：2倍・PSM7`);
-    lines.push(`追加前処理：なし / 追加OCR実行：0回`);
+    lines.push(`追加前処理：${regionResult.extraModes.length ? regionResult.extraModes.join('・') : 'なし'} / 追加OCR実行：${regionResult.extraRuns}回`);
     const regionHits=regionResult.tested.filter(r=>r.hit);
     const baseHits=regionResult.tested.filter(r=>r.baseHit);
     const extraHits=regionResult.tested.filter(r=>r.extraHit);
