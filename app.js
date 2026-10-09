@@ -8,6 +8,7 @@ import {
     makeCandidateCrop,
     recognizeVariant,
     makeWhiteBorderCanvas,
+    OCR_BORDER_PX,
     ANALYSIS_CANVAS_MAX_WIDTH,
     ANALYSIS_CANVAS_MAX_PIXELS
 } from "./ocr.js?v=91510";

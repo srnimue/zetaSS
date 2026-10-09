@@ -496,7 +496,7 @@ export async function recognizeVariant(worker,inputCanvas,target,mode,scale,offs
     matches.push({x0:hit.targetBox.x0/scale,y0:hit.targetBox.y0/scale,x1:hit.targetBox.x1/scale,y1:hit.targetBox.y1/scale,mode,lineText,symbols});
 }}const words=(offsetX||offsetY)?shiftOcrBboxes(data.words||[],offsetX,offsetY):(data.words||[]);return {mode,lines,words,rawText:String(data.text||""),matches,near:findNearCandidates(lines,target)};}
 
-const OCR_BORDER_PX = 10;
+export const OCR_BORDER_PX = 10;
 
 export function makeWhiteBorderCanvas(src,pad){
   const c=document.createElement("canvas");
