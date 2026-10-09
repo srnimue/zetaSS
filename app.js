@@ -342,18 +342,67 @@ function getOcrPaintBox(box, symbols = []) {
     return out;
 }
 
-function getOcrVisualRect(box, symbols = []) {
-    const paintBox = getOcrPaintBox(box, symbols);
+function getMedian(values) {
+    const a = (values || []).filter(Number.isFinite).sort((x, y) => x - y);
+    if (!a.length) return 0;
+    const m = Math.floor(a.length / 2);
+    return a.length % 2 ? a[m] : (a[m - 1] + a[m]) / 2;
+}
+
+function getOcrVisualRect(box, symbols = [], meta = {}) {
+    let paintBox = getOcrPaintBox(box, symbols);
     const chars = (symbols || []).map(s => s?.ch).filter(Boolean);
     const isShortJapaneseName = chars.length >= 1 && chars.length <= 3 &&
         chars.every(ch => /[ぁ-ゖァ-ヺ一-龯々〆ヵヶ]/u.test(ch));
+    const source = String(meta?.source || '');
+
+    // V91: 局所OCRの短名は、まれにsymbol bboxが行高いっぱいまで伸びて
+    // 縦長の黒い塊になることがある。文字幅を「1文字サイズ」の基準にして、
+    // 高さだけが異常に大きい時は中心を維持したまま整形する。
+    if (isShortJapaneseName && source === '局所OCR') {
+        const validSymbols = (symbols || []).filter(s =>
+            s?.bbox && Number.isFinite(s.bbox.x0) && Number.isFinite(s.bbox.x1) &&
+            Number.isFinite(s.bbox.y0) && Number.isFinite(s.bbox.y1) &&
+            s.bbox.x1 > s.bbox.x0 && s.bbox.y1 > s.bbox.y0
+        );
+        if (validSymbols.length) {
+            const medianW = getMedian(validSymbols.map(s => s.bbox.x1 - s.bbox.x0));
+            if (medianW > 0) {
+                const maxH = medianW * 1.20;
+                if (paintBox.h > maxH) {
+                    const cy = paintBox.y + paintBox.h / 2;
+                    paintBox = {
+                        ...paintBox,
+                        y: cy - maxH / 2,
+                        h: maxH,
+                        localShapeGuard: true
+                    };
+                }
+
+                // 右側の「ちゃん / さん / くん」等を巻き込みすぎないよう、
+                // 1〜3文字名の横幅にも軽い上限を設ける。左端は動かさない。
+                const maxW = medianW * chars.length * 1.22;
+                if (paintBox.w > maxW) {
+                    paintBox = {
+                        ...paintBox,
+                        w: Math.max(1, maxW),
+                        localWidthGuard: true
+                    };
+                }
+            }
+        }
+    }
 
     const verticalPadding = Math.max(2, Math.round(paintBox.h * 0.08));
     const leftPadding = isShortJapaneseName
-        ? Math.max(3, Math.round(paintBox.h * 0.14))
+        ? Math.max(4, Math.round(paintBox.h * 0.16))
         : Math.max(2, Math.round(paintBox.h * 0.08));
+
+    // 短名は右側に敬称・「ちゃん」等が続くことが多いので、
+    // 正常symbolでは右余白を足さない。word分割だけ1px残して安全側にする。
+    const usedWordSplit = (symbols || []).some(s => s?.bboxSource === 'word-split');
     const rightPadding = isShortJapaneseName
-        ? Math.max(1, Math.round(paintBox.h * 0.03))
+        ? (usedWordSplit ? 1 : 0)
         : Math.max(2, Math.round(paintBox.h * 0.08));
 
     const left = Math.max(0, Math.round(paintBox.x - leftPadding));
@@ -365,7 +414,9 @@ function getOcrVisualRect(box, symbols = []) {
         x: left,
         y: top,
         w: Math.max(1, right - left),
-        h: Math.max(1, bottom - top)
+        h: Math.max(1, bottom - top),
+        localShapeGuard: !!paintBox.localShapeGuard,
+        localWidthGuard: !!paintBox.localWidthGuard
     };
 }
 
@@ -1774,7 +1825,7 @@ async function run(){
 
     pushManualHistory();
     for(const b of paintBoxes){
-      const rect=getOcrVisualRect({x:b.x,y:b.y,w:b.w,h:b.h},b.symbols||[]);
+      const rect=getOcrVisualRect({x:b.x,y:b.y,w:b.w,h:b.h},b.symbols||[],{source:b.source});
       if(rect.w < 1 || rect.h < 1) continue;
       manualStamps.push({
         x:rect.x, y:rect.y, w:rect.w, h:rect.h,
@@ -1865,11 +1916,26 @@ function mapItalicCandidateToOriginal(c, scale){
 
 
 function chooseItalicVariantHeights(detected){
-  // V90.28テスト:
-  // 解析キャンバスを固定上限へ統一したので、文字領域の高さから毎回推定せず、
-  // 実績のある32/34pxの2本へ固定する。処理量とテンプレート条件を安定させる狙い。
-  // detected は将来の比較用に引数として残す。
-  return [32,34];
+  const heights=(detected?.regions||[])
+    .map(r=>r?.h)
+    .filter(h=>Number.isFinite(h) && h>=28 && h<=100)
+    .sort((a,b)=>a-b);
+  if(!heights.length) return [...ITALIC_VARIANT_HEIGHTS];
+
+  // 文字領域は上下余白込みなので、実文字高さはおよそ6割強として推定。
+  // 外れ値に引っ張られないよう中央値を使う。
+  const mid=Math.floor(heights.length/2);
+  const median=heights.length%2 ? heights[mid] : (heights[mid-1]+heights[mid])/2;
+  let estimated=Math.round(median*0.64);
+  estimated=Math.max(28,Math.min(48,estimated));
+
+  // これまで実績のある32/34帯なら従来値をそのまま使う。
+  if(estimated>=31 && estimated<=35) return [32,34];
+
+  // 推定値の前後2pxだけ。候補数は常に2つに抑え、速度を増やしすぎない。
+  const a=Math.max(28,Math.min(48,estimated-2));
+  const b=Math.max(28,Math.min(48,estimated+2));
+  return a===b ? [a] : [a,b];
 }
 
 function buildTextTemplateStyled(text, opts={}){
@@ -2415,7 +2481,7 @@ async function diagnoseOCR(){
     lines.push(`解析キャンバス：${analysisCanvas.width}x${analysisCanvas.height} / scale ${analysisScale.toFixed(3)}${analysisState.resized ? "（統一縮小）" : "（原寸）"}`);
     lines.push(`方式：コントラスト補正 → イタリックテンプレート / 粗探索${ITALIC_COARSE_STEP}px → 局所再探索${ITALIC_REFINE_STEP}px`);
     lines.push(`探索キャンバス：${italicVariantResult.searchCanvasWidth}x${italicVariantResult.searchCanvasHeight} / scale ${italicVariantResult.searchScale.toFixed(3)}${italicVariantResult.resized ? "（縮小）" : "（原寸）"}`);
-    lines.push(`テンプレートバリエーション：解析基準 固定${diagnosticItalicHeights.join("/")}px → 探索時はscale連動 × 診断傾き ${ITALIC_DIAGNOSTIC_SKEWS.map(v=>v.toFixed(2)).join("/")}（本番は ${ITALIC_VARIANT_SKEWS.map(v=>v.toFixed(2)).join("/")}）`);
+    lines.push(`テンプレートバリエーション：元画像基準 ${diagnosticItalicHeights.join("/")}px → 探索時はscale連動 × 診断傾き ${ITALIC_DIAGNOSTIC_SKEWS.map(v=>v.toFixed(2)).join("/")}（本番は ${ITALIC_VARIANT_SKEWS.map(v=>v.toFixed(2)).join("/")}）`);
     const firstVariant=italicVariantResult.variants?.[0];
     lines.push(`探索範囲：x=${firstVariant?.searchXStart||0}〜${firstVariant?.searchXEnd||0} / y=${firstVariant?.searchYStart||0}〜${firstVariant?.searchYEnd||0}`);
     for(const v of (italicVariantResult.variants||[])){
