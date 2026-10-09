@@ -82,6 +82,7 @@ const pointers = new Map();
 let pinchStartDistance = 0;
 let pinchStartZoom = 1;
 let panLastCenter = null;
+let multiTouchGestureActive = false;
 // 新規手動描画の指オフセットは「画面上のCSS px」で管理する。
  // ズーム倍率が変わっても、指から見た描画位置の距離を一定にする。
 const TOUCH_Y_OFFSET_SCREEN_PX = -40;
@@ -2796,6 +2797,7 @@ function resetManualGestureState() {
     pinchStartDistance = 0;
     pinchStartZoom = zoom;
     panLastCenter = null;
+    multiTouchGestureActive = false;
     isDragging = false;
     dragStart = null;
     stampTapStart = null;
@@ -2837,18 +2839,30 @@ manualDeleteBtn?.addEventListener("click", event => {
 canvasWrap.addEventListener("pointerdown", event => {
     if (!sourceImage) return;
 
-    // iOS Safariで×削除後に古いpointerIdが残るケースを防ぐ。
-    // 新しい1本指操作の開始時に、前ジェスチャーの残骸だけなら破棄する。
-    if (event.pointerType === "touch" && event.isPrimary && !isDragging && !panLastCenter && pinchStartDistance === 0) {
+    // 新しいタッチ列のprimary pointerが来た時点で、前ジェスチャー由来の
+    // pointerId / pinch状態が残っていても必ず破棄する。
+    // 2本目以降の指は isPrimary=false なので、進行中のピンチは壊さない。
+    if (event.pointerType === "touch" && event.isPrimary) {
         pointers.clear();
+        pinchStartDistance = 0;
+        pinchStartZoom = zoom;
+        panLastCenter = null;
+        multiTouchGestureActive = false;
+        isDragging = false;
+        dragStart = null;
+        stampTapStart = null;
+        editMode = null;
     }
 
     pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
     canvasWrap.setPointerCapture?.(event.pointerId);
 
     if (pointers.size >= 2) {
+        multiTouchGestureActive = true;
         isDragging = false;
         dragStart = null;
+        stampTapStart = null;
+        editMode = null;
         selection.hidden = true;
         hideManualDeleteButton();
         pinchStartDistance = getPointerDistance();
@@ -2953,6 +2967,13 @@ canvasWrap.addEventListener("pointermove", event => {
         return;
     }
 
+    // 2本指ジェスチャーの途中で1本だけ離れた後は、残った1本を
+    // 手動描画へ切り替えない。全指が離れるまでナビゲーション操作として扱う。
+    if (multiTouchGestureActive) {
+        event.preventDefault();
+        return;
+    }
+
     if (!manualMode) return;
     event.preventDefault();
 
@@ -2989,6 +3010,28 @@ canvasWrap.addEventListener("pointermove", event => {
 function endPointer(event) {
     pointers.delete(event.pointerId);
 
+    if (multiTouchGestureActive) {
+        isDragging = false;
+        dragStart = null;
+        stampTapStart = null;
+        editMode = null;
+        selection.hidden = true;
+
+        if (pointers.size >= 1) {
+            // 2本→1本になっても、その1本で新規描画を開始しない。
+            panLastCenter = getPointerCenter();
+            return;
+        }
+
+        // 2本指ジェスチャーが完全に終了した時点で、次の1本指操作に備えて
+        // ピンチ関連の状態を確実に初期化する。
+        multiTouchGestureActive = false;
+        pinchStartDistance = 0;
+        pinchStartZoom = zoom;
+        panLastCenter = null;
+        return;
+    }
+
     if (pointers.size >= 1) {
         isDragging = false;
         dragStart = null;
@@ -2997,6 +3040,7 @@ function endPointer(event) {
         return;
     }
 
+    pinchStartDistance = 0;
     panLastCenter = null;
 
     if (!manualMode) return;
@@ -3044,8 +3088,21 @@ function endPointer(event) {
 
 canvasWrap.addEventListener("pointerup", endPointer);
 canvasWrap.addEventListener("lostpointercapture", event => {
-    if (event.pointerType !== "mouse") return;
     pointers.delete(event.pointerId);
+
+    if (event.pointerType === "touch") {
+        if (!pointers.size) {
+            multiTouchGestureActive = false;
+            pinchStartDistance = 0;
+            pinchStartZoom = zoom;
+            panLastCenter = null;
+        } else if (multiTouchGestureActive) {
+            panLastCenter = getPointerCenter();
+        }
+        return;
+    }
+
+    if (event.pointerType !== "mouse") return;
     if (isDragging && editMode) {
         isDragging = false;
         dragStart = null;
@@ -3072,7 +3129,13 @@ canvasWrap.addEventListener("pointercancel", event => {
     isDragging = false;
     dragStart = null;
     stampTapStart = null;
-    if (!pointers.size) pinchStartDistance = 0;
+    editMode = null;
+    if (!pointers.size) {
+        multiTouchGestureActive = false;
+        pinchStartDistance = 0;
+        pinchStartZoom = zoom;
+        panLastCenter = null;
+    }
     selection.hidden = true;
     hideManualDeleteButton();
 });
