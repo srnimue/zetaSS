@@ -3,6 +3,22 @@ const $ = id => document.getElementById(id);
 // 診断モードを不要になったら false にするだけで非表示にできます。
 const ENABLE_DIAGNOSTIC = true;
 
+// 調整値はここに集約。実験時に散在したマジックナンバーを増やさない。
+const CONFIG = Object.freeze({
+  bbox: Object.freeze({
+    shortNameHeightWidthRatio: 1.18,
+    shortNameMedianWidthRatio: 1.22
+  }),
+  near: Object.freeze({
+    minSimilarity: 0.50
+  }),
+  italic: Object.freeze({
+    minScore: 0.62,
+    minForeground: 0.47,
+    minBackground: 0.93
+  })
+});
+
 const fileInput = $("fileInput");
 const targetText = $("targetText");
 const targetHistory = $("targetHistory");
@@ -46,6 +62,7 @@ if (!ENABLE_DIAGNOSTIC) {
 let sourceImage = null;
 let worker = null;
 let workerLang = null;
+let ocrBusy = false;
 let fileName = "redacted.png";
 let manualMode = false;
 let stampTapStart = null;
@@ -86,6 +103,12 @@ function status(message, error = null) {
         "",
         error.stack || error
     ].join("\n") : "";
+}
+
+function setOcrBusy(busy) {
+    ocrBusy = !!busy;
+    redactBtn.disabled = ocrBusy || !sourceImage;
+    diagnoseBtn.disabled = ocrBusy || !ENABLE_DIAGNOSTIC || !sourceImage;
 }
 
 function safeLoadJson(key, fallback) {
@@ -328,7 +351,7 @@ function getOcrPaintBox(box, symbols = []) {
         chars.every(ch => /[ぁ-ゖァ-ヺ一-龯々〆ヵヶ]/u.test(ch));
     const usedWordSplit = entries.some(e => e.symbol?.bboxSource === 'word-split');
     if (isShortJapaneseName && usedWordSplit) {
-        const maxWidth = out.h * chars.length * 1.18;
+        const maxWidth = out.h * chars.length * CONFIG.bbox.shortNameHeightWidthRatio;
         if (out.w > maxWidth) {
             out = {
                 ...out,
@@ -381,7 +404,7 @@ function getOcrVisualRect(box, symbols = [], meta = {}) {
 
                 // 右側の「ちゃん / さん / くん」等を巻き込みすぎないよう、
                 // 1〜3文字名の横幅にも軽い上限を設ける。左端は動かさない。
-                const maxW = medianW * chars.length * 1.22;
+                const maxW = medianW * chars.length * CONFIG.bbox.shortNameMedianWidthRatio;
                 if (paintBox.w > maxW) {
                     paintBox = {
                         ...paintBox,
@@ -683,23 +706,25 @@ function redrawFromBase() {
     const keepScrollLeft = canvasWrap.scrollLeft;
     const keepScrollTop = canvasWrap.scrollTop;
 
-    if (ocrBaseCanvas) {
-        canvas.width = ocrBaseCanvas.width;
-        canvas.height = ocrBaseCanvas.height;
-        ctx.drawImage(ocrBaseCanvas, 0, 0);
+    const baseSource = ocrBaseCanvas || sourceImage;
+    const targetWidth = ocrBaseCanvas ? ocrBaseCanvas.width : sourceImage.naturalWidth;
+    const targetHeight = ocrBaseCanvas ? ocrBaseCanvas.height : sourceImage.naturalHeight;
+
+    // 同じサイズなら width/height を再代入しない。再代入はCanvasの再確保と状態初期化を伴う。
+    if (canvas.width !== targetWidth || canvas.height !== targetHeight) {
+        canvas.width = targetWidth;
+        canvas.height = targetHeight;
     } else {
-        canvas.width = sourceImage.naturalWidth;
-        canvas.height = sourceImage.naturalHeight;
-        ctx.drawImage(sourceImage, 0, 0);
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
     }
+    ctx.drawImage(baseSource, 0, 0);
 
     for (const stamp of manualStamps) {
         paintStamp(stamp);
     }
     updateUndoButton();
 
-    // canvas.width/height の書き換えで CSS サイズやスクロール位置がリセットされるため、
-    // 毎回 keepZoom を戻し、次フレームでスクロールも復元する。
+    // サイズ変更が必要だった場合も含め、ズームとスクロール位置は維持する。
     zoom = keepZoom;
     const base = getBaseDisplaySize();
     if (keepZoom > 1.001) {
@@ -905,16 +930,21 @@ function makeTargetHit(selected, kind="exact", skipped=[]) {
 }
 
 function findTargetInUnits(units,target){
-  const chars=[...target], hits=[];
-  if(!chars.length) return hits;
-  const text=units.map(u=>u.ch).join('');
-  let from=0;
-  while(from<=text.length-chars.length){
-    const i=text.indexOf(target,from);
-    if(i<0) break;
-    const selected=units.slice(i,i+chars.length);
-    if(selected.length===chars.length) hits.push(makeTargetHit(selected,'exact'));
-    from=i+Math.max(1,chars.length);
+  const targetChars=Array.from(target), hits=[];
+  if(!targetChars.length) return hits;
+  const textChars=units.map(u=>u.ch);
+  for(let i=0;i<=textChars.length-targetChars.length;){
+    let matched=true;
+    for(let j=0;j<targetChars.length;j++){
+      if(textChars[i+j]!==targetChars[j]){ matched=false; break; }
+    }
+    if(matched){
+      const selected=units.slice(i,i+targetChars.length);
+      if(selected.length===targetChars.length) hits.push(makeTargetHit(selected,'exact'));
+      i+=Math.max(1,targetChars.length);
+    }else{
+      i++;
+    }
   }
   return hits;
 }
@@ -1163,22 +1193,24 @@ function sequenceSimilarity(a, b) {
 
 function findNearCandidates(lines, target, limit = 60) {
   const out = [];
-  const tlen = [...target].length;
+  const targetChars = Array.from(target);
+  const tlen = targetChars.length;
   if (!tlen) return out;
 
   for (const line of lines) {
     const u = extractLineUnits(line);
-    const t = u.map(x => x.ch).join("");
-    if (!t) continue;
+    const textChars = u.map(x => x.ch);
+    const t = textChars.join("");
+    if (!textChars.length) continue;
 
     // 完全一致だけでなく「一部の文字だけ別の字として読まれた」ケースも候補にする。
     // 例：ゆーざー → ポーざー / めーざー / ゆーゴー。
     const minLen = Math.max(1, tlen - 2);
-    const maxLen = Math.min(t.length, tlen + 2);
+    const maxLen = Math.min(textChars.length, tlen + 2);
 
-    for (let i = 0; i < t.length; i++) {
-      for (let len = minLen; len <= maxLen && i + len <= t.length; len++) {
-        const c = t.slice(i, i + len);
+    for (let i = 0; i < textChars.length; i++) {
+      for (let len = minLen; len <= maxLen && i + len <= textChars.length; len++) {
+        const c = textChars.slice(i, i + len).join("");
         const editSim = 1 - editDistance(target, c) / Math.max(tlen, [...c].length);
         const seqSim = sequenceSimilarity(target, c);
         const exactChars = [...target].filter(ch => [...c].includes(ch)).length;
@@ -1187,7 +1219,7 @@ function findNearCandidates(lines, target, limit = 60) {
         // 本当に対象かどうかは、この後の局所再OCRで確認する。
         const score = Math.max(editSim, seqSim);
         const minShared = tlen <= 2 ? tlen : Math.max(2, Math.ceil(tlen * 0.5));
-        if (score >= 0.50 && exactChars >= minShared) {
+        if (score >= CONFIG.near.minSimilarity && exactChars >= minShared) {
           const selected = u.slice(i, i + len);
           if (selected.length) {
             out.push({
@@ -1388,7 +1420,7 @@ async function collectOcrResults(worker,target,analysisState=null){
   const {canvas:oc,scale:ocrScale}=buildOcrCanvas(analysisCanvas);
   const totalScale=analysisScale*ocrScale;
   const results=[];
-  const stats={primaryMs:0,fallbackMs:0,primaryHitCount:0,fallbackUsed:false,primaryName:"グレー＋コントラスト",fallbackSkippedForSpeed:false};
+  const stats={primaryMs:0,primaryHitCount:0,primaryName:"グレー＋コントラスト",fallbackSkippedForSpeed:false};
 
   // 主OCRは「グレー＋コントラスト」を1回だけ実行する。
   // 重い全画面fallbackは使わず、後段の近似候補・局所OCR・補助探索へつなぐ。
@@ -1408,9 +1440,7 @@ async function collectOcrResults(worker,target,analysisState=null){
   }
 
   // primary HITが0件でも重い全画面OCRは追加せず、近似候補群をそのまま救出へ渡す。
-  stats.fallbackUsed=false;
   stats.fallbackSkippedForSpeed = stats.primaryHitCount===0;
-  stats.fallbackMs=0;
   stats.fallbackReason = stats.primaryHitCount===0 ? "近似候補救出を優先して省略" : "不要";
 
   // 色抽出OCRは主OCRのHIT数に関係なく1回だけ追加実行する。
@@ -1737,6 +1767,8 @@ async function refineNearCandidates(worker, results, ocrCanvas, target, scale) {
 function mergeMatches(results){const all=results.flatMap(r=>r.matches),final=[];for(const box of all){const dup=final.some(o=>{const ix0=Math.max(box.x0,o.x0),iy0=Math.max(box.y0,o.y0),ix1=Math.min(box.x1,o.x1),iy1=Math.min(box.y1,o.y1);if(ix1<=ix0||iy1<=iy0)return false;const inter=(ix1-ix0)*(iy1-iy0),area=Math.min((box.x1-box.x0)*(box.y1-box.y0),(o.x1-o.x0)*(o.y1-o.y0));return area>0&&inter/area>.45;});if(!dup)final.push(box);}return final;}
 
 async function run(){
+  if (ocrBusy) return;
+  setOcrBusy(true);
   errorEl.hidden=true; ocrDiagnostics.hidden=true; ocrDebugLayer.hidden=true; ocrDebugLayer.innerHTML="";
   try{
     if(!sourceImage) throw new Error("先に画像を選択してください。");
@@ -1745,12 +1777,12 @@ async function run(){
     saveTargetHistoryEntry(targetText.value);
 
     manualStamps.length=0; manualHistory.length=0; selectedManualIndex=-1; editMode=null; ocrBaseCanvas=null; redrawFromBase();
-    const worker=await getWorker(getOcrLanguage(target));
+    const ocrWorker=await getWorker(getOcrLanguage(target));
     const analysisState=buildAnalysisCanvas();
     status("OCR中…\n基準キャンバスを作成しています。");
 
     // V33の高速OCRをそのまま使用。通常HITはV19の黒塗り処理へ接続する。
-    const {results,scale,ocrCanvas,stats,analysisCanvas,analysisScale}=await collectOcrResults(worker,target,analysisState);
+    const {results,scale,ocrCanvas,stats,analysisCanvas,analysisScale}=await collectOcrResults(ocrWorker,target,analysisState);
     const matches=mergeMatches(results);
 
     // 通常OCRで見つかった対象文字を黒塗り候補として登録。
@@ -1759,14 +1791,9 @@ async function run(){
       x:b.x0, y:b.y0, w:b.x1-b.x0, h:b.y1-b.y0, symbols:b.symbols||[], source:"OCR"
     }));
 
-    // 完全一致HITの高倍率再OCRは行わない。
-    // symbol union + 一律8%余白だけで最終位置を決める。
-    const exactRefineAttempted = 0;
-    const exactRefineSkipped = paintBoxes.length;
-
     // 通常OCRで拾えなかった候補だけ、V33の局所再OCRを実行。
     // 再OCRで対象文字を確認できた地点は、その候補文字のbboxを黒塗り範囲として追加する。
-    const refine=await refineNearCandidates(worker,results,ocrCanvas,target,scale);
+    const refine=await refineNearCandidates(ocrWorker,results,ocrCanvas,target,scale);
     for(const r of [...refine.refined, ...refine.acceptedNear]){
       const b=r.refinedBox || r.box;
       if(!b) continue;
@@ -1785,7 +1812,7 @@ async function run(){
     // V70：V68の「文字領域全走査＋局所OCR」を正式な追加検出ルートとして使用。
     // 全体OCRで拾えなかった文字も、文字っぽい領域内のPSM7 OCRで拾えた場合は追加する。
     status("OCR中…\n文字領域を追加走査しています。");
-    const regionScan = await collectTextRegionMatches(worker, analysisCanvas, target, analysisScale);
+    const regionScan = await collectTextRegionMatches(ocrWorker, analysisCanvas, target, analysisScale);
     for (const b of regionScan.matches) {
       const duplicate = paintBoxes.some(o => {
         const ix0 = Math.max(o.x, b.x0), iy0 = Math.max(o.y, b.y0);
@@ -1840,8 +1867,12 @@ async function run(){
     saveBtn.disabled=false; manualBtn.disabled=false;
     const italicAdded = italicRescue?.accepted?.length || 0;
     const localAdded = Math.max(0, paintBoxes.length - matches.length - italicAdded);
-    status(`黒塗り完了：${manualStamps.length}箇所\n通常OCR：${matches.length}箇所 / 追加局所OCR：${localAdded}箇所 / イタリック救出：${italicAdded}箇所\nイタリック探索：${italicRescue.searchMode} ${italicRescue.searchRegionCount}領域 / 評価${italicRescue.scoredPositions}地点 / HIT済み省略${italicRescue.skippedExisting}地点\n位置再確認：${exactRefineAttempted}件 / 省略：${exactRefineSkipped}件${stats.fallbackSkippedForSpeed ? " / 重い全画面fallback省略" : ""}`);
-  }catch(error){status("OCRでエラーが発生しました。下のエラー詳細を確認してください。",error);}
+    status(`黒塗り完了：${manualStamps.length}箇所\n通常OCR：${matches.length}箇所 / 追加局所OCR：${localAdded}箇所 / イタリック救出：${italicAdded}箇所\nイタリック探索：${italicRescue.searchMode} ${italicRescue.searchRegionCount}領域 / 評価${italicRescue.scoredPositions}地点 / HIT済み省略${italicRescue.skippedExisting}地点${stats.fallbackSkippedForSpeed ? " / 重い全画面fallback省略" : ""}`);
+  }catch(error){
+    status("OCRでエラーが発生しました。下のエラー詳細を確認してください。",error);
+  }finally{
+    setOcrBusy(false);
+  }
 }
 
 
@@ -1866,9 +1897,9 @@ const ITALIC_REFINE_STEP = 2;
 const ITALIC_SECONDARY_OFFSET = 3;
 const ITALIC_COARSE_LIMIT = 10;
 const ITALIC_FINAL_LIMIT = 6;
-const ITALIC_RESCUE_SCORE_MIN = 0.62;
-const ITALIC_RESCUE_FG_MIN = 0.47;
-const ITALIC_RESCUE_BG_MIN = 0.93;
+const ITALIC_RESCUE_SCORE_MIN = CONFIG.italic.minScore;
+const ITALIC_RESCUE_FG_MIN = CONFIG.italic.minForeground;
+const ITALIC_RESCUE_BG_MIN = CONFIG.italic.minBackground;
 const ITALIC_RESCUE_MAX_NEW = 3;
 
 // V90.26: イタリック探索専用の縮小キャンバス。
@@ -2403,6 +2434,8 @@ function collectItalicRescueCandidates(source, text, existingBoxes=[], variantHe
 
 
 async function diagnoseOCR(){
+  if (ocrBusy) return;
+  setOcrBusy(true);
   ocrDiagnostics.hidden=false;
   ocrDebugLayer.hidden=true;
   ocrDebugLayer.innerHTML="";
@@ -2414,12 +2447,12 @@ async function diagnoseOCR(){
     if(!target)throw new Error("黒塗りする文字を入力してください。");
     saveTargetHistoryEntry(targetText.value);
     const totalStarted=performance.now();
-    const worker=await getWorker(getOcrLanguage(target));
+    const ocrWorker=await getWorker(getOcrLanguage(target));
     canvas.hidden=false; canvas.style.display="block";
     status("OCR診断中…\n認識条件を比較しています。画像表示は維持します。");
     const ocrStarted=performance.now();
     const analysisState=buildAnalysisCanvas();
-    const {results,scale,ocrCanvas,stats,analysisCanvas,analysisScale}=await collectOcrResults(worker,target,analysisState);
+    const {results,scale,ocrCanvas,stats,analysisCanvas,analysisScale}=await collectOcrResults(ocrWorker,target,analysisState);
     const diagnosticTextRegions=detectTextLikeRegions(analysisCanvas);
     const diagnosticItalicHeightChoice=chooseItalicVariantHeights(results,target,analysisScale);
     const diagnosticItalicHeights=diagnosticItalicHeightChoice.heights;
@@ -2428,7 +2461,7 @@ async function diagnoseOCR(){
     italicVariantResult.merged=(italicVariantResult.merged||[]).map(c=>({...c,x:Math.round(c.x/analysisScale),y:Math.round(c.y/analysisScale),w:Math.max(1,Math.round(c.w/analysisScale)),h:Math.max(1,Math.round(c.h/analysisScale))}));
     const ocrElapsed=performance.now()-ocrStarted;
     const refineStarted=performance.now();
-    const refine=await refineNearCandidates(worker,results,ocrCanvas,target,scale);
+    const refine=await refineNearCandidates(ocrWorker,results,ocrCanvas,target,scale);
     const refineElapsed=performance.now()-refineStarted;
     const {groups:candidateGroups,refined,acceptedNear}=refine;
     // V70.1: 診断側でも文脈救出結果を必ず初期化する。
@@ -2494,7 +2527,7 @@ async function diagnoseOCR(){
 
     // 診断でも本番と同じ文字領域検出を使って局所OCR結果を確認する。
     lines.push("",`===== 文字領域全走査＋局所OCR =====`);
-    const regionResult=await runTextRegionExperiment(worker,analysisCanvas,target,analysisScale);
+    const regionResult=await runTextRegionExperiment(ocrWorker,analysisCanvas,target,analysisScale);
     lines.push(`検出候補：${regionResult.detected.regions.length}領域 / 局所OCR実行：${regionResult.tested.length}領域 / 走査間隔：${regionResult.detected.sample}px / 通常：2倍・PSM7`);
     lines.push(`追加前処理：なし / 追加OCR実行：0回`);
     const regionHits=regionResult.tested.filter(r=>r.hit);
@@ -2564,7 +2597,7 @@ async function diagnoseOCR(){
     lines.push("",`===== 処理時間 =====`,
       `OCR全体：${(ocrElapsed/1000).toFixed(2)}秒`,
       `  第1段階（グレー＋コントラスト）：${(stats.primaryMs/1000).toFixed(2)}秒 / HIT ${stats.primaryHitCount}件`,
-      `  追加全体OCR：${stats.fallbackUsed ? (stats.fallbackMs/1000).toFixed(2)+"秒 / "+stats.fallbackReason : (stats.fallbackSkippedForSpeed ? "0.00秒 / "+stats.fallbackReason : "0.00秒 / 不要")}`,
+      `  追加全体OCR：${stats.fallbackSkippedForSpeed ? "0.00秒 / "+stats.fallbackReason : "0.00秒 / 不要"}`,
       `候補再OCR：${(refineElapsed/1000).toFixed(2)}秒`,
       `診断全体：${(totalElapsed/1000).toFixed(2)}秒`,
       `候補地点：${candidateGroups.length} / 色抽出HIT：${stats.colorHitCount||0} / 近似候補救出：${refine.fastRecovered} / 再OCR実行：${refine.attempted} / 再OCR追加パス：${refine.extraPasses} / 既存HITで省略：${refine.skippedExact}`,
@@ -2624,7 +2657,11 @@ async function diagnoseOCR(){
 
     ocrDebugLayer.hidden=ocrDebugLayer.childElementCount===0;
     status(`OCR診断完了。\n検出：${exactCount}件（重複を含む） / 候補地点：${candidateGroups.length}箇所 / 再OCR確認：${refined.length}箇所\n処理時間：${(totalElapsed/1000).toFixed(2)}秒\n下の診断結果を確認してください。`);
-  }catch(error){canvas.hidden=false;canvas.style.display='block';status("OCR診断でエラーが発生しました。",error);}
+  }catch(error){
+    canvas.hidden=false;canvas.style.display='block';status("OCR診断でエラーが発生しました。",error);
+  }finally{
+    setOcrBusy(false);
+  }
 }
 function getCanvasPoint(event) {
     const rect = canvas.getBoundingClientRect();
@@ -3147,7 +3184,6 @@ redactionMode?.addEventListener("change", () => {
     status(`隠し方を「${label}」にしました。`);
 });
 redactionColor?.addEventListener("input", savePreferences);
-manualDrawMode?.addEventListener("change", savePreferences);
 targetText?.addEventListener("keydown", event => {
     if (event.key === "Enter") saveTargetHistoryEntry(targetText.value);
 });

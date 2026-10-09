@@ -1,3 +1,14 @@
+V91.4 安定化・整理テスト
+
+- V91.3の検出・黒塗り・診断枠同期を維持。
+- OCR実行中は「黒塗り実行」「OCR診断」を両方無効化し、同じOCRワーカーへの二重実行を防止。
+- 手動編集の再描画で、Canvasサイズが同じ場合は width/height を再代入せず clearRect のみ実行。ドラッグ中のCanvas再確保を削減。
+- manualDrawMode の change に重複登録されていた savePreferences リスナーを削除。
+- findTargetInUnits / findNearCandidates をUnicode文字配列基準に変更し、𠮷などのサロゲートペアで文字位置がずれないよう修正。
+- bbox・近似候補・イタリック救出の主要な調整値を CONFIG に集約。
+- 常に固定値だった exactRefineAttempted / fallbackUsed / fallbackMs を削除し、表示も現在の処理フローに合わせて簡略化。
+- run() / diagnoseOCR() 内のローカル worker を ocrWorker に変更し、グローバル worker とのシャドーイングを解消。
+
 V91.3 診断枠＝本番黒塗り同期テスト
 
 - V91.2.1のPC Chrome Canvas修正とOCR実測高さテンプレートを維持。
