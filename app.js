@@ -1057,78 +1057,8 @@ async function recognizeLocalRegionVariant(worker, crop, target, mode) {
   return {mode, raw, hit, matches, lineData};
 }
 
-// V68実験：V64の「文字っぽい横長領域」の検出を維持し、
-// 上位16領域だけでなく検出された全領域を通常OCRする。
-// まず「未走査領域に3個目が存在するか」を確認するためのカバレッジ実験。
-// 前処理追加はこの版では行わず、OCR回数を必要最小限にする。診断専用。
-async function runTextRegionExperiment(worker,sourceCanvas,target,coordScale=1) {
-  const detected=detectTextLikeRegions(sourceCanvas);
-  const tested=[];
-  const started=performance.now();
-  const SCALE=2;
-
-  // V64では上位16領域だけをOCRしていたため、検出された残りの領域に
-  // 目的の文字が存在していても拾えない可能性があった。V68では全領域を
-  // 通常OCRして、まず「走査範囲不足」なのかどうかを切り分ける。
-  for(const r of detected.regions) {
-    const crop=document.createElement('canvas');
-    crop.width=Math.max(1,Math.round(r.w*SCALE));
-    crop.height=Math.max(1,Math.round(r.h*SCALE));
-    const cctx=crop.getContext('2d');
-    cctx.imageSmoothingEnabled=true;
-    cctx.imageSmoothingQuality='high';
-    cctx.drawImage(sourceCanvas,r.x,r.y,r.w,r.h,0,0,crop.width,crop.height);
-
-    const normal=await recognizeLocalRegionVariant(worker,crop,target,'通常');
-    const regionMatches=[];
-    for(const hit of (normal.matches||[])){
-      const b=hit.targetBox;
-      regionMatches.push({
-        x0:(r.x+b.x0/SCALE)/coordScale,
-        y0:(r.y+b.y0/SCALE)/coordScale,
-        x1:(r.x+b.x1/SCALE)/coordScale,
-        y1:(r.y+b.y1/SCALE)/coordScale,
-        symbols:(hit.symbols||[]).map(u=>({
-          ...u,
-          bbox:{
-            x0:(r.x+u.bbox.x0/SCALE)/coordScale,
-            y0:(r.y+u.bbox.y0/SCALE)/coordScale,
-            x1:(r.x+u.bbox.x1/SCALE)/coordScale,
-            y1:(r.y+u.bbox.y1/SCALE)/coordScale
-          }
-        })),
-        lineText:normal.raw,
-        source:'局所OCR'
-      });
-    }
-    tested.push({
-      ...r,
-      x:r.x/coordScale,
-      y:r.y/coordScale,
-      w:r.w/coordScale,
-      h:r.h/coordScale,
-      hit:normal.hit,
-      baseHit:normal.hit,
-      extraHit:false,
-      variants:[normal],
-      raw:normal.raw,
-      matches:regionMatches
-    });
-    crop.width=1; crop.height=1;
-  }
-  return {
-    detected:{sample:detected.sample,regions:detected.regions.map(r=>({...r,x:r.x/coordScale,y:r.y/coordScale,w:r.w/coordScale,h:r.h/coordScale}))},
-    tested,
-    matches:tested.flatMap(r=>r.matches||[]),
-    elapsed:performance.now()-started,
-    extraRuns:0,
-    extraModes:[]
-  };
-}
-
-// V70本採用用：V68と同じ文字領域検出＋全領域局所OCRを、
-// 実際の自動黒塗り候補として返す。OCRのbboxは2倍拡大した局所画像上の
-// 座標なので、元画像の領域座標へ戻してから既存のmergeMatchesへ渡す。
+// 文字っぽい領域を全走査し、局所OCRのHITと診断用情報を同時に返す。
+// 本番と診断で同じ処理を共有し、検出経路の二重実装を避ける。
 async function collectTextRegionMatches(worker, sourceCanvas, target, coordScale=1) {
   const detected = detectTextLikeRegions(sourceCanvas);
   const SCALE = 2;
@@ -1168,12 +1098,32 @@ async function collectTextRegionMatches(worker, sourceCanvas, target, coordScale
       });
     }
     matches.push(...regionMatches);
-    tested.push({...r, hit:normal.hit, raw:normal.raw, matches:regionMatches, lineData:normal.lineData || []});
+    tested.push({
+      ...r,
+      x: r.x / coordScale,
+      y: r.y / coordScale,
+      w: r.w / coordScale,
+      h: r.h / coordScale,
+      hit: normal.hit,
+      baseHit: normal.hit,
+      extraHit: false,
+      variants: [normal],
+      raw: normal.raw,
+      matches: regionMatches,
+      lineData: normal.lineData || []
+    });
     crop.width = 1;
     crop.height = 1;
   }
 
-  return {detected, tested, matches, elapsed: performance.now() - started};
+  return {
+    detected,
+    tested,
+    matches,
+    elapsed: performance.now() - started,
+    extraRuns: 0,
+    extraModes: []
+  };
 }
 
 function editDistance(a,b){const A=[...a],B=[...b],d=Array.from({length:A.length+1},()=>Array(B.length+1).fill(0));for(let i=0;i<=A.length;i++)d[i][0]=i;for(let j=0;j<=B.length;j++)d[0][j]=j;for(let i=1;i<=A.length;i++)for(let j=1;j<=B.length;j++)d[i][j]=Math.min(d[i-1][j]+1,d[i][j-1]+1,d[i-1][j-1]+(A[i-1]===B[j-1]?0:1));return d[A.length][B.length];}
@@ -1759,7 +1709,7 @@ async function refineNearCandidates(worker, results, ocrCanvas, target, scale) {
 }
 
 
-// V70：周囲の文字を手掛かりに、対象文字そのものをOCRできなかった地点を救出する。
+// 周囲の文字を手掛かりに、対象文字そのものをOCRできなかった地点を救出する。
 // 例：「ねるちゃん」を1件でも認識できたら「ちゃん」を文脈として学習し、
 // 別の局所OCRで「ちゃん」だけ認識された場合、その直前に対象文字があると推定する。
 // 推定矩形は既知の完全一致HITから得た対象文字の平均サイズと、
@@ -1781,7 +1731,7 @@ async function run(){
     const analysisState=buildAnalysisCanvas();
     status("OCR中…\n基準キャンバスを作成しています。");
 
-    // V33の高速OCRをそのまま使用。通常HITはV19の黒塗り処理へ接続する。
+    // 高速OCRを主経路にし、通常HITを黒塗り処理へ接続する。
     const {results,scale,ocrCanvas,stats,analysisCanvas,analysisScale}=await collectOcrResults(ocrWorker,target,analysisState);
     const matches=mergeMatches(results);
 
@@ -1791,7 +1741,7 @@ async function run(){
       x:b.x0, y:b.y0, w:b.x1-b.x0, h:b.y1-b.y0, symbols:b.symbols||[], source:"OCR"
     }));
 
-    // 通常OCRで拾えなかった候補だけ、V33の局所再OCRを実行。
+    // 通常OCRで拾えなかった候補だけ、局所再OCRを実行。
     // 再OCRで対象文字を確認できた地点は、その候補文字のbboxを黒塗り範囲として追加する。
     const refine=await refineNearCandidates(ocrWorker,results,ocrCanvas,target,scale);
     for(const r of [...refine.refined, ...refine.acceptedNear]){
@@ -1809,7 +1759,7 @@ async function run(){
     }
 
 
-    // V70：V68の「文字領域全走査＋局所OCR」を正式な追加検出ルートとして使用。
+    // 「文字領域全走査＋局所OCR」を追加検出ルートとして使用。
     // 全体OCRで拾えなかった文字も、文字っぽい領域内のPSM7 OCRで拾えた場合は追加する。
     status("OCR中…\n文字領域を追加走査しています。");
     const regionScan = await collectTextRegionMatches(ocrWorker, analysisCanvas, target, analysisScale);
@@ -1902,7 +1852,7 @@ const ITALIC_RESCUE_FG_MIN = CONFIG.italic.minForeground;
 const ITALIC_RESCUE_BG_MIN = CONFIG.italic.minBackground;
 const ITALIC_RESCUE_MAX_NEW = 3;
 
-// V90.26: イタリック探索専用の縮小キャンバス。
+// イタリック探索専用の縮小キャンバス。
 // 元画像が大きい時だけ縮小し、探索画素数とテンプレートの見かけサイズを安定させる。
 // OCR用キャンバスとは分離し、OCR精度や既存処理には影響させない。
 const ITALIC_SEARCH_MAX_WIDTH = 900;
@@ -1957,7 +1907,7 @@ function medianNumber(values){
 }
 
 function chooseItalicVariantHeights(results, target, analysisScale=1){
-  // V91.2: 追加の画像解析はせず、すでに取得済みのOCR bboxから
+  // 追加の画像解析はせず、すでに取得済みのOCR bboxから
   // 解析キャンバス上の実文字高さを推定する。テンプレート本数は2本のまま。
   // 優先順位: 完全一致 > 強い近似候補 > 既定値。
   const exactHeights=[];
@@ -2464,7 +2414,7 @@ async function diagnoseOCR(){
     const refine=await refineNearCandidates(ocrWorker,results,ocrCanvas,target,scale);
     const refineElapsed=performance.now()-refineStarted;
     const {groups:candidateGroups,refined,acceptedNear}=refine;
-    // V70.1: 診断側でも文脈救出結果を必ず初期化する。
+    // 診断側でも文脈救出結果を必ず初期化する。
     // 実処理(run)では局所OCR結果も渡すが、診断ではここまでで局所OCRを
     // 実行していないため、まず全体OCRだけを対象にする。
     const totalElapsed=performance.now()-totalStarted;
@@ -2507,27 +2457,22 @@ async function diagnoseOCR(){
     lines.push("",`===== 完全一致の最終黒塗り位置 =====`);
     const exactMatches=mergeMatches(results);
     const verifyStarted=performance.now();
-    let changedCount=0;
     for(const m of exactMatches){
-      const before={x:m.x0,y:m.y0,w:m.x1-m.x0,h:m.y1-m.y0};
-      const after=before;
-      const moved=Math.abs(after.x-before.x)>1||Math.abs(after.y-before.y)>1||Math.abs(after.w-before.w)>1||Math.abs(after.h-before.h)>1;
-      if(moved)changedCount++;
+      const ocrBox={x:m.x0,y:m.y0,w:m.x1-m.x0,h:m.y1-m.y0};
       const bboxNote=(m.symbols||[]).some(s=>s.bboxSource==="word-split")?" / symbol異常→word均等分割":"";
-      const paintBox=getOcrPaintBox(after,m.symbols||[]);
+      const paintBox=getOcrPaintBox(ocrBox,m.symbols||[]);
       const widthGuardNote=paintBox.shortNameWidthGuard?` / 短名幅ガード ${Math.round(paintBox.originalWidth)}→${Math.round(paintBox.w)}px（左端固定）`:"";
-      lines.push(`「${m.lineText}」： 元bbox=(${Math.round(before.x)},${Math.round(before.y)},w${Math.round(before.w)},h${Math.round(before.h)}) → 使用bbox=(${Math.round(after.x)},${Math.round(after.y)},w${Math.round(after.w)},h${Math.round(after.h)}) ${moved?'※位置を修正':'変更なし'}${bboxNote}${widthGuardNote}`);
-      // 実際に黒塗りが描画される最終矩形も、同じ計算式で再現。
-      const finalRect=getOcrVisualRect(after, m.symbols||[]);
+      const finalRect=getOcrVisualRect(ocrBox, m.symbols||[]);
       const widthNormNote=finalRect.shortNameWidthNormalized ? ` / 短名幅正常化:${finalRect.shortNameWidthNormalized}` : '';
+      lines.push(`「${m.lineText}」： OCR bbox=(${Math.round(ocrBox.x)},${Math.round(ocrBox.y)},w${Math.round(ocrBox.w)},h${Math.round(ocrBox.h)})${bboxNote}${widthGuardNote}`);
       lines.push(`　→ 最終黒塗り座標=(${Math.round(finalRect.x)},${Math.round(finalRect.y)},w${Math.round(finalRect.w)},h${Math.round(finalRect.h)})${widthNormNote}${finalRect.w<=4?' ※幅が極端に狭い(縦棒の疑いあり)':''}`);
     }
     const verifyElapsed=performance.now()-verifyStarted;
-    lines.push(`検証時間：${(verifyElapsed/1000).toFixed(2)}秒 / 修正：${changedCount}件 / 対象：${exactMatches.length}件`);
+    lines.push(`検証時間：${(verifyElapsed/1000).toFixed(2)}秒 / 対象：${exactMatches.length}件`);
 
     // 診断でも本番と同じ文字領域検出を使って局所OCR結果を確認する。
     lines.push("",`===== 文字領域全走査＋局所OCR =====`);
-    const regionResult=await runTextRegionExperiment(ocrWorker,analysisCanvas,target,analysisScale);
+    const regionResult=await collectTextRegionMatches(ocrWorker,analysisCanvas,target,analysisScale);
     lines.push(`検出候補：${regionResult.detected.regions.length}領域 / 局所OCR実行：${regionResult.tested.length}領域 / 走査間隔：${regionResult.detected.sample}px / 通常：2倍・PSM7`);
     lines.push(`追加前処理：なし / 追加OCR実行：0回`);
     const regionHits=regionResult.tested.filter(r=>r.hit);
@@ -2544,7 +2489,7 @@ async function diagnoseOCR(){
     lines.push(`色抽出OCR：${stats.colorHitCount||0}件 / ${(stats.colorMs/1000).toFixed(2)}秒`);
     lines.push(`※ この局所OCRのHITは、自動黒塗り候補にも統合します。`);
 
-    // V91.3: 診断の色付き枠を本番の黒塗り候補と同じ経路で組み立てる。
+    // 診断の色付き枠を本番の黒塗り候補と同じ経路で組み立てる。
     // exact → 再OCR/近似救出 → 局所OCR → イタリック救出 の順に統合し、
     // 重複判定と最終矩形(getOcrVisualRect)も本番と揃える。
     const diagnosticPaintBoxes=exactMatches.map(b=>({
