@@ -1,7 +1,7 @@
-import { CONFIG, ENABLE_DIAGNOSTIC } from "./config.js?v=91901";
-import { normalize, getMedian, editDistance } from "./utils.js?v=91901";
-import { state, manualStamps } from "./state.js?v=91901";
-import { createView } from "./view.js?v=91901";
+import { CONFIG, ENABLE_DIAGNOSTIC } from "./config.js?v=911100";
+import { normalize, getMedian, editDistance } from "./utils.js?v=911100";
+import { state, manualStamps } from "./state.js?v=911100";
+import { createView } from "./view.js?v=911100";
 import {
     ITALIC_VARIANT_SKEWS,
     ITALIC_DIAGNOSTIC_SKEWS,
@@ -13,7 +13,7 @@ import {
     chooseItalicVariantHeights,
     italicVariantDiagnosticSearch,
     collectItalicRescueCandidates
-} from "./italic.js?v=91901";
+} from "./italic.js?v=911100";
 
 
 const $ = id => document.getElementById(id);
@@ -1006,53 +1006,41 @@ async function collectTextRegionMatches(worker, sourceCanvas, target, coordScale
     cctx.drawImage(sourceCanvas, r.x, r.y, r.w, r.h, 0, 0, crop.width, crop.height);
 
     const normal = await recognizeLocalRegionVariant(worker, crop, target, '通常');
-    const variants = [normal];
-    let extra = null;
-    // 白背景＋暗文字の取りこぼし対策。通常の局所OCRで外れた領域だけ、
-    // 二値化180を1回だけ追加する。通常HIT済みの領域には追加OCRしない。
-    if (!normal.hit) {
-      extra = await recognizeLocalRegionVariant(worker, crop, target, '二値化180');
-      variants.push(extra);
-    }
-
     const regionMatches = [];
-    for (const variant of variants) {
-      for (const hit of variant.matches || []) {
-        const b = hit.targetBox;
-        regionMatches.push({
-          x0: (r.x + b.x0 / SCALE) / coordScale,
-          y0: (r.y + b.y0 / SCALE) / coordScale,
-          x1: (r.x + b.x1 / SCALE) / coordScale,
-          y1: (r.y + b.y1 / SCALE) / coordScale,
-          symbols: (hit.symbols || []).map(u => ({
-            ...u,
-            bbox: {
-              x0: (r.x + u.bbox.x0 / SCALE) / coordScale,
-              y0: (r.y + u.bbox.y0 / SCALE) / coordScale,
-              x1: (r.x + u.bbox.x1 / SCALE) / coordScale,
-              y1: (r.y + u.bbox.y1 / SCALE) / coordScale
-            }
-          })),
-          lineText: variant.raw,
-          source: variant.mode === '通常' ? '局所OCR' : `局所OCR:${variant.mode}`
-        });
-      }
+    for (const hit of normal.matches || []) {
+      const b = hit.targetBox;
+      regionMatches.push({
+        x0: (r.x + b.x0 / SCALE) / coordScale,
+        y0: (r.y + b.y0 / SCALE) / coordScale,
+        x1: (r.x + b.x1 / SCALE) / coordScale,
+        y1: (r.y + b.y1 / SCALE) / coordScale,
+        symbols: (hit.symbols || []).map(u => ({
+          ...u,
+          bbox: {
+            x0: (r.x + u.bbox.x0 / SCALE) / coordScale,
+            y0: (r.y + u.bbox.y0 / SCALE) / coordScale,
+            x1: (r.x + u.bbox.x1 / SCALE) / coordScale,
+            y1: (r.y + u.bbox.y1 / SCALE) / coordScale
+          }
+        })),
+        lineText: normal.raw,
+        source: '局所OCR'
+      });
     }
     matches.push(...regionMatches);
-    const anyHit = variants.some(v => v.hit);
     tested.push({
       ...r,
       x: r.x / coordScale,
       y: r.y / coordScale,
       w: r.w / coordScale,
       h: r.h / coordScale,
-      hit: anyHit,
+      hit: normal.hit,
       baseHit: normal.hit,
-      extraHit: !normal.hit && !!extra?.hit,
-      variants,
+      extraHit: false,
+      variants: [normal],
       raw: normal.raw,
       matches: regionMatches,
-      lineData: variants.flatMap(v => v.lineData || [])
+      lineData: normal.lineData || []
     });
     crop.width = 1;
     crop.height = 1;
@@ -1063,8 +1051,8 @@ async function collectTextRegionMatches(worker, sourceCanvas, target, coordScale
     tested,
     matches,
     elapsed: performance.now() - started,
-    extraRuns: tested.filter(r => r.variants.length > 1).length,
-    extraModes: tested.some(r => r.variants.some(v => v.mode === '二値化180')) ? ['二値化180'] : []
+    extraRuns: 0,
+    extraModes: []
   };
 }
 
@@ -1861,7 +1849,7 @@ async function diagnoseOCR(){
     lines.push("",`===== 文字領域全走査＋局所OCR =====`);
     const regionResult=await collectTextRegionMatches(ocrWorker,analysisCanvas,target,analysisScale);
     lines.push(`検出候補：${regionResult.detected.regions.length}領域 / 局所OCR実行：${regionResult.tested.length}領域 / 走査間隔：${regionResult.detected.sample}px / 通常：2倍・PSM7`);
-    lines.push(`追加前処理：${regionResult.extraModes.length ? regionResult.extraModes.join('・') : 'なし'} / 追加OCR実行：${regionResult.extraRuns}回`);
+    lines.push(`追加前処理：なし / 追加OCR実行：0回`);
     const regionHits=regionResult.tested.filter(r=>r.hit);
     const baseHits=regionResult.tested.filter(r=>r.baseHit);
     const extraHits=regionResult.tested.filter(r=>r.extraHit);
@@ -1908,7 +1896,7 @@ async function diagnoseOCR(){
 
     lines.push("",`===== イタリック救出診断 =====`);
     lines.push(`解析キャンバス：${analysisCanvas.width}x${analysisCanvas.height} / scale ${analysisScale.toFixed(3)}${analysisState.resized ? "（統一縮小）" : "（原寸）"}`);
-    lines.push(`方式：コントラスト補正 → イタリックテンプレート / 粗探索${ITALIC_COARSE_STEP}px → 局所再探索${ITALIC_REFINE_STEP}px`);
+    lines.push(`方式：コントラスト補正 → 明字/暗背景＋暗字/白背景テンプレート / 粗探索${ITALIC_COARSE_STEP}px → 局所再探索${ITALIC_REFINE_STEP}px`);
     lines.push(`探索キャンバス：${italicVariantResult.searchCanvasWidth}x${italicVariantResult.searchCanvasHeight} / scale ${italicVariantResult.searchScale.toFixed(3)}${italicVariantResult.resized ? "（縮小）" : "（原寸）"}`);
     lines.push(`テンプレート高さ推定：${diagnosticItalicHeightChoice.source} ${diagnosticItalicHeightChoice.sampleCount}件${Number.isFinite(diagnosticItalicHeightChoice.basis)?` / 中央値 ${diagnosticItalicHeightChoice.basis.toFixed(1)}px`:''}`);
     lines.push(`テンプレートバリエーション：解析基準 ${diagnosticItalicHeights.join("/")}px → 探索時はscale連動 × 診断傾き ${ITALIC_DIAGNOSTIC_SKEWS.map(v=>v.toFixed(2)).join("/")}（本番は ${ITALIC_VARIANT_SKEWS.map(v=>v.toFixed(2)).join("/")}）`);
@@ -1983,7 +1971,7 @@ async function diagnoseOCR(){
     for(const c of (italicProductionPreview.accepted||[])){
       drawDiagnosticFinalRect(
         {x:c.x,y:c.y,w:c.w,h:c.h,symbols:[],source:'イタリック救出'},
-        `イタリック救出 ${c.score.toFixed(2)}`
+        `イタリック救出${c.polarityLabel?`[${c.polarityLabel}]`:``} ${c.score.toFixed(2)}`
       );
     }
 
