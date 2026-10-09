@@ -1050,6 +1050,27 @@ async function runTextRegionExperiment(worker,sourceCanvas,target,coordScale=1) 
     cctx.drawImage(sourceCanvas,r.x,r.y,r.w,r.h,0,0,crop.width,crop.height);
 
     const normal=await recognizeLocalRegionVariant(worker,crop,target,'通常');
+    const regionMatches=[];
+    for(const hit of (normal.matches||[])){
+      const b=hit.targetBox;
+      regionMatches.push({
+        x0:(r.x+b.x0/SCALE)/coordScale,
+        y0:(r.y+b.y0/SCALE)/coordScale,
+        x1:(r.x+b.x1/SCALE)/coordScale,
+        y1:(r.y+b.y1/SCALE)/coordScale,
+        symbols:(hit.symbols||[]).map(u=>({
+          ...u,
+          bbox:{
+            x0:(r.x+u.bbox.x0/SCALE)/coordScale,
+            y0:(r.y+u.bbox.y0/SCALE)/coordScale,
+            x1:(r.x+u.bbox.x1/SCALE)/coordScale,
+            y1:(r.y+u.bbox.y1/SCALE)/coordScale
+          }
+        })),
+        lineText:normal.raw,
+        source:'局所OCR'
+      });
+    }
     tested.push({
       ...r,
       x:r.x/coordScale,
@@ -1060,13 +1081,15 @@ async function runTextRegionExperiment(worker,sourceCanvas,target,coordScale=1) 
       baseHit:normal.hit,
       extraHit:false,
       variants:[normal],
-      raw:normal.raw
+      raw:normal.raw,
+      matches:regionMatches
     });
     crop.width=1; crop.height=1;
   }
   return {
     detected:{sample:detected.sample,regions:detected.regions.map(r=>({...r,x:r.x/coordScale,y:r.y/coordScale,w:r.w/coordScale,h:r.h/coordScale}))},
     tested,
+    matches:tested.flatMap(r=>r.matches||[]),
     elapsed:performance.now()-started,
     extraRuns:0,
     extraModes:[]
@@ -2403,7 +2426,6 @@ async function diagnoseOCR(){
     const italicVariantResult=italicVariantDiagnosticSearch(analysisCanvas,target,diagnosticItalicHeights,{},ITALIC_DIAGNOSTIC_SKEWS);
     italicVariantResult.variants=(italicVariantResult.variants||[]).map(v=>({...v,candidates:(v.candidates||[]).map(c=>({...c,x:Math.round(c.x/analysisScale),y:Math.round(c.y/analysisScale),w:Math.max(1,Math.round(c.w/analysisScale)),h:Math.max(1,Math.round(c.h/analysisScale))}))}));
     italicVariantResult.merged=(italicVariantResult.merged||[]).map(c=>({...c,x:Math.round(c.x/analysisScale),y:Math.round(c.y/analysisScale),w:Math.max(1,Math.round(c.w/analysisScale)),h:Math.max(1,Math.round(c.h/analysisScale))}));
-    const italicProductionPreview=collectItalicRescueCandidates(analysisCanvas,target,[],diagnosticItalicHeights,diagnosticTextRegions,analysisScale);
     const ocrElapsed=performance.now()-ocrStarted;
     const refineStarted=performance.now();
     const refine=await refineNearCandidates(worker,results,ocrCanvas,target,scale);
@@ -2489,6 +2511,36 @@ async function diagnoseOCR(){
     lines.push(`色抽出OCR：${stats.colorHitCount||0}件 / ${(stats.colorMs/1000).toFixed(2)}秒`);
     lines.push(`※ この局所OCRのHITは、自動黒塗り候補にも統合します。`);
 
+    // V91.3: 診断の色付き枠を本番の黒塗り候補と同じ経路で組み立てる。
+    // exact → 再OCR/近似救出 → 局所OCR → イタリック救出 の順に統合し、
+    // 重複判定と最終矩形(getOcrVisualRect)も本番と揃える。
+    const diagnosticPaintBoxes=exactMatches.map(b=>({
+      x:b.x0,y:b.y0,w:b.x1-b.x0,h:b.y1-b.y0,symbols:b.symbols||[],source:'OCR'
+    }));
+    const addDiagnosticCandidate=(box,symbols,source)=>{
+      if(!box) return;
+      const candidate={x:box.x0,y:box.y0,w:box.x1-box.x0,h:box.y1-box.y0,symbols:symbols||[],source};
+      const duplicate=diagnosticPaintBoxes.some(o=>{
+        const ix0=Math.max(o.x,candidate.x), iy0=Math.max(o.y,candidate.y);
+        const ix1=Math.min(o.x+o.w,candidate.x+candidate.w), iy1=Math.min(o.y+o.h,candidate.y+candidate.h);
+        if(ix1<=ix0||iy1<=iy0) return false;
+        const inter=(ix1-ix0)*(iy1-iy0);
+        const area=Math.min(o.w*o.h,candidate.w*candidate.h);
+        return area>0&&inter/area>.45;
+      });
+      if(!duplicate) diagnosticPaintBoxes.push(candidate);
+    };
+    for(const r of [...refined,...acceptedNear]){
+      const b=r.refinedBox||r.box;
+      addDiagnosticCandidate(b,r.symbols||[],r.recovery||'再OCR');
+    }
+    for(const b of (regionResult.matches||[])){
+      addDiagnosticCandidate(b,b.symbols||[],'局所OCR');
+    }
+    const italicProductionPreview=collectItalicRescueCandidates(
+      analysisCanvas,target,diagnosticPaintBoxes,diagnosticItalicHeights,diagnosticTextRegions,analysisScale
+    );
+
     lines.push("",`===== イタリック救出診断 =====`);
     lines.push(`解析キャンバス：${analysisCanvas.width}x${analysisCanvas.height} / scale ${analysisScale.toFixed(3)}${analysisState.resized ? "（統一縮小）" : "（原寸）"}`);
     lines.push(`方式：コントラスト補正 → イタリックテンプレート / 粗探索${ITALIC_COARSE_STEP}px → 局所再探索${ITALIC_REFINE_STEP}px`);
@@ -2505,7 +2557,8 @@ async function diagnoseOCR(){
     (italicVariantResult.merged||[]).slice(0,10).forEach((c,i)=>lines.push(`  統合候補${i+1}: score ${c.score.toFixed(3)} / 形状${c.fgScore.toFixed(3)} / 背景${c.bgScore.toFixed(3)} / ${c.label} / (${c.x},${c.y},w${c.w},h${c.h})`));
     lines.push(`本番採用候補：${italicProductionPreview.accepted.length}件 / 条件 score≥${ITALIC_RESCUE_SCORE_MIN.toFixed(2)}・形状≥${ITALIC_RESCUE_FG_MIN.toFixed(2)}・背景≥${ITALIC_RESCUE_BG_MIN.toFixed(2)}`);
     (italicProductionPreview.accepted||[]).slice(0,10).forEach((c,i)=>lines.push(`  本番候補${i+1}: score ${c.score.toFixed(3)} / 形状${c.fgScore.toFixed(3)} / 背景${c.bgScore.toFixed(3)} / (${c.x},${c.y},w${c.w},h${c.h})`));
-    lines.push(`※ 3文字名の1文字誤認（例：コカゲ→コカグ）は、同じ誤認が複数地点で確認できた場合に近似候補救出します。オレンジ枠は本番採用候補だけです。`);
+    lines.push(`※ 3文字名の1文字誤認（例：コカゲ→コカグ）は、同じ誤認が複数地点で確認できた場合に近似候補救出します。
+※ 色付き枠は本番の最終黒塗り矩形と同じ計算です（緑=通常OCR / 青=局所OCR / 紫=再OCR・近似救出 / オレンジ=イタリック救出）。`);
 
 
     lines.push("",`===== 処理時間 =====`,
@@ -2529,31 +2582,44 @@ async function diagnoseOCR(){
     );
     ocrDiagnostics.textContent=lines.join("\n");
     canvas.hidden=false; canvas.style.display='block';
-    const tr=getCanvasDisplayTransform(),seen=[];
-    for(const r of results)for(const m of r.matches){
-      if(seen.some(o=>Math.abs(o.x0-m.x0)<3&&Math.abs(o.y0-m.y0)<3&&Math.abs(o.x1-m.x1)<3&&Math.abs(o.y1-m.y1)<3))continue;
-      seen.push(m);
-      const rawBox={x:m.x0,y:m.y0,w:m.x1-m.x0,h:m.y1-m.y0};
-      const finalRect=getOcrVisualRect(rawBox,m.symbols||[]);
+    const tr=getCanvasDisplayTransform();
+    const debugColors={
+      'OCR':'#22aa55',
+      '局所OCR':'#2f80ed',
+      '再OCR':'#8e44ad',
+      '近似候補救出':'#8e44ad',
+      'イタリック救出':'#f59e0b'
+    };
+    const drawDiagnosticFinalRect=(candidate,labelText)=>{
+      const finalRect=getOcrVisualRect(
+        {x:candidate.x,y:candidate.y,w:candidate.w,h:candidate.h},
+        candidate.symbols||[],
+        {source:candidate.source}
+      );
       const box=document.createElement('div');
-      box.className='ocr-debug-box'; box.style.borderColor='#22aa55';
+      box.className='ocr-debug-box';
+      box.style.borderColor=debugColors[candidate.source]||'#22aa55';
       box.style.left=`${tr.left+finalRect.x*tr.scaleX}px`;
       box.style.top=`${tr.top+finalRect.y*tr.scaleY}px`;
       box.style.width=`${finalRect.w*tr.scaleX}px`;
       box.style.height=`${finalRect.h*tr.scaleY}px`;
-      const label=document.createElement('span'); label.className='ocr-debug-label'; label.textContent=`${r.mode}: ${target}`;
-      box.appendChild(label); ocrDebugLayer.appendChild(box);
+      const label=document.createElement('span');
+      label.className='ocr-debug-label';
+      label.textContent=labelText||candidate.source;
+      box.appendChild(label);
+      ocrDebugLayer.appendChild(box);
+    };
+
+    // exact / 再OCR・近似救出 / 局所OCR は、本番でイタリック探索へ渡す直前の候補。
+    for(const c of diagnosticPaintBoxes){
+      drawDiagnosticFinalRect(c,`${c.source}: ${target}`);
     }
-    // オレンジ枠は「本番で実際に採用される候補」だけ表示する。
-    // 閾値未満の生候補は診断テキストには残すが、画像上には出さない。
+    // オレンジ枠も rawテンプレートbbox ではなく、本番と同じ最終黒塗り矩形を表示する。
     for(const c of (italicProductionPreview.accepted||[])){
-      const box=document.createElement('div');
-      box.className='ocr-debug-box'; box.style.borderColor=c.color||'#f59e0b';
-      box.style.left=`${tr.left+c.x*tr.scaleX}px`; box.style.top=`${tr.top+c.y*tr.scaleY}px`;
-      box.style.width=`${c.w*tr.scaleX}px`; box.style.height=`${c.h*tr.scaleY}px`;
-      const label=document.createElement('span'); label.className='ocr-debug-label';
-      label.textContent=`イタリック候補 ${c.score.toFixed(2)}`;
-      box.appendChild(label); ocrDebugLayer.appendChild(box);
+      drawDiagnosticFinalRect(
+        {x:c.x,y:c.y,w:c.w,h:c.h,symbols:[],source:'イタリック救出'},
+        `イタリック救出 ${c.score.toFixed(2)}`
+      );
     }
 
     ocrDebugLayer.hidden=ocrDebugLayer.childElementCount===0;
