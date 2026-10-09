@@ -1782,6 +1782,52 @@ const ITALIC_RESCUE_FG_MIN = 0.47;
 const ITALIC_RESCUE_BG_MIN = 0.93;
 const ITALIC_RESCUE_MAX_NEW = 3;
 
+// V90.26: イタリック探索専用の縮小キャンバス。
+// 元画像が大きい時だけ縮小し、探索画素数とテンプレートの見かけサイズを安定させる。
+// OCR用キャンバスとは分離し、OCR精度や既存処理には影響させない。
+const ITALIC_SEARCH_MAX_WIDTH = 900;
+const ITALIC_SEARCH_MAX_PIXELS = 1800000;
+
+function buildItalicSearchCanvas(source){
+  const sw=source.naturalWidth||source.width, sh=source.naturalHeight||source.height;
+  if(!sw||!sh) return {source, scale:1, width:sw||0, height:sh||0, resized:false};
+  const byWidth=ITALIC_SEARCH_MAX_WIDTH/sw;
+  const byPixels=Math.sqrt(ITALIC_SEARCH_MAX_PIXELS/(sw*sh));
+  const scale=Math.min(1,byWidth,byPixels);
+  if(scale>=0.995) return {source, scale:1, width:sw, height:sh, resized:false};
+  const c=document.createElement('canvas');
+  c.width=Math.max(1,Math.round(sw*scale));
+  c.height=Math.max(1,Math.round(sh*scale));
+  const g=c.getContext('2d',{willReadFrequently:true});
+  g.imageSmoothingEnabled=true;
+  g.imageSmoothingQuality='high';
+  g.drawImage(source,0,0,sw,sh,0,0,c.width,c.height);
+  return {source:c, scale:c.width/sw, width:c.width, height:c.height, resized:true};
+}
+
+function scaleItalicRects(rects, scale){
+  if(scale===1) return rects||[];
+  return (rects||[]).map(r=>({
+    ...r,
+    x:(r.x??r.x0??0)*scale,
+    y:(r.y??r.y0??0)*scale,
+    w:(r.w??((r.x1??0)-(r.x0??0)))*scale,
+    h:(r.h??((r.y1??0)-(r.y0??0)))*scale
+  }));
+}
+
+function mapItalicCandidateToOriginal(c, scale){
+  if(scale===1) return c;
+  return {
+    ...c,
+    x:Math.round(c.x/scale),
+    y:Math.round(c.y/scale),
+    w:Math.max(1,Math.round(c.w/scale)),
+    h:Math.max(1,Math.round(c.h/scale)),
+    searchX:c.x, searchY:c.y, searchW:c.w, searchH:c.h
+  };
+}
+
 
 function chooseItalicVariantHeights(detected){
   const heights=(detected?.regions||[])
@@ -2093,25 +2139,36 @@ function searchContrastItalicVariant(gray, sw, sh, tpl, config={}){
 }
 
 function italicVariantDiagnosticSearch(source, text, variantHeights=ITALIC_VARIANT_HEIGHTS, searchConfig={}, variantSkews=ITALIC_VARIANT_SKEWS){
-  const contrast=createGrayFromSource(source,true);
+  const searchBase=buildItalicSearchCanvas(source);
+  const searchScale=searchBase.scale||1;
+  const contrast=createGrayFromSource(searchBase.source,true);
+  const searchRegions=scaleItalicRects(searchConfig.searchRegions||[],searchScale);
+  const existingBoxes=scaleItalicRects(searchConfig.existingBoxes||[],searchScale);
   const variants=[];
   for(const h of variantHeights){
+    const scaledH=Math.max(18,Math.round(h*searchScale));
     for(const skew of variantSkews){
-      const tpl=buildTextTemplateStyled(text,{italic:true,targetHeight:h,skew});
+      const tpl=buildTextTemplateStyled(text,{italic:true,targetHeight:scaledH,skew});
       const searched=searchContrastItalicVariant(contrast.gray, contrast.sw, contrast.sh, tpl, {
         grayTextMin:95, grayTextMax:235, grayBgMax:84,
         coarseThreshold:0.57, coarseBgMin:0.42,
         finalThreshold:0.60, finalBgMin:0.44,
-        searchRegions: searchConfig.searchRegions || [],
-        existingBoxes: searchConfig.existingBoxes || []
+        searchRegions,
+        existingBoxes
       });
-      searched.label=`H${h} / skew ${skew.toFixed(2)}`;
+      const mapped=(searched.candidates||[]).map(c=>mapItalicCandidateToOriginal(c,searchScale));
+      searched.candidates=mapped;
+      searched.label=`H${h}→${scaledH} / skew ${skew.toFixed(2)}`;
       searched.key=`h${h}_s${Math.round(skew*100)}`;
       searched.color='#f59e0b';
       searched.italic=true;
       searched.contrast=true;
       searched.targetHeight=h;
+      searched.searchTargetHeight=scaledH;
       searched.skew=skew;
+      searched.searchScale=searchScale;
+      searched.searchCanvasWidth=contrast.sw;
+      searched.searchCanvasHeight=contrast.sh;
       variants.push(searched);
     }
   }
@@ -2119,11 +2176,17 @@ function italicVariantDiagnosticSearch(source, text, variantHeights=ITALIC_VARIA
   const mergedRaw=[];
   for(const v of variants){
     for(const c of (v.candidates||[])){
-      mergedRaw.push({...c, label:v.label, key:v.key, color:v.color, targetHeight:v.targetHeight, skew:v.skew});
+      mergedRaw.push({...c, label:v.label, key:v.key, color:v.color, targetHeight:v.targetHeight, searchTargetHeight:v.searchTargetHeight, skew:v.skew});
     }
   }
   const merged=dedupeTemplateCandidates(mergedRaw, 12);
-  return {variants, merged};
+  return {
+    variants, merged,
+    searchScale,
+    searchCanvasWidth:contrast.sw,
+    searchCanvasHeight:contrast.sh,
+    resized:searchBase.resized
+  };
 }
 
 function collectItalicRescueCandidates(source, text, existingBoxes=[], variantHeights=ITALIC_VARIANT_HEIGHTS, detected=null){
@@ -2301,7 +2364,8 @@ async function diagnoseOCR(){
 
     lines.push("",`===== イタリック救出診断 =====`);
     lines.push(`方式：コントラスト補正 → イタリックテンプレート / 粗探索${ITALIC_COARSE_STEP}px → 局所再探索${ITALIC_REFINE_STEP}px`);
-    lines.push(`テンプレートバリエーション：高さ ${diagnosticItalicHeights.join("/")}px（文字領域から自動推定）× 診断傾き ${ITALIC_DIAGNOSTIC_SKEWS.map(v=>v.toFixed(2)).join("/")}（本番は ${ITALIC_VARIANT_SKEWS.map(v=>v.toFixed(2)).join("/")}）`);
+    lines.push(`探索キャンバス：${italicVariantResult.searchCanvasWidth}x${italicVariantResult.searchCanvasHeight} / scale ${italicVariantResult.searchScale.toFixed(3)}${italicVariantResult.resized ? "（縮小）" : "（原寸）"}`);
+    lines.push(`テンプレートバリエーション：元画像基準 ${diagnosticItalicHeights.join("/")}px → 探索時はscale連動 × 診断傾き ${ITALIC_DIAGNOSTIC_SKEWS.map(v=>v.toFixed(2)).join("/")}（本番は ${ITALIC_VARIANT_SKEWS.map(v=>v.toFixed(2)).join("/")}）`);
     const firstVariant=italicVariantResult.variants?.[0];
     lines.push(`探索範囲：x=${firstVariant?.searchXStart||0}〜${firstVariant?.searchXEnd||0} / y=${firstVariant?.searchYStart||0}〜${firstVariant?.searchYEnd||0}`);
     for(const v of (italicVariantResult.variants||[])){
