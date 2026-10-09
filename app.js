@@ -393,6 +393,32 @@ function getOcrVisualRect(box, symbols = [], meta = {}) {
         }
     }
 
+    // V91.1: 1〜3文字の日本語名は、OCR bboxが1文字分だけになったり、
+    // 逆に後続文字まで巻き込んだりすることがある。文字高さ×文字数を基準に、
+    // 明らかに細すぎる/広すぎる横幅だけを正常化する。
+    // 細すぎる場合は不足分を左70%・右30%へ配分して、先頭文字の露出を優先して防ぐ。
+    // 広すぎる場合は左端を維持したまま右端だけ縮める。
+    if (isShortJapaneseName && paintBox.h > 0) {
+        const expectedW = paintBox.h * chars.length * 1.02;
+        const minReasonableW = expectedW * 0.78;
+        const maxReasonableW = expectedW * 1.30;
+        if (paintBox.w < minReasonableW) {
+            const extra = Math.max(0, expectedW - paintBox.w);
+            paintBox = {
+                ...paintBox,
+                x: Math.max(0, paintBox.x - extra * 0.70),
+                w: expectedW,
+                shortNameWidthNormalized: 'expand-left'
+            };
+        } else if (paintBox.w > maxReasonableW) {
+            paintBox = {
+                ...paintBox,
+                w: expectedW,
+                shortNameWidthNormalized: 'shrink-right'
+            };
+        }
+    }
+
     const verticalPadding = Math.max(2, Math.round(paintBox.h * 0.08));
     const leftPadding = isShortJapaneseName
         ? Math.max(4, Math.round(paintBox.h * 0.16))
@@ -416,7 +442,8 @@ function getOcrVisualRect(box, symbols = [], meta = {}) {
         w: Math.max(1, right - left),
         h: Math.max(1, bottom - top),
         localShapeGuard: !!paintBox.localShapeGuard,
-        localWidthGuard: !!paintBox.localWidthGuard
+        localWidthGuard: !!paintBox.localWidthGuard,
+        shortNameWidthNormalized: paintBox.shortNameWidthNormalized || ""
     };
 }
 
@@ -892,55 +919,6 @@ function findTargetInUnits(units,target){
   return hits;
 }
 
-// OCRが対象文字の間に余計なunitを挟んだり、文字を細かく分割しても、
-// 「対象文字がこの順番で出現しているか」を見る。完全一致とは別の診断用ルート。
-// 近似文字そのものへの置換は行わず、対象文字が実際にunits内に存在する場合だけ拾う。
-function findTargetInUnitsRobust(units,target,options={}){
-  const chars=[...target];
-  if(!chars.length) return [];
-  const maxSkip=Math.max(0, options.maxSkip ?? 2);
-  const maxGapFactor=Math.max(1, options.maxGapFactor ?? 3.2);
-  const out=[];
-
-  for(let start=0; start<units.length; start++){
-    if(units[start]?.ch!==chars[0]) continue;
-    const selected=[units[start]];
-    const skipped=[];
-    let cursor=start;
-    let ok=true;
-
-    for(let ti=1; ti<chars.length; ti++){
-      let foundIndex=-1;
-      const first=selected[selected.length-1];
-      const firstW=Math.max(1, first.bbox.x1-first.bbox.x0);
-      const firstH=Math.max(1, first.bbox.y1-first.bbox.y0);
-      for(let j=cursor+1; j<=Math.min(units.length-1,cursor+maxSkip+1); j++){
-        const u=units[j];
-        if(u.ch!==chars[ti]) continue;
-        const dx=u.bbox.x0-first.bbox.x1;
-        const dy=Math.abs(((u.bbox.y0+u.bbox.y1)/2)-((first.bbox.y0+first.bbox.y1)/2));
-        const h=Math.max(1,u.bbox.y1-u.bbox.y0);
-        const maxDx=Math.max(45, Math.max(firstW,h)*maxGapFactor);
-        const maxDy=Math.max(18, Math.max(firstH,h)*0.9);
-        if(dx>=-Math.max(6,firstW*0.25) && dx<=maxDx && dy<=maxDy){
-          foundIndex=j;
-          break;
-        }
-      }
-      if(foundIndex<0){ ok=false; break; }
-      for(let j=cursor+1;j<foundIndex;j++) skipped.push(units[j]);
-      selected.push(units[foundIndex]);
-      cursor=foundIndex;
-    }
-    if(ok && selected.length===chars.length && skipped.length>0){
-      out.push(makeTargetHit(selected,'robust',skipped));
-    }
-  }
-  return out;
-}
-
-
-
 // 文字密度から横長のテキスト候補領域を推定する。
 // OCR本体の追加局所走査と診断の両方で使用する。
 function detectTextLikeRegions(sourceCanvas) {
@@ -1028,8 +1006,6 @@ async function recognizeLocalRegionVariant(worker, crop, target, mode) {
   let raw = '';
   let hit = false;
   const matches = [];
-  const robustMatches = [];
-  const nearMatches = [];
   const lineData = [];
   try {
     const result = await worker.recognize(input, {tessedit_pageseg_mode:'7'});
@@ -1037,21 +1013,18 @@ async function recognizeLocalRegionVariant(worker, crop, target, mode) {
     for (const line of (result?.data?.lines || [])) {
       const units = extractLineUnits(line);
       const found = findTargetInUnits(units, target);
-      const robust = findTargetInUnitsRobust(units, target);
-      lineData.push({units, text: units.map(u => u.ch).join(''), robust});
+      lineData.push({units, text: units.map(u => u.ch).join('')});
       if (found.length) {
         hit = true;
         matches.push(...found);
       }
-      robustMatches.push(...robust);
-      nearMatches.push(...robust);
     }
   } catch (e) {
     raw = `ERROR: ${e?.message || e}`;
   } finally {
     if (input !== crop) { input.width = 1; input.height = 1; }
   }
-  return {mode, raw, hit, matches, robustMatches, nearMatches, lineData};
+  return {mode, raw, hit, matches, lineData};
 }
 
 // V68実験：V64の「文字っぽい横長領域」の検出を維持し、
@@ -1855,7 +1828,7 @@ const TEMPLATE_SEARCH_TOP_RATIO=0.12;
 
 // ===== コントラスト補正＋イタリック補助探索 =====
 // 文字領域を先に探索し、既存HITを除外しながら全画面を補完する。
-const ITALIC_VARIANT_HEIGHTS = [32, 34]; // 推定不能時の既定値
+const ITALIC_VARIANT_HEIGHTS = [26, 28]; // 1000px統一解析キャンバス基準のテスト値
 const ITALIC_VARIANT_SKEWS = [0.00];
 const ITALIC_DIAGNOSTIC_SKEWS = [-0.10, 0.00, 0.10];
 const ITALIC_COARSE_STEP = 6;
@@ -1915,27 +1888,10 @@ function mapItalicCandidateToOriginal(c, scale){
 }
 
 
-function chooseItalicVariantHeights(detected){
-  const heights=(detected?.regions||[])
-    .map(r=>r?.h)
-    .filter(h=>Number.isFinite(h) && h>=28 && h<=100)
-    .sort((a,b)=>a-b);
-  if(!heights.length) return [...ITALIC_VARIANT_HEIGHTS];
-
-  // 文字領域は上下余白込みなので、実文字高さはおよそ6割強として推定。
-  // 外れ値に引っ張られないよう中央値を使う。
-  const mid=Math.floor(heights.length/2);
-  const median=heights.length%2 ? heights[mid] : (heights[mid-1]+heights[mid])/2;
-  let estimated=Math.round(median*0.64);
-  estimated=Math.max(28,Math.min(48,estimated));
-
-  // これまで実績のある32/34帯なら従来値をそのまま使う。
-  if(estimated>=31 && estimated<=35) return [32,34];
-
-  // 推定値の前後2pxだけ。候補数は常に2つに抑え、速度を増やしすぎない。
-  const a=Math.max(28,Math.min(48,estimated-2));
-  const b=Math.max(28,Math.min(48,estimated+2));
-  return a===b ? [a] : [a,b];
+function chooseItalicVariantHeights(){
+  // V91.1: 統一解析キャンバス1000px基準でテンプレート高さを固定比較。
+  // 推定処理を外し、画像ごとの条件差を増やさない。
+  return [...ITALIC_VARIANT_HEIGHTS];
 }
 
 function buildTextTemplateStyled(text, opts={}){
@@ -2450,7 +2406,8 @@ async function diagnoseOCR(){
       lines.push(`「${m.lineText}」： 元bbox=(${Math.round(before.x)},${Math.round(before.y)},w${Math.round(before.w)},h${Math.round(before.h)}) → 使用bbox=(${Math.round(after.x)},${Math.round(after.y)},w${Math.round(after.w)},h${Math.round(after.h)}) ${moved?'※位置を修正':'変更なし'}${bboxNote}${widthGuardNote}`);
       // 実際に黒塗りが描画される最終矩形も、同じ計算式で再現。
       const finalRect=getOcrVisualRect(after, m.symbols||[]);
-      lines.push(`　→ 最終黒塗り座標=(${Math.round(finalRect.x)},${Math.round(finalRect.y)},w${Math.round(finalRect.w)},h${Math.round(finalRect.h)})${finalRect.w<=4?' ※幅が極端に狭い(縦棒の疑いあり)':''}`);
+      const widthNormNote=finalRect.shortNameWidthNormalized ? ` / 短名幅正常化:${finalRect.shortNameWidthNormalized}` : '';
+      lines.push(`　→ 最終黒塗り座標=(${Math.round(finalRect.x)},${Math.round(finalRect.y)},w${Math.round(finalRect.w)},h${Math.round(finalRect.h)})${widthNormNote}${finalRect.w<=4?' ※幅が極端に狭い(縦棒の疑いあり)':''}`);
     }
     const verifyElapsed=performance.now()-verifyStarted;
     lines.push(`検証時間：${(verifyElapsed/1000).toFixed(2)}秒 / 修正：${changedCount}件 / 対象：${exactMatches.length}件`);
@@ -2463,15 +2420,12 @@ async function diagnoseOCR(){
     const regionHits=regionResult.tested.filter(r=>r.hit);
     const baseHits=regionResult.tested.filter(r=>r.baseHit);
     const extraHits=regionResult.tested.filter(r=>r.extraHit);
-    const robustRegionHits=regionResult.tested.filter(r=>(r.variants||[]).some(v=>(v.robustMatches||[]).length));
-    lines.push(`対象文字HIT：${regionHits.length}領域（通常OCR：${baseHits.length} / 前処理追加：${extraHits.length} / Robust追加：${robustRegionHits.length}）`);
+    lines.push(`対象文字HIT：${regionHits.length}領域（通常OCR：${baseHits.length} / 前処理追加：${extraHits.length}）`);
     regionResult.tested.forEach((r,i)=>{
       const hitModes=r.variants.filter(v=>v.hit).map(v=>v.mode);
-      const robustModes=r.variants.filter(v=>(v.robustMatches||[]).length).map(v=>v.mode);
       const display=hitModes.length?`★対象HIT [${hitModes.join('・')}]`:'HITなし';
-      const robustDisplay=robustModes.length?` / ☆Robust [${robustModes.join('・')}]`:'';
       const rawPreview=r.variants.map(v=>`${v.mode}「${v.raw.length>55?v.raw.slice(0,55)+'…':v.raw}」`).join(' / ');
-      lines.push(`  領域${i+1}: (${r.x},${r.y},w${r.w},h${r.h}) / ${r.mode} / ${display}${robustDisplay} / ${rawPreview}`);
+      lines.push(`  領域${i+1}: (${r.x},${r.y},w${r.w},h${r.h}) / ${r.mode} / ${display} / ${rawPreview}`);
     });
     lines.push(`局所OCR時間：${(regionResult.elapsed/1000).toFixed(2)}秒`);
     lines.push(`色抽出OCR：${stats.colorHitCount||0}件 / ${(stats.colorMs/1000).toFixed(2)}秒`);
@@ -2494,35 +2448,6 @@ async function diagnoseOCR(){
     (italicProductionPreview.accepted||[]).slice(0,10).forEach((c,i)=>lines.push(`  本番候補${i+1}: score ${c.score.toFixed(3)} / 形状${c.fgScore.toFixed(3)} / 背景${c.bgScore.toFixed(3)} / (${c.x},${c.y},w${c.w},h${c.h})`));
     lines.push(`※ 3文字名の1文字誤認（例：コカゲ→コカグ）は、同じ誤認が複数地点で確認できた場合に近似候補救出します。オレンジ枠は本番採用候補だけです。`);
 
-
-    lines.push('', `===== 局所OCR・順序維持ロバスト一致 =====`);
-    const localRobust=[];
-    for(const r of regionResult.tested){
-      for(const v of (r.variants||[])){
-        for(const n of (v.nearMatches||[])){
-          localRobust.push({...n, region:r, mode:v.mode, raw:v.raw});
-        }
-      }
-    }
-    const robustUnique=[];
-    for(const n of localRobust){
-      const duplicate=robustUnique.some(q=>{
-        const a=n.targetBox,b=q.targetBox;
-        const ix0=Math.max(a.x0,b.x0),iy0=Math.max(a.y0,b.y0),ix1=Math.min(a.x1,b.x1),iy1=Math.min(a.y1,b.y1);
-        if(ix1<=ix0||iy1<=iy0)return false;
-        const inter=(ix1-ix0)*(iy1-iy0);
-        const area=Math.min((a.x1-a.x0)*(a.y1-a.y0),(b.x1-b.x0)*(b.y1-b.y0));
-        return area>0&&inter/area>.5;
-      });
-      if(!duplicate)robustUnique.push(n);
-    }
-    lines.push(`Robust一致：${localRobust.length}件 / 位置重複除外後：${robustUnique.length}件`);
-    robustUnique.slice(0,30).forEach((n,i)=>{
-      const b=n.targetBox;
-      const skippedText=(n.skipped||[]).map(u=>u.ch).join('');
-      lines.push(`  候補${i+1}: 対象「${target}」 / スキップ${(n.skipped||[]).length}unit${skippedText?`「${skippedText}」`:''} / (${Math.round(b.x0)},${Math.round(b.y0)},w${Math.round(b.x1-b.x0)},h${Math.round(b.y1-b.y0)}) / ${n.region.mode} / ${n.region.x},${n.region.y}`);
-    });
-    lines.push(`※ 文字の誤認置換はせず、対象文字が指定順で実際に認識された場合だけ対象とします。完全一致は別枠です。`);
 
     lines.push("",`===== 処理時間 =====`,
       `OCR全体：${(ocrElapsed/1000).toFixed(2)}秒`,
