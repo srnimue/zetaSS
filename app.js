@@ -1320,18 +1320,22 @@ function buildAnalysisCanvas(source=sourceImage){
   const byWidth=ANALYSIS_CANVAS_MAX_WIDTH/sw;
   const byPixels=Math.sqrt(ANALYSIS_CANVAS_MAX_PIXELS/Math.max(1,sw*sh));
   const scale=Math.min(1,byWidth,byPixels);
-  if(scale>=0.995){
+  // 解析系の後段は Canvas API（getContext）を前提にしている。
+  // 縮小不要の画像でも HTMLImageElement をそのまま返さず、必ず canvas に統一する。
+  // 大きい画像では従来どおり縮小、小さい画像では等倍コピーなので座標系は変わらない。
+  const outScale=scale>=0.995?1:scale;
+  if(outScale===1 && typeof source?.getContext==='function') {
     return {canvas:source,scale:1,resized:false,width:sw,height:sh};
   }
 
   const c=document.createElement("canvas");
-  c.width=Math.max(1,Math.round(sw*scale));
-  c.height=Math.max(1,Math.round(sh*scale));
+  c.width=Math.max(1,Math.round(sw*outScale));
+  c.height=Math.max(1,Math.round(sh*outScale));
   const g=c.getContext("2d");
   g.imageSmoothingEnabled=true;
   g.imageSmoothingQuality="high";
   g.drawImage(source,0,0,sw,sh,0,0,c.width,c.height);
-  return {canvas:c,scale,resized:true,width:c.width,height:c.height};
+  return {canvas:c,scale:outScale,resized:outScale!==1,width:c.width,height:c.height};
 }
 
 function buildOcrCanvas(baseCanvas=sourceImage){
