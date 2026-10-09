@@ -1,17 +1,19 @@
-import { CONFIG, ENABLE_DIAGNOSTIC } from "./config.js?v=91900";
-import { normalize, getMedian, editDistance } from "./utils.js?v=91900";
-import { state, manualStamps } from "./state.js?v=91900";
-import { createView } from "./view.js?v=91900";
+import { CONFIG, ENABLE_DIAGNOSTIC } from "./config.js?v=91901";
+import { normalize, getMedian, editDistance } from "./utils.js?v=91901";
+import { state, manualStamps } from "./state.js?v=91901";
+import { createView } from "./view.js?v=91901";
 import {
     ITALIC_VARIANT_SKEWS,
     ITALIC_DIAGNOSTIC_SKEWS,
     ITALIC_RESCUE_SCORE_MIN,
     ITALIC_RESCUE_FG_MIN,
     ITALIC_RESCUE_BG_MIN,
+    ITALIC_COARSE_STEP,
+    ITALIC_REFINE_STEP,
     chooseItalicVariantHeights,
     italicVariantDiagnosticSearch,
     collectItalicRescueCandidates
-} from "./italic.js?v=91900";
+} from "./italic.js?v=91901";
 
 
 const $ = id => document.getElementById(id);

@@ -1,5 +1,5 @@
-import { CONFIG } from "./config.js?v=91900";
-import { editDistance } from "./utils.js?v=91900";
+import { CONFIG } from "./config.js?v=91901";
+import { editDistance } from "./utils.js?v=91901";
 
 // ===== イタリック補助探索用テンプレート =====
 // 14pxで描画した文字のアルファ領域を切り出し、目標高さへ拡大して検索する。
@@ -17,8 +17,8 @@ const TEMPLATE_SEARCH_TOP_RATIO=0.12;
 const ITALIC_VARIANT_HEIGHTS = [26, 28]; // 1000px統一解析キャンバス基準のテスト値
 export const ITALIC_VARIANT_SKEWS = [0.00];
 export const ITALIC_DIAGNOSTIC_SKEWS = [-0.10, 0.00, 0.10];
-const ITALIC_COARSE_STEP = 6;
-const ITALIC_REFINE_STEP = 2;
+export const ITALIC_COARSE_STEP = 6;
+export const ITALIC_REFINE_STEP = 2;
 const ITALIC_SECONDARY_OFFSET = 3;
 const ITALIC_COARSE_LIMIT = 10;
 const ITALIC_FINAL_LIMIT = 6;

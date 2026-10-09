@@ -126,3 +126,8 @@ V91.5変更点
 - 新しいprimary touch開始時に古いpointer状態を破棄。
 - 2本指ジェスチャーは全指が離れるまで手動描画へ切り替えず、終了時にpinch/pan状態を確実に初期化。
 - touchのlostpointercapture/pointercancelでも状態を掃除。
+
+
+## V91.9.1
+- 診断画面から参照するイタリック探索ステップ定数を italic.js から明示的に export/import するよう修正。
+- OCR・黒塗り・手動編集ロジックは変更なし。
