@@ -1755,7 +1755,7 @@ const TEMPLATE_SEARCH_TOP_RATIO=0.00;
 
 // ===== コントラスト補正＋イタリック補助探索 =====
 // 文字領域を先に探索し、既存HITを除外しながら全画面を補完する。
-const ITALIC_VARIANT_HEIGHTS = [26, 28]; // 1000px統一解析キャンバス基準のテスト値
+const ITALIC_VARIANT_HEIGHTS = [30, 32]; // OCR実測が使えない時の1000px解析キャンバス基準フォールバック
 const ITALIC_VARIANT_SKEWS = [0.00];
 const ITALIC_DIAGNOSTIC_SKEWS = [-0.10, 0.00, 0.10];
 const ITALIC_COARSE_STEP = 6;
@@ -1856,13 +1856,20 @@ function chooseItalicVariantHeights(results, target, analysisScale=1){
         if(Number.isFinite(originalH) && originalH>0) nearHeights.push(originalH*analysisScale);
       }
     }
-    basis=medianNumber(nearHeights);
-    source='強い近似OCR';
+    // 強い近似OCRは1件だけだと、壊れたbbox 1個に高さ推定全体が引っ張られる。
+    // 2件以上そろった時だけ中央値を採用し、それ未満は既定値へフォールバックする。
     sampleCount=nearHeights.length;
+    if(nearHeights.length >= 2){
+      basis=medianNumber(nearHeights);
+      source='強い近似OCR';
+    }else{
+      basis=null;
+      source=nearHeights.length ? '強い近似OCR不足→既定値' : '既定値';
+    }
   }
 
   if(!Number.isFinite(basis)){
-    return {heights:[...ITALIC_VARIANT_HEIGHTS], basis:null, source:'既定値', sampleCount:0};
+    return {heights:[...ITALIC_VARIANT_HEIGHTS], basis:null, source, sampleCount};
   }
 
   const center=Math.max(22,Math.min(40,Math.round(basis)));
