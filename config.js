@@ -10,6 +10,7 @@ export const CONFIG = Object.freeze({
     shortNameSymbolConsistencyMaxRatio: 1.35,
     shortNameMinReasonableRatio: 0.88,
     shortNameMaxReasonableRatio: 1.30,
+    shortNameGapSkipShrinkRatio: 0.15,
     shortNameExpandLeftShare: 0.70,
     shortNameExpandLeftPadding: 2
   }),

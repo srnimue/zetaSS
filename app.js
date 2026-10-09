@@ -1,4 +1,4 @@
-import { CONFIG, ENABLE_DIAGNOSTIC } from "./config.js?v=91200";
+import { CONFIG, ENABLE_DIAGNOSTIC } from "./config.js?v=91400";
 import { normalize, getMedian, editDistance } from "./utils.js?v=91200";
 import { state, manualStamps } from "./state.js?v=91200";
 import { createView } from "./view.js?v=91200";
@@ -452,6 +452,26 @@ function getOcrVisualRect(box, symbols = [], meta = {}) {
 
         const minReasonableW = expectedW * CONFIG.bbox.shortNameMinReasonableRatio;
         const maxReasonableW = expectedW * CONFIG.bbox.shortNameMaxReasonableRatio;
+
+        // 斜体フォントなどで文字間が広い場合、symbolの総幅だけを見ると
+        // 「広すぎる」と誤判定しやすい。実symbol間に明確な隙間がある時は
+        // shrink-rightを止め、OCRが示した文字間隔を尊重する。
+        const orderedRealSymbols = (symbols || [])
+            .filter(s => s?.bbox && s?.bboxSource !== 'word-split' &&
+                Number.isFinite(s.bbox.x0) && Number.isFinite(s.bbox.x1) &&
+                s.bbox.x1 > s.bbox.x0)
+            .slice()
+            .sort((a, b) => a.bbox.x0 - b.bbox.x0);
+        let maxSymbolGap = 0;
+        for (let i = 1; i < orderedRealSymbols.length; i++) {
+            maxSymbolGap = Math.max(
+                maxSymbolGap,
+                orderedRealSymbols[i].bbox.x0 - orderedRealSymbols[i - 1].bbox.x1
+            );
+        }
+        const hasWideSymbolGap = orderedRealSymbols.length >= 2 &&
+            maxSymbolGap > paintBox.h * CONFIG.bbox.shortNameGapSkipShrinkRatio;
+
         if (paintBox.w < minReasonableW) {
             const extra = Math.max(0, expectedW - paintBox.w);
             paintBox = {
@@ -460,11 +480,16 @@ function getOcrVisualRect(box, symbols = [], meta = {}) {
                 w: expectedW,
                 shortNameWidthNormalized: 'expand-left'
             };
-        } else if (paintBox.w > maxReasonableW) {
+        } else if (paintBox.w > maxReasonableW && !hasWideSymbolGap) {
             paintBox = {
                 ...paintBox,
                 w: expectedW,
                 shortNameWidthNormalized: 'shrink-right'
+            };
+        } else if (paintBox.w > maxReasonableW && hasWideSymbolGap) {
+            paintBox = {
+                ...paintBox,
+                shortNameWidthNormalized: 'shrink-skip-gap'
             };
         }
     }
