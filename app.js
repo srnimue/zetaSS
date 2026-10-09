@@ -1007,7 +1007,7 @@ async function recognizeLocalRegionVariant(worker, crop, target, mode) {
 // 上位16領域だけでなく検出された全領域を通常OCRする。
 // まず「未走査領域に3個目が存在するか」を確認するためのカバレッジ実験。
 // 前処理追加はこの版では行わず、OCR回数を必要最小限にする。診断専用。
-async function runTextRegionExperiment(worker,sourceCanvas,target) {
+async function runTextRegionExperiment(worker,sourceCanvas,target,coordScale=1) {
   const detected=detectTextLikeRegions(sourceCanvas);
   const tested=[];
   const started=performance.now();
@@ -1028,6 +1028,10 @@ async function runTextRegionExperiment(worker,sourceCanvas,target) {
     const normal=await recognizeLocalRegionVariant(worker,crop,target,'通常');
     tested.push({
       ...r,
+      x:r.x/coordScale,
+      y:r.y/coordScale,
+      w:r.w/coordScale,
+      h:r.h/coordScale,
       hit:normal.hit,
       baseHit:normal.hit,
       extraHit:false,
@@ -1037,7 +1041,7 @@ async function runTextRegionExperiment(worker,sourceCanvas,target) {
     crop.width=1; crop.height=1;
   }
   return {
-    detected,
+    detected:{sample:detected.sample,regions:detected.regions.map(r=>({...r,x:r.x/coordScale,y:r.y/coordScale,w:r.w/coordScale,h:r.h/coordScale}))},
     tested,
     elapsed:performance.now()-started,
     extraRuns:0,
@@ -1048,7 +1052,7 @@ async function runTextRegionExperiment(worker,sourceCanvas,target) {
 // V70本採用用：V68と同じ文字領域検出＋全領域局所OCRを、
 // 実際の自動黒塗り候補として返す。OCRのbboxは2倍拡大した局所画像上の
 // 座標なので、元画像の領域座標へ戻してから既存のmergeMatchesへ渡す。
-async function collectTextRegionMatches(worker, sourceCanvas, target) {
+async function collectTextRegionMatches(worker, sourceCanvas, target, coordScale=1) {
   const detected = detectTextLikeRegions(sourceCanvas);
   const SCALE = 2;
   const matches = [];
@@ -1069,17 +1073,17 @@ async function collectTextRegionMatches(worker, sourceCanvas, target) {
     for (const hit of normal.matches || []) {
       const b = hit.targetBox;
       regionMatches.push({
-        x0: r.x + b.x0 / SCALE,
-        y0: r.y + b.y0 / SCALE,
-        x1: r.x + b.x1 / SCALE,
-        y1: r.y + b.y1 / SCALE,
+        x0: (r.x + b.x0 / SCALE) / coordScale,
+        y0: (r.y + b.y0 / SCALE) / coordScale,
+        x1: (r.x + b.x1 / SCALE) / coordScale,
+        y1: (r.y + b.y1 / SCALE) / coordScale,
         symbols: (hit.symbols || []).map(u => ({
           ...u,
           bbox: {
-            x0: r.x + u.bbox.x0 / SCALE,
-            y0: r.y + u.bbox.y0 / SCALE,
-            x1: r.x + u.bbox.x1 / SCALE,
-            y1: r.y + u.bbox.y1 / SCALE
+            x0: (r.x + u.bbox.x0 / SCALE) / coordScale,
+            y0: (r.y + u.bbox.y0 / SCALE) / coordScale,
+            x1: (r.x + u.bbox.x1 / SCALE) / coordScale,
+            y1: (r.y + u.bbox.y1 / SCALE) / coordScale
           }
         })),
         lineText: normal.raw,
@@ -1281,27 +1285,57 @@ function makeWhiteBorderCanvas(src,pad){
   return c;
 }
 
-function buildOcrCanvas(){
-  // 小さめ画像は2.5倍。大きな縦長画像だけ、
-  // OCRキャンバスが約1100万pixelを超えない範囲まで自動的にscaleを下げる。
-  // これでiPhone Safariのメモリ急増を抑えつつ、通常画像の精度は変えない。
+const ANALYSIS_CANVAS_MAX_WIDTH = 1000;
+const ANALYSIS_CANVAS_MAX_PIXELS = 2500000;
+
+function buildAnalysisCanvas(source=sourceImage){
+  const sw=source?.naturalWidth||source?.width||canvas.width;
+  const sh=source?.naturalHeight||source?.height||canvas.height;
+  if(!sw||!sh) return {canvas:source,scale:1,resized:false,width:sw||0,height:sh||0};
+
+  const byWidth=ANALYSIS_CANVAS_MAX_WIDTH/sw;
+  const byPixels=Math.sqrt(ANALYSIS_CANVAS_MAX_PIXELS/Math.max(1,sw*sh));
+  const scale=Math.min(1,byWidth,byPixels);
+  if(scale>=0.995){
+    return {canvas:source,scale:1,resized:false,width:sw,height:sh};
+  }
+
+  const c=document.createElement("canvas");
+  c.width=Math.max(1,Math.round(sw*scale));
+  c.height=Math.max(1,Math.round(sh*scale));
+  const g=c.getContext("2d");
+  g.imageSmoothingEnabled=true;
+  g.imageSmoothingQuality="high";
+  g.drawImage(source,0,0,sw,sh,0,0,c.width,c.height);
+  return {canvas:c,scale,resized:true,width:c.width,height:c.height};
+}
+
+function buildOcrCanvas(baseCanvas=sourceImage){
+  // 解析用の基準キャンバスからOCRキャンバスを作る。
+  // これでOCR・局所OCR・イタリック探索が同じ座標系を共有しつつ、OCRだけは必要な倍率を保てる。
+  const srcW=baseCanvas?.width||canvas.width;
+  const srcH=baseCanvas?.height||canvas.height;
   const baseScale=2.5;
   const maxOcrPixels=11000000;
-  const srcPixels=Math.max(1,canvas.width*canvas.height);
+  const srcPixels=Math.max(1,srcW*srcH);
   const safeScale=Math.sqrt(maxOcrPixels/srcPixels);
   const scale=Math.max(1.8,Math.min(baseScale,safeScale));
   const oc=document.createElement("canvas");
-  oc.width=Math.round(canvas.width*scale);
-  oc.height=Math.round(canvas.height*scale);
+  oc.width=Math.round(srcW*scale);
+  oc.height=Math.round(srcH*scale);
   const c=oc.getContext("2d");
   c.imageSmoothingEnabled=true;
   c.imageSmoothingQuality="high";
-  c.drawImage(sourceImage,0,0,oc.width,oc.height);
+  c.drawImage(baseCanvas,0,0,srcW,srcH,0,0,oc.width,oc.height);
   return {canvas:oc,scale};
 }
 
-async function collectOcrResults(worker,target){
-  const {canvas:oc,scale}=buildOcrCanvas();
+async function collectOcrResults(worker,target,analysisState=null){
+  const analysis=analysisState||buildAnalysisCanvas();
+  const analysisCanvas=analysis.canvas;
+  const analysisScale=analysis.scale||1;
+  const {canvas:oc,scale:ocrScale}=buildOcrCanvas(analysisCanvas);
+  const totalScale=analysisScale*ocrScale;
   const results=[];
   const stats={primaryMs:0,fallbackMs:0,primaryHitCount:0,fallbackUsed:false,primaryName:"グレー＋コントラスト",fallbackSkippedForSpeed:false};
 
@@ -1310,9 +1344,9 @@ async function collectOcrResults(worker,target){
   const primaryStarted=performance.now();
   status("実行中…");
   const primaryBase=makeOcrVariant(oc,stats.primaryName);
-  const primaryVariant=makeWhiteBorderCanvas(primaryBase,OCR_BORDER_PX*scale);
+  const primaryVariant=makeWhiteBorderCanvas(primaryBase,OCR_BORDER_PX*ocrScale);
   try {
-    const primary=await recognizeVariant(worker,primaryVariant,target,stats.primaryName,scale,OCR_BORDER_PX*scale,OCR_BORDER_PX*scale);
+    const primary=await recognizeVariant(worker,primaryVariant,target,stats.primaryName,totalScale,OCR_BORDER_PX*ocrScale,OCR_BORDER_PX*ocrScale);
     results.push(primary);
     stats.primaryHitCount=primary.matches.length;
   } finally {
@@ -1330,9 +1364,9 @@ async function collectOcrResults(worker,target){
   // 色抽出OCRは主OCRのHIT数に関係なく1回だけ追加実行する。
   const colorStarted=performance.now();
   const colorBase=makeOcrVariant(oc,"色抽出");
-  const colorVariant=makeWhiteBorderCanvas(colorBase,OCR_BORDER_PX*scale);
+  const colorVariant=makeWhiteBorderCanvas(colorBase,OCR_BORDER_PX*ocrScale);
   try {
-    const color=await recognizeVariant(worker,colorVariant,target,"色抽出",scale,OCR_BORDER_PX*scale,OCR_BORDER_PX*scale);
+    const color=await recognizeVariant(worker,colorVariant,target,"色抽出",totalScale,OCR_BORDER_PX*ocrScale,OCR_BORDER_PX*ocrScale);
     results.push(color);
     stats.colorHitCount=color.matches.length;
   } finally {
@@ -1341,7 +1375,7 @@ async function collectOcrResults(worker,target){
   }
   stats.colorMs=performance.now()-colorStarted;
 
-  return {results,scale,ocrCanvas:oc,stats};
+  return {results,scale:totalScale,ocrCanvas:oc,stats,analysisCanvas,analysisScale,ocrScale,analysis};
 }
 
 function getCandidateBox(candidate, scale) {
@@ -1659,10 +1693,11 @@ async function run(){
 
     manualStamps.length=0; manualHistory.length=0; selectedManualIndex=-1; editMode=null; ocrBaseCanvas=null; redrawFromBase();
     const worker=await getWorker(getOcrLanguage(target));
-    status("OCR中…\n対象文字を探しています。");
+    const analysisState=buildAnalysisCanvas();
+    status("OCR中…\n基準キャンバスを作成しています。");
 
     // V33の高速OCRをそのまま使用。通常HITはV19の黒塗り処理へ接続する。
-    const {results,scale,ocrCanvas,stats}=await collectOcrResults(worker,target);
+    const {results,scale,ocrCanvas,stats,analysisCanvas,analysisScale}=await collectOcrResults(worker,target,analysisState);
     const matches=mergeMatches(results);
 
     // 通常OCRで見つかった対象文字を黒塗り候補として登録。
@@ -1697,7 +1732,7 @@ async function run(){
     // V70：V68の「文字領域全走査＋局所OCR」を正式な追加検出ルートとして使用。
     // 全体OCRで拾えなかった文字も、文字っぽい領域内のPSM7 OCRで拾えた場合は追加する。
     status("OCR中…\n文字領域を追加走査しています。");
-    const regionScan = await collectTextRegionMatches(worker, canvas, target);
+    const regionScan = await collectTextRegionMatches(worker, analysisCanvas, target, analysisScale);
     for (const b of regionScan.matches) {
       const duplicate = paintBoxes.some(o => {
         const ix0 = Math.max(o.x, b.x0), iy0 = Math.max(o.y, b.y0);
@@ -1720,7 +1755,7 @@ async function run(){
     // コントラスト補正→イタリックテンプレートを補助候補として追加する。
     status("OCR中…\nイタリック文字の取りこぼしを補助確認しています。");
     const italicVariantHeights = chooseItalicVariantHeights(regionScan.detected);
-    const italicRescue = collectItalicRescueCandidates(sourceImage, target, paintBoxes, italicVariantHeights, regionScan.detected);
+    const italicRescue = collectItalicRescueCandidates(analysisCanvas, target, paintBoxes, italicVariantHeights, regionScan.detected, analysisScale);
     for (const c of italicRescue.accepted) {
       paintBoxes.push({
         x:c.x, y:c.y, w:c.w, h:c.h,
@@ -2189,10 +2224,26 @@ function italicVariantDiagnosticSearch(source, text, variantHeights=ITALIC_VARIA
   };
 }
 
-function collectItalicRescueCandidates(source, text, existingBoxes=[], variantHeights=ITALIC_VARIANT_HEIGHTS, detected=null){
+function collectItalicRescueCandidates(source, text, existingBoxes=[], variantHeights=ITALIC_VARIANT_HEIGHTS, detected=null, coordScale=1){
   const regions=(detected?.regions||[]).filter(r=>r && r.w>0 && r.h>0);
+  const scaleBoxToSource = o => ({
+    ...o,
+    x:(o.x ?? o.x0 ?? 0)*coordScale,
+    y:(o.y ?? o.y0 ?? 0)*coordScale,
+    w:(o.w ?? ((o.x1??0)-(o.x0??0)))*coordScale,
+    h:(o.h ?? ((o.y1??0)-(o.y0??0)))*coordScale
+  });
+  const mapCandidateToOriginal = c => ({
+    ...c,
+    x:Math.round(c.x/coordScale),
+    y:Math.round(c.y/coordScale),
+    w:Math.max(1,Math.round(c.w/coordScale)),
+    h:Math.max(1,Math.round(c.h/coordScale))
+  });
   const accepted=[];
   const acceptedBoxes=[...existingBoxes];
+  const existingBoxesSource=(existingBoxes||[]).map(scaleBoxToSource);
+  const acceptedBoxesSource=[...existingBoxesSource];
   const passes=[];
   let scoredPositions=0;
   let skippedExisting=0;
@@ -2213,30 +2264,40 @@ function collectItalicRescueCandidates(source, text, existingBoxes=[], variantHe
   }
 
   function runPass(label, searchConfig={}){
-    const result=italicVariantDiagnosticSearch(source,text,variantHeights,searchConfig);
+    const sourceResult=italicVariantDiagnosticSearch(source,text,variantHeights,searchConfig);
+    const result={
+      ...sourceResult,
+      variants:(sourceResult.variants||[]).map(v=>({
+        ...v,
+        candidates:(v.candidates||[]).map(mapCandidateToOriginal)
+      })),
+      merged:(sourceResult.merged||[]).map(mapCandidateToOriginal)
+    };
     passes.push({label, result});
-    const variants=result.variants||[];
+    const variants=sourceResult.variants||[];
     scoredPositions+=variants.reduce((n,v)=>n+(v.scoredPositionCount||0),0);
     skippedExisting+=variants.reduce((n,v)=>n+(v.skippedExistingCount||0),0);
-    for(const c of (result.merged||[])){
+    for(const c of (sourceResult.merged||[])){
       if(c.score<ITALIC_RESCUE_SCORE_MIN) continue;
       if(c.fgScore<ITALIC_RESCUE_FG_MIN) continue;
       if(c.bgScore<ITALIC_RESCUE_BG_MIN) continue;
-      if(overlapsExisting(c)) continue;
-      accepted.push({...c, source:"イタリック救出", passLabel:label});
-      acceptedBoxes.push({x:c.x,y:c.y,w:c.w,h:c.h});
+      if(overlapsExisting(c, acceptedBoxesSource)) continue;
+      const mapped=mapCandidateToOriginal(c);
+      accepted.push({...mapped, source:"イタリック救出", passLabel:label});
+      acceptedBoxes.push({x:mapped.x,y:mapped.y,w:mapped.w,h:mapped.h});
+      acceptedBoxesSource.push({x:c.x,y:c.y,w:c.w,h:c.h});
       if(accepted.length>=ITALIC_RESCUE_MAX_NEW) break;
     }
   }
 
   if(regions.length){
     // 先に文字領域を優先探索し、その後は未検出部分だけ全画面で補完する。
-    runPass("文字領域優先", {searchRegions:regions, existingBoxes:acceptedBoxes});
+    runPass("文字領域優先", {searchRegions:regions, existingBoxes:acceptedBoxesSource});
     if(accepted.length<ITALIC_RESCUE_MAX_NEW){
-      runPass("全画面補完", {existingBoxes:acceptedBoxes});
+      runPass("全画面補完", {existingBoxes:acceptedBoxesSource});
     }
   }else{
-    runPass("全画面", {existingBoxes:acceptedBoxes});
+    runPass("全画面", {existingBoxes:acceptedBoxesSource});
   }
 
   return {
@@ -2270,11 +2331,14 @@ async function diagnoseOCR(){
     canvas.hidden=false; canvas.style.display="block";
     status("OCR診断中…\n認識条件を比較しています。画像表示は維持します。");
     const ocrStarted=performance.now();
-    const {results,scale,ocrCanvas,stats}=await collectOcrResults(worker,target);
-    const diagnosticTextRegions=detectTextLikeRegions(canvas);
+    const analysisState=buildAnalysisCanvas();
+    const {results,scale,ocrCanvas,stats,analysisCanvas,analysisScale}=await collectOcrResults(worker,target,analysisState);
+    const diagnosticTextRegions=detectTextLikeRegions(analysisCanvas);
     const diagnosticItalicHeights=chooseItalicVariantHeights(diagnosticTextRegions);
-    const italicVariantResult=italicVariantDiagnosticSearch(sourceImage,target,diagnosticItalicHeights,{},ITALIC_DIAGNOSTIC_SKEWS);
-    const italicProductionPreview=collectItalicRescueCandidates(sourceImage,target,[],diagnosticItalicHeights);
+    const italicVariantResult=italicVariantDiagnosticSearch(analysisCanvas,target,diagnosticItalicHeights,{},ITALIC_DIAGNOSTIC_SKEWS);
+    italicVariantResult.variants=(italicVariantResult.variants||[]).map(v=>({...v,candidates:(v.candidates||[]).map(c=>({...c,x:Math.round(c.x/analysisScale),y:Math.round(c.y/analysisScale),w:Math.max(1,Math.round(c.w/analysisScale)),h:Math.max(1,Math.round(c.h/analysisScale))}))}));
+    italicVariantResult.merged=(italicVariantResult.merged||[]).map(c=>({...c,x:Math.round(c.x/analysisScale),y:Math.round(c.y/analysisScale),w:Math.max(1,Math.round(c.w/analysisScale)),h:Math.max(1,Math.round(c.h/analysisScale))}));
+    const italicProductionPreview=collectItalicRescueCandidates(analysisCanvas,target,[],diagnosticItalicHeights,diagnosticTextRegions,analysisScale);
     const ocrElapsed=performance.now()-ocrStarted;
     const refineStarted=performance.now();
     const refine=await refineNearCandidates(worker,results,ocrCanvas,target,scale);
@@ -2342,7 +2406,7 @@ async function diagnoseOCR(){
 
     // 診断でも本番と同じ文字領域検出を使って局所OCR結果を確認する。
     lines.push("",`===== 文字領域全走査＋局所OCR =====`);
-    const regionResult=await runTextRegionExperiment(worker,canvas,target);
+    const regionResult=await runTextRegionExperiment(worker,analysisCanvas,target,analysisScale);
     lines.push(`検出候補：${regionResult.detected.regions.length}領域 / 局所OCR実行：${regionResult.tested.length}領域 / 走査間隔：${regionResult.detected.sample}px / 通常：2倍・PSM7`);
     lines.push(`追加前処理：なし / 追加OCR実行：0回`);
     const regionHits=regionResult.tested.filter(r=>r.hit);
@@ -2363,6 +2427,7 @@ async function diagnoseOCR(){
     lines.push(`※ この局所OCRのHITは、自動黒塗り候補にも統合します。`);
 
     lines.push("",`===== イタリック救出診断 =====`);
+    lines.push(`解析キャンバス：${analysisCanvas.width}x${analysisCanvas.height} / scale ${analysisScale.toFixed(3)}${analysisState.resized ? "（統一縮小）" : "（原寸）"}`);
     lines.push(`方式：コントラスト補正 → イタリックテンプレート / 粗探索${ITALIC_COARSE_STEP}px → 局所再探索${ITALIC_REFINE_STEP}px`);
     lines.push(`探索キャンバス：${italicVariantResult.searchCanvasWidth}x${italicVariantResult.searchCanvasHeight} / scale ${italicVariantResult.searchScale.toFixed(3)}${italicVariantResult.resized ? "（縮小）" : "（原寸）"}`);
     lines.push(`テンプレートバリエーション：元画像基準 ${diagnosticItalicHeights.join("/")}px → 探索時はscale連動 × 診断傾き ${ITALIC_DIAGNOSTIC_SKEWS.map(v=>v.toFixed(2)).join("/")}（本番は ${ITALIC_VARIANT_SKEWS.map(v=>v.toFixed(2)).join("/")}）`);
@@ -2418,6 +2483,7 @@ async function diagnoseOCR(){
       "",
       `※ 全画面OCRはグレー＋コントラストを主経路にし、重いfallbackは省略します。`,
       `※ イタリック救出は文字領域を先に確認し、既存HITを除外しながら全画面を補完探索します。`,
+      `※ 解析処理は先に基準キャンバスへ揃えてから実行し、最後に元画像座標へ戻しています。`,
       `※ 大画像や強い近似候補がある場合は全画面fallbackを省略し、後段の局所救出へ進みます。`,
       `※ 候補地点は同じ位置付近の候補をまとめています。`,
       `※ 近似候補は、対象文字と同じ文字数で、3文字以上の対象なら「対象の1文字違い」程度を先に救出します。
