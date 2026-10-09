@@ -1,5 +1,5 @@
-import { CONFIG } from "./config.js?v=911100";
-import { editDistance } from "./utils.js?v=911100";
+import { CONFIG } from "./config.js?v=91200";
+import { editDistance } from "./utils.js?v=91200";
 
 // ===== イタリック補助探索用テンプレート =====
 // 14pxで描画した文字のアルファ領域を切り出し、目標高さへ拡大して検索する。
@@ -235,28 +235,17 @@ function dedupeTemplateCandidates(list, limit=ITALIC_FINAL_LIMIT){
 
 function scoreItalicCandidate(gray, sw, x, y, tpl, config){
   let fgHit=0, fgTotal=0, bgHit=0, bgTotal=0;
-  const polarity=config.polarity || 'lightOnDark';
   const grayTextMin=config.grayTextMin ?? 95;
   const grayTextMax=config.grayTextMax ?? 235;
   const grayBgMax=config.grayBgMax ?? 82;
-  const darkTextMax=config.darkTextMax ?? 175;
-  const lightBgMin=config.lightBgMin ?? 205;
   for(const p of tpl.samples){
     const lum=gray[(y+p.y)*sw+(x+p.x)];
-    if(polarity==='darkOnLight'){
-      if(lum<=darkTextMax) fgHit++;
-    }else if(lum>=grayTextMin && lum<=grayTextMax){
-      fgHit++;
-    }
+    if(lum>=grayTextMin && lum<=grayTextMax) fgHit++;
     fgTotal++;
   }
   for(const p of tpl.bgSamples){
     const lum=gray[(y+p.y)*sw+(x+p.x)];
-    if(polarity==='darkOnLight'){
-      if(lum>=lightBgMin) bgHit++;
-    }else if(lum<=grayBgMax){
-      bgHit++;
-    }
+    if(lum<=grayBgMax) bgHit++;
     bgTotal++;
   }
   const fgScore=fgTotal?fgHit/fgTotal:0;
@@ -336,28 +325,23 @@ function searchContrastItalicVariant(gray, sw, sh, tpl, config={}){
   const searchYEnd=Math.max(searchYStart, sh - tpl.h);
   const searchXStart=Math.floor(sw*TEMPLATE_SEARCH_LEFT_RATIO);
   const searchXEnd=Math.max(searchXStart, sw - tpl.w - Math.floor(sw*TEMPLATE_SEARCH_RIGHT_RATIO));
-  const polarity=config.polarity || 'lightOnDark';
   const grayTextMin=config.grayTextMin ?? 95;
   const grayTextMax=config.grayTextMax ?? 235;
-  const lightBgMin=config.lightBgMin ?? 205;
   const coarseThreshold=config.coarseThreshold ?? 0.60;
   const coarseBgMin=config.coarseBgMin ?? 0.44;
   const finalThreshold=config.finalThreshold ?? 0.63;
   const finalBgMin=config.finalBgMin ?? 0.46;
 
-  const rowHasSignal=new Uint8Array(sh);
+  const rowHasGray=new Uint8Array(sh);
   for(let y=searchYStart;y<=Math.min(sh-1, searchYEnd+tpl.h);y++){
     let count=0;
     for(let x=searchXStart;x<=searchXEnd;x+=5){
       const v=gray[y*sw+x];
-      const signal = polarity==='darkOnLight'
-        ? v>=lightBgMin
-        : (v>=grayTextMin && v<=grayTextMax);
-      if(signal){
+      if(v>=grayTextMin && v<=grayTextMax){
         if(++count>=4) break;
       }
     }
-    if(count>=4) rowHasSignal[y]=1;
+    if(count>=4) rowHasGray[y]=1;
   }
 
   const coarse=[];
@@ -387,7 +371,7 @@ function searchContrastItalicVariant(gray, sw, sh, tpl, config={}){
   for(const y of yPositions){
     let rowOk=false;
     for(let yy=0;yy<tpl.h;yy+=Math.max(2,ITALIC_COARSE_STEP)){
-      if(rowHasSignal[y+yy]){ rowOk=true; break; }
+      if(rowHasGray[y+yy]){ rowOk=true; break; }
     }
     if(!rowOk) continue;
 
@@ -438,52 +422,39 @@ export function italicVariantDiagnosticSearch(source, text, variantHeights=ITALI
   const contrast=createGrayFromSource(searchBase.source,true);
   const searchRegions=scaleItalicRects(searchConfig.searchRegions||[],searchScale);
   const existingBoxes=scaleItalicRects(searchConfig.existingBoxes||[],searchScale);
-  const includeDarkOnLight = searchConfig.includeDarkOnLight !== false;
-  const polarities = includeDarkOnLight
-    ? [
-        {key:'lightOnDark', label:'明字/暗背景'},
-        {key:'darkOnLight', label:'暗字/白背景'}
-      ]
-    : [{key:'lightOnDark', label:'明字/暗背景'}];
   const variants=[];
   for(const h of variantHeights){
     const scaledH=Math.max(18,Math.round(h*searchScale));
     for(const skew of variantSkews){
       const tpl=buildTextTemplateStyled(text,{italic:true,targetHeight:scaledH,skew});
-      for(const polarity of polarities){
-        const searched=searchContrastItalicVariant(contrast.gray, contrast.sw, contrast.sh, tpl, {
-          polarity:polarity.key,
-          grayTextMin:95, grayTextMax:235, grayBgMax:84,
-          darkTextMax:175, lightBgMin:205,
-          coarseThreshold:0.57, coarseBgMin:0.42,
-          finalThreshold:0.60, finalBgMin:0.44,
-          searchRegions,
-          existingBoxes
-        });
-        const mapped=(searched.candidates||[]).map(c=>mapItalicCandidateToOriginal(c,searchScale));
-        searched.candidates=mapped;
-        searched.label=`${polarity.label} / H${h}→${scaledH} / skew ${skew.toFixed(2)}`;
-        searched.key=`${polarity.key}_h${h}_s${Math.round(skew*100)}`;
-        searched.color=polarity.key==='darkOnLight' ? '#06b6d4' : '#f59e0b';
-        searched.italic=true;
-        searched.contrast=true;
-        searched.polarity=polarity.key;
-        searched.polarityLabel=polarity.label;
-        searched.targetHeight=h;
-        searched.searchTargetHeight=scaledH;
-        searched.skew=skew;
-        searched.searchScale=searchScale;
-        searched.searchCanvasWidth=contrast.sw;
-        searched.searchCanvasHeight=contrast.sh;
-        variants.push(searched);
-      }
+      const searched=searchContrastItalicVariant(contrast.gray, contrast.sw, contrast.sh, tpl, {
+        grayTextMin:95, grayTextMax:235, grayBgMax:84,
+        coarseThreshold:0.57, coarseBgMin:0.42,
+        finalThreshold:0.60, finalBgMin:0.44,
+        searchRegions,
+        existingBoxes
+      });
+      const mapped=(searched.candidates||[]).map(c=>mapItalicCandidateToOriginal(c,searchScale));
+      searched.candidates=mapped;
+      searched.label=`H${h}→${scaledH} / skew ${skew.toFixed(2)}`;
+      searched.key=`h${h}_s${Math.round(skew*100)}`;
+      searched.color='#f59e0b';
+      searched.italic=true;
+      searched.contrast=true;
+      searched.targetHeight=h;
+      searched.searchTargetHeight=scaledH;
+      searched.skew=skew;
+      searched.searchScale=searchScale;
+      searched.searchCanvasWidth=contrast.sw;
+      searched.searchCanvasHeight=contrast.sh;
+      variants.push(searched);
     }
   }
 
   const mergedRaw=[];
   for(const v of variants){
     for(const c of (v.candidates||[])){
-      mergedRaw.push({...c, label:v.label, key:v.key, color:v.color, polarity:v.polarity, polarityLabel:v.polarityLabel, targetHeight:v.targetHeight, searchTargetHeight:v.searchTargetHeight, skew:v.skew});
+      mergedRaw.push({...c, label:v.label, key:v.key, color:v.color, targetHeight:v.targetHeight, searchTargetHeight:v.searchTargetHeight, skew:v.skew});
     }
   }
   const merged=dedupeTemplateCandidates(mergedRaw, 12);
@@ -492,8 +463,7 @@ export function italicVariantDiagnosticSearch(source, text, variantHeights=ITALI
     searchScale,
     searchCanvasWidth:contrast.sw,
     searchCanvasHeight:contrast.sh,
-    resized:searchBase.resized,
-    includeDarkOnLight
+    resized:searchBase.resized
   };
 }
 
@@ -556,7 +526,7 @@ export function collectItalicRescueCandidates(source, text, existingBoxes=[], va
       if(c.bgScore<ITALIC_RESCUE_BG_MIN) continue;
       if(overlapsExisting(c, acceptedBoxesSource)) continue;
       const mapped=mapCandidateToOriginal(c);
-      accepted.push({...mapped, source:"イタリック救出", passLabel:label, polarity:c.polarity||'lightOnDark', polarityLabel:c.polarityLabel||'明字/暗背景'});
+      accepted.push({...mapped, source:"イタリック救出", passLabel:label});
       acceptedBoxes.push({x:mapped.x,y:mapped.y,w:mapped.w,h:mapped.h});
       acceptedBoxesSource.push({x:c.x,y:c.y,w:c.w,h:c.h});
       if(accepted.length>=ITALIC_RESCUE_MAX_NEW) break;

@@ -1,7 +1,7 @@
-import { CONFIG, ENABLE_DIAGNOSTIC } from "./config.js?v=911100";
-import { normalize, getMedian, editDistance } from "./utils.js?v=911100";
-import { state, manualStamps } from "./state.js?v=911100";
-import { createView } from "./view.js?v=911100";
+import { CONFIG, ENABLE_DIAGNOSTIC } from "./config.js?v=91200";
+import { normalize, getMedian, editDistance } from "./utils.js?v=91200";
+import { state, manualStamps } from "./state.js?v=91200";
+import { createView } from "./view.js?v=91200";
 import {
     ITALIC_VARIANT_SKEWS,
     ITALIC_DIAGNOSTIC_SKEWS,
@@ -13,7 +13,7 @@ import {
     chooseItalicVariantHeights,
     italicVariantDiagnosticSearch,
     collectItalicRescueCandidates
-} from "./italic.js?v=911100";
+} from "./italic.js?v=91200";
 
 
 const $ = id => document.getElementById(id);
@@ -1896,7 +1896,7 @@ async function diagnoseOCR(){
 
     lines.push("",`===== イタリック救出診断 =====`);
     lines.push(`解析キャンバス：${analysisCanvas.width}x${analysisCanvas.height} / scale ${analysisScale.toFixed(3)}${analysisState.resized ? "（統一縮小）" : "（原寸）"}`);
-    lines.push(`方式：コントラスト補正 → 明字/暗背景＋暗字/白背景テンプレート / 粗探索${ITALIC_COARSE_STEP}px → 局所再探索${ITALIC_REFINE_STEP}px`);
+    lines.push(`方式：コントラスト補正 → イタリックテンプレート / 粗探索${ITALIC_COARSE_STEP}px → 局所再探索${ITALIC_REFINE_STEP}px`);
     lines.push(`探索キャンバス：${italicVariantResult.searchCanvasWidth}x${italicVariantResult.searchCanvasHeight} / scale ${italicVariantResult.searchScale.toFixed(3)}${italicVariantResult.resized ? "（縮小）" : "（原寸）"}`);
     lines.push(`テンプレート高さ推定：${diagnosticItalicHeightChoice.source} ${diagnosticItalicHeightChoice.sampleCount}件${Number.isFinite(diagnosticItalicHeightChoice.basis)?` / 中央値 ${diagnosticItalicHeightChoice.basis.toFixed(1)}px`:''}`);
     lines.push(`テンプレートバリエーション：解析基準 ${diagnosticItalicHeights.join("/")}px → 探索時はscale連動 × 診断傾き ${ITALIC_DIAGNOSTIC_SKEWS.map(v=>v.toFixed(2)).join("/")}（本番は ${ITALIC_VARIANT_SKEWS.map(v=>v.toFixed(2)).join("/")}）`);
@@ -1971,7 +1971,7 @@ async function diagnoseOCR(){
     for(const c of (italicProductionPreview.accepted||[])){
       drawDiagnosticFinalRect(
         {x:c.x,y:c.y,w:c.w,h:c.h,symbols:[],source:'イタリック救出'},
-        `イタリック救出${c.polarityLabel?`[${c.polarityLabel}]`:``} ${c.score.toFixed(2)}`
+        `イタリック救出 ${c.score.toFixed(2)}`
       );
     }
 
