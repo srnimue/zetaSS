@@ -1371,6 +1371,7 @@ async function collectOcrResults(worker,target,analysisState=null){
   const primaryVariant=makeWhiteBorderCanvas(primaryBase,OCR_BORDER_PX*ocrScale);
   try {
     const primary=await recognizeVariant(worker,primaryVariant,target,stats.primaryName,totalScale,OCR_BORDER_PX*ocrScale,OCR_BORDER_PX*ocrScale);
+    primary._ocrToOriginalScale=1/totalScale;
     results.push(primary);
     stats.primaryHitCount=primary.matches.length;
   } finally {
@@ -1391,6 +1392,7 @@ async function collectOcrResults(worker,target,analysisState=null){
   const colorVariant=makeWhiteBorderCanvas(colorBase,OCR_BORDER_PX*ocrScale);
   try {
     const color=await recognizeVariant(worker,colorVariant,target,"色抽出",totalScale,OCR_BORDER_PX*ocrScale,OCR_BORDER_PX*ocrScale);
+    color._ocrToOriginalScale=1/totalScale;
     results.push(color);
     stats.colorHitCount=color.matches.length;
   } finally {
@@ -1778,7 +1780,8 @@ async function run(){
     // 通常OCR/局所OCRで拾えなかった場所だけ、
     // コントラスト補正→イタリックテンプレートを補助候補として追加する。
     status("OCR中…\nイタリック文字の取りこぼしを補助確認しています。");
-    const italicVariantHeights = chooseItalicVariantHeights(regionScan.detected);
+    const italicHeightChoice = chooseItalicVariantHeights(results, target, analysisScale);
+    const italicVariantHeights = italicHeightChoice.heights;
     const italicRescue = collectItalicRescueCandidates(analysisCanvas, target, paintBoxes, italicVariantHeights, regionScan.detected, analysisScale);
     for (const c of italicRescue.accepted) {
       paintBoxes.push({
@@ -1888,10 +1891,60 @@ function mapItalicCandidateToOriginal(c, scale){
 }
 
 
-function chooseItalicVariantHeights(){
-  // V91.1: 統一解析キャンバス1000px基準でテンプレート高さを固定比較。
-  // 推定処理を外し、画像ごとの条件差を増やさない。
-  return [...ITALIC_VARIANT_HEIGHTS];
+function medianNumber(values){
+  const nums=(values||[]).filter(Number.isFinite).sort((a,b)=>a-b);
+  if(!nums.length) return null;
+  const mid=Math.floor(nums.length/2);
+  return nums.length%2 ? nums[mid] : (nums[mid-1]+nums[mid])/2;
+}
+
+function chooseItalicVariantHeights(results, target, analysisScale=1){
+  // V91.2: 追加の画像解析はせず、すでに取得済みのOCR bboxから
+  // 解析キャンバス上の実文字高さを推定する。テンプレート本数は2本のまま。
+  // 優先順位: 完全一致 > 強い近似候補 > 既定値。
+  const exactHeights=[];
+  for(const r of (results||[])){
+    for(const m of (r.matches||[])){
+      const h=(m.y1??0)-(m.y0??0);
+      if(Number.isFinite(h) && h>0) exactHeights.push(h*analysisScale);
+    }
+  }
+
+  let basis=medianNumber(exactHeights);
+  let source='完全一致OCR';
+  let sampleCount=exactHeights.length;
+
+  if(!Number.isFinite(basis)){
+    const nearHeights=[];
+    const tlen=[...target].length;
+    for(const r of (results||[])){
+      for(const c of (r.near||[])){
+        if([...c.candidate].length!==tlen) continue;
+        if(editDistance(target,c.candidate)!==1) continue;
+        if(c.similarity<0.66) continue;
+        const ys=(c.units||[]).flatMap(u=>[u?.bbox?.y0,u?.bbox?.y1]).filter(Number.isFinite);
+        if(ys.length<2) continue;
+        // near候補のbboxはOCRキャンバス座標。結果の元画像換算scaleは後段で使われるため、
+        // ここでは analysisScale/totalScale 相当になるよう r._ocrToOriginalScale を利用する。
+        const ocrToOriginalScale=Number.isFinite(r._ocrToOriginalScale) ? r._ocrToOriginalScale : null;
+        if(!ocrToOriginalScale) continue;
+        const originalH=(Math.max(...ys)-Math.min(...ys))*ocrToOriginalScale;
+        if(Number.isFinite(originalH) && originalH>0) nearHeights.push(originalH*analysisScale);
+      }
+    }
+    basis=medianNumber(nearHeights);
+    source='強い近似OCR';
+    sampleCount=nearHeights.length;
+  }
+
+  if(!Number.isFinite(basis)){
+    return {heights:[...ITALIC_VARIANT_HEIGHTS], basis:null, source:'既定値', sampleCount:0};
+  }
+
+  const center=Math.max(22,Math.min(40,Math.round(basis)));
+  let a=Math.max(22,center-1), b=Math.min(40,center+1);
+  if(a===b) b=Math.min(40,a+1);
+  return {heights:[a,b], basis, source, sampleCount};
 }
 
 function buildTextTemplateStyled(text, opts={}){
@@ -2341,7 +2394,8 @@ async function diagnoseOCR(){
     const analysisState=buildAnalysisCanvas();
     const {results,scale,ocrCanvas,stats,analysisCanvas,analysisScale}=await collectOcrResults(worker,target,analysisState);
     const diagnosticTextRegions=detectTextLikeRegions(analysisCanvas);
-    const diagnosticItalicHeights=chooseItalicVariantHeights(diagnosticTextRegions);
+    const diagnosticItalicHeightChoice=chooseItalicVariantHeights(results,target,analysisScale);
+    const diagnosticItalicHeights=diagnosticItalicHeightChoice.heights;
     const italicVariantResult=italicVariantDiagnosticSearch(analysisCanvas,target,diagnosticItalicHeights,{},ITALIC_DIAGNOSTIC_SKEWS);
     italicVariantResult.variants=(italicVariantResult.variants||[]).map(v=>({...v,candidates:(v.candidates||[]).map(c=>({...c,x:Math.round(c.x/analysisScale),y:Math.round(c.y/analysisScale),w:Math.max(1,Math.round(c.w/analysisScale)),h:Math.max(1,Math.round(c.h/analysisScale))}))}));
     italicVariantResult.merged=(italicVariantResult.merged||[]).map(c=>({...c,x:Math.round(c.x/analysisScale),y:Math.round(c.y/analysisScale),w:Math.max(1,Math.round(c.w/analysisScale)),h:Math.max(1,Math.round(c.h/analysisScale))}));
@@ -2435,7 +2489,8 @@ async function diagnoseOCR(){
     lines.push(`解析キャンバス：${analysisCanvas.width}x${analysisCanvas.height} / scale ${analysisScale.toFixed(3)}${analysisState.resized ? "（統一縮小）" : "（原寸）"}`);
     lines.push(`方式：コントラスト補正 → イタリックテンプレート / 粗探索${ITALIC_COARSE_STEP}px → 局所再探索${ITALIC_REFINE_STEP}px`);
     lines.push(`探索キャンバス：${italicVariantResult.searchCanvasWidth}x${italicVariantResult.searchCanvasHeight} / scale ${italicVariantResult.searchScale.toFixed(3)}${italicVariantResult.resized ? "（縮小）" : "（原寸）"}`);
-    lines.push(`テンプレートバリエーション：元画像基準 ${diagnosticItalicHeights.join("/")}px → 探索時はscale連動 × 診断傾き ${ITALIC_DIAGNOSTIC_SKEWS.map(v=>v.toFixed(2)).join("/")}（本番は ${ITALIC_VARIANT_SKEWS.map(v=>v.toFixed(2)).join("/")}）`);
+    lines.push(`テンプレート高さ推定：${diagnosticItalicHeightChoice.source} ${diagnosticItalicHeightChoice.sampleCount}件${Number.isFinite(diagnosticItalicHeightChoice.basis)?` / 中央値 ${diagnosticItalicHeightChoice.basis.toFixed(1)}px`:''}`);
+    lines.push(`テンプレートバリエーション：解析基準 ${diagnosticItalicHeights.join("/")}px → 探索時はscale連動 × 診断傾き ${ITALIC_DIAGNOSTIC_SKEWS.map(v=>v.toFixed(2)).join("/")}（本番は ${ITALIC_VARIANT_SKEWS.map(v=>v.toFixed(2)).join("/")}）`);
     const firstVariant=italicVariantResult.variants?.[0];
     lines.push(`探索範囲：x=${firstVariant?.searchXStart||0}〜${firstVariant?.searchXEnd||0} / y=${firstVariant?.searchYStart||0}〜${firstVariant?.searchYEnd||0}`);
     for(const v of (italicVariantResult.variants||[])){
