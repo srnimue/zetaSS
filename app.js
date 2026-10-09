@@ -1,5 +1,5 @@
-import { ENABLE_DIAGNOSTIC } from "./config.js?v=91600";
-import { normalize, editDistance } from "./utils.js?v=91600";
+import { ENABLE_DIAGNOSTIC } from "./config.js?v=91700";
+import { normalize, editDistance } from "./utils.js?v=91700";
 import {
     getOcrLanguage,
     makeOcrVariant,
@@ -11,9 +11,9 @@ import {
     OCR_BORDER_PX,
     ANALYSIS_CANVAS_MAX_WIDTH,
     ANALYSIS_CANVAS_MAX_PIXELS
-} from "./ocr.js?v=91600";
-import { state, manualStamps } from "./state.js?v=91600";
-import { createView } from "./view.js?v=91600";
+} from "./ocr.js?v=91700";
+import { state, manualStamps } from "./state.js?v=91700";
+import { createView } from "./view.js?v=91700";
 import {
     ITALIC_VARIANT_SKEWS,
     ITALIC_DIAGNOSTIC_SKEWS,
@@ -25,8 +25,9 @@ import {
     chooseItalicVariantHeights,
     italicVariantDiagnosticSearch,
     collectItalicRescueCandidates
-} from "./italic.js?v=91600";
-import { createRedaction } from "./redaction.js?v=91600";
+} from "./italic.js?v=91700";
+import { createRedaction } from "./redaction.js?v=91700";
+import { createManual } from "./manual.js?v=91700";
 
 
 const $ = id => document.getElementById(id);
@@ -76,28 +77,10 @@ let worker = null;
 let workerLang = null;
 let ocrBusy = false;
 let fileName = "redacted.png";
-let manualMode = false;
-let stampTapStart = null;
-let isDragging = false;
-let dragStart = null;
 let ocrBaseCanvas = null;
-const manualHistory = [];
-let selectedManualIndex = -1;
-let editMode = null; // { type: "move" | "resize", handle: string|null, startPoint, original }
-const MIN_MANUAL_SIZE = 4;
 
 const MIN_ZOOM = 1;
 const MAX_ZOOM = 4;
-const pointers = new Map();
-let pinchStartDistance = 0;
-let pinchStartZoom = 1;
-let panLastCenter = null;
-let multiTouchGestureActive = false;
-// 新規手動描画の指オフセットは「画面上のCSS px」で管理する。
- // ズーム倍率が変わっても、指から見た描画位置の距離を一定にする。
-const TOUCH_Y_OFFSET_SCREEN_PX = -40;
-const MANUAL_HIT_RADIUS_PX = 30; // 画面表示上の当たり判定。新規描画より既存編集を優先。
-const TRACE_DISPLAY_HEIGHT_PX = 32; // なぞり式の基準高さ（100%表示時のCSS px）
 const SETTINGS_STORAGE_KEY = "zetaSS.settings.v87";
 const TARGET_HISTORY_STORAGE_KEY = "zetaSS.targetHistory.v87";
 const MAX_TARGET_HISTORY = 5;
@@ -126,6 +109,8 @@ function getCurrentRedactionStyle() {
     });
 }
 
+let manualController = null;
+
 const {
     getBaseDisplaySize,
     updateZoomUI,
@@ -146,8 +131,8 @@ const {
             ? { width: state.sourceImage.naturalWidth, height: state.sourceImage.naturalHeight }
             : { width: canvas.width, height: canvas.height },
     paintStamp: stamp => paintStamp(stamp),
-    updateUndoButton: () => updateUndoButton(),
-    renderManualSelection: () => renderManualSelection(),
+    updateUndoButton: () => manualController?.updateUndoButton(),
+    renderManualSelection: () => manualController?.renderManualSelection(),
     minZoom: MIN_ZOOM,
     maxZoom: MAX_ZOOM
 });
@@ -273,176 +258,30 @@ function loadImage(file) {
 }
 
 
-function getPointerDistance() {
-    const values = [...pointers.values()];
-    if (values.length < 2) return 0;
-    return Math.hypot(values[0].x - values[1].x, values[0].y - values[1].y);
-}
-
-function getLastManualStamp() {
-    for (let i = manualStamps.length - 1; i >= 0; i--) {
-        if (manualStamps[i].kind !== "ocr") return manualStamps[i];
-    }
-    return null;
-}
-
-function updateStampModeUI() {
-    const lastManual = getLastManualStamp();
-    if (stampModeWrap) stampModeWrap.hidden = !manualMode;
-    if (stampMode) stampMode.disabled = !manualMode || !lastManual;
-    if ((!manualMode || !lastManual) && stampMode) stampMode.checked = false;
-}
-
-function updateUndoButton() {
-    undoBtn.disabled = manualHistory.length === 0;
-    updateStampModeUI();
-}
-
-function snapshotManualStamps() {
-    return manualStamps.map(stamp => ({ ...stamp }));
-}
-
-function pushManualHistory() {
-    manualHistory.push(snapshotManualStamps());
-    if (manualHistory.length > 50) manualHistory.shift();
-}
-
-function restoreManualSnapshot(snapshot) {
-    manualStamps.length = 0;
-    for (const stamp of snapshot) manualStamps.push({ ...stamp });
-    selectedManualIndex = -1;
-    editMode = null;
-    selection.hidden = true;
-    redrawFromBase();
-}
-
-function hideManualDeleteButton() {
-    if (!manualDeleteBtn) return;
-    manualDeleteBtn.hidden = true;
-    manualDeleteBtn.style.left = "";
-    manualDeleteBtn.style.top = "";
-}
-
-function renderManualSelection() {
-    if (selectedManualIndex < 0 || !manualStamps[selectedManualIndex]) {
-        selection.hidden = true;
-        selection.innerHTML = "";
-        hideManualDeleteButton();
-        return;
-    }
-    const stamp = manualStamps[selectedManualIndex];
-    const transform = getCanvasDisplayTransform();
-    selection.hidden = false;
-    selection.style.left = `${transform.left + stamp.x * transform.scaleX}px`;
-    selection.style.top = `${transform.top + stamp.y * transform.scaleY}px`;
-    selection.style.width = `${stamp.w * transform.scaleX}px`;
-    selection.style.height = `${stamp.h * transform.scaleY}px`;
-    selection.innerHTML = "";
-
-    // 削除ボタンはselectionの子にせず、canvasWrap直下の独立要素として表示する。
-    if (manualDeleteBtn && manualMode) {
-        manualDeleteBtn.style.left = `${transform.left + stamp.x * transform.scaleX - 18}px`;
-        manualDeleteBtn.style.top = `${transform.top + stamp.y * transform.scaleY - 18}px`;
-        manualDeleteBtn.hidden = false;
-    } else {
-        hideManualDeleteButton();
-    }
-    for (const handle of ["nw", "ne", "sw", "se"]) {
-        const el = document.createElement("span");
-        el.className = `edit-handle handle-${handle}`;
-        el.dataset.handle = handle;
-        selection.appendChild(el);
-    }
-
-}
-
-function getManualHitRadiusCanvas() {
-    const transform = getCanvasDisplayTransform();
-    const scale = Math.max(0.0001, Math.min(transform.scaleX, transform.scaleY));
-    return MANUAL_HIT_RADIUS_PX / scale;
-}
-
-function getResizeHandle(point, stamp, radius = null) {
-    const size = radius ?? getManualHitRadiusCanvas();
-    const handles = {
-        nw: [stamp.x, stamp.y],
-        ne: [stamp.x + stamp.w, stamp.y],
-        sw: [stamp.x, stamp.y + stamp.h],
-        se: [stamp.x + stamp.w, stamp.y + stamp.h]
-    };
-    let best = null;
-    let bestDistance = Infinity;
-    for (const [name, [x, y]] of Object.entries(handles)) {
-        const distance = Math.hypot(point.x - x, point.y - y);
-        if (distance <= size && distance < bestDistance) {
-            best = name;
-            bestDistance = distance;
-        }
-    }
-    return best;
-}
-
-// 編集対象は「四隅ハンドル → 矩形本体 → 新規描画」の順に判定する。
-// 画面上およそ30pxまで当たり判定を広げ、指のオフセットとは切り離して生タッチ座標で判定する。
-function findManualEditTarget(point) {
-    const radius = getManualHitRadiusCanvas();
-
-    // まず全矩形のハンドルを優先。近いハンドルがあれば必ずリサイズ扱い。
-    let bestHandle = null;
-    for (let i = manualStamps.length - 1; i >= 0; i--) {
-        const stamp = manualStamps[i];
-        const handle = getResizeHandle(point, stamp, radius);
-        if (!handle) continue;
-        const hx = handle.includes("e") ? stamp.x + stamp.w : stamp.x;
-        const hy = handle.includes("s") ? stamp.y + stamp.h : stamp.y;
-        const distance = Math.hypot(point.x - hx, point.y - hy);
-        if (!bestHandle || distance < bestHandle.distance) {
-            bestHandle = { index: i, handle, distance };
-        }
-    }
-    if (bestHandle) return { index: bestHandle.index, type: "resize", handle: bestHandle.handle };
-
-    // 次に矩形本体。実矩形の外側にもradiusぶん余裕を持たせる。
-    for (let i = manualStamps.length - 1; i >= 0; i--) {
-        const b = manualStamps[i];
-        if (point.x >= b.x - radius && point.x <= b.x + b.w + radius &&
-            point.y >= b.y - radius && point.y <= b.y + b.h + radius) {
-            return { index: i, type: "move", handle: null };
-        }
-    }
-    return null;
-}
-
-function hitTestManual(point) {
-    return findManualEditTarget(point)?.index ?? -1;
-}
-
-function applyMoveEdit(current) {
-    const b = manualStamps[selectedManualIndex];
-    const dx = current.x - editMode.startPoint.x;
-    const dy = current.y - editMode.startPoint.y;
-    b.x = Math.max(0, Math.min(canvas.width - b.w, editMode.original.x + dx));
-    b.y = Math.max(0, Math.min(canvas.height - b.h, editMode.original.y + dy));
-}
-
-function applyResizeEdit(current) {
-    const b = manualStamps[selectedManualIndex];
-    const o = editMode.original;
-    let x = o.x, y = o.y, w = o.w, h = o.h;
-    const dx = current.x - editMode.startPoint.x;
-    const dy = current.y - editMode.startPoint.y;
-    const handle = editMode.handle;
-    if (handle.includes("e")) w = o.w + dx;
-    if (handle.includes("s")) h = o.h + dy;
-    if (handle.includes("w")) { x = o.x + dx; w = o.w - dx; }
-    if (handle.includes("n")) { y = o.y + dy; h = o.h - dy; }
-    if (w < MIN_MANUAL_SIZE) { if (handle.includes("w")) x = o.x + o.w - MIN_MANUAL_SIZE; w = MIN_MANUAL_SIZE; }
-    if (h < MIN_MANUAL_SIZE) { if (handle.includes("n")) y = o.y + o.h - MIN_MANUAL_SIZE; h = MIN_MANUAL_SIZE; }
-    x = Math.max(0, Math.min(canvas.width - w, x));
-    y = Math.max(0, Math.min(canvas.height - h, y));
-    b.x = x; b.y = y; b.w = w; b.h = h;
-}
-
+manualController = createManual({
+    canvas,
+    canvasWrap,
+    selection,
+    manualDeleteBtn,
+    stampMode,
+    stampModeWrap,
+    manualDrawMode,
+    manualBtn,
+    manualDoneBtn,
+    undoBtn,
+    saveBtn,
+    manualHelpBtn,
+    manualHelpDialog,
+    manualHelpCloseBtn,
+    getBaseDisplaySize,
+    getCanvasDisplayTransform,
+    setZoom,
+    redrawFromBase,
+    paintManual,
+    getCurrentRedactionStyle,
+    savePreferences,
+    status
+});
 
 async function getWorker(preferredLang = "jpn") {
     if (!window.Tesseract) {
@@ -913,7 +752,7 @@ async function run(){
     if(!target) throw new Error("黒塗りする文字を入力してください。");
     saveTargetHistoryEntry(targetText.value);
 
-    manualStamps.length=0; manualHistory.length=0; selectedManualIndex=-1; editMode=null; ocrBaseCanvas=null; redrawFromBase();
+    manualController.resetState({ redraw: false }); ocrBaseCanvas=null; redrawFromBase();
     const ocrWorker=await getWorker(getOcrLanguage(target));
     const analysisState=buildAnalysisCanvas();
     status("OCR中…\n基準キャンバスを作成しています。");
@@ -990,7 +829,7 @@ async function run(){
     const baseCtx=ocrBaseCanvas.getContext("2d");
     baseCtx.drawImage(state.sourceImage,0,0);
 
-    pushManualHistory();
+    manualController.pushManualHistory();
     for(const b of paintBoxes){
       const rect=getOcrVisualRect({x:b.x,y:b.y,w:b.w,h:b.h},b.symbols||[],{source:b.source});
       if(rect.w < 1 || rect.h < 1) continue;
@@ -1241,572 +1080,6 @@ async function diagnoseOCR(){
     setOcrBusy(false);
   }
 }
-function getCanvasPoint(event) {
-    const rect = canvas.getBoundingClientRect();
-    return {
-        x: (event.clientX - rect.left) * canvas.width / rect.width,
-        y: (event.clientY - rect.top) * canvas.height / rect.height
-    };
-}
-
-// canvas が中央寄せ・ズーム・スクロールされていても、
-// canvasWrap 内の「実際に見えているcanvas」の位置と表示倍率を正しく取得する。
-// offsetLeft / offsetTop は margin:auto やスクロールの影響を受けるため使わない。
-
-function updateSelection(start, current) {
-    const x = Math.min(start.x, current.x);
-    const y = Math.min(start.y, current.y);
-    const w = Math.abs(current.x - start.x);
-    const h = Math.abs(current.y - start.y);
-
-    const transform = getCanvasDisplayTransform();
-
-    selection.hidden = false;
-    selection.style.left = `${transform.left + x * transform.scaleX}px`;
-    selection.style.top = `${transform.top + y * transform.scaleY}px`;
-    selection.style.width = `${w * transform.scaleX}px`;
-    selection.style.height = `${h * transform.scaleY}px`;
-}
-
-function getTraceCanvasHeight() {
-    if (!canvas.width || !canvas.height) return TRACE_DISPLAY_HEIGHT_PX;
-    const base = getBaseDisplaySize();
-    const baseScaleY = Math.max(0.0001, base.height / canvas.height);
-    // 画像が縮小表示されているほど、元画像側では太い矩形にする。
-    // zoom値は使わない。通常は32px相当、高解像度画像でも最大44pxまでに抑える。
-    return Math.max(32, Math.min(44, TRACE_DISPLAY_HEIGHT_PX / baseScaleY));
-}
-
-function getTraceRect(start, current) {
-    const x = Math.min(start.x, current.x);
-    const w = Math.abs(current.x - start.x);
-    const h = getTraceCanvasHeight();
-    // Yは開始地点を基準に固定。指が上下にぶれても黒塗りが蛇行しない。
-    const y = Math.max(0, Math.min(canvas.height - h, start.y - h / 2));
-    return { x, y, w, h };
-}
-
-function updateTraceSelection(start, current) {
-    const rect = getTraceRect(start, current);
-    const transform = getCanvasDisplayTransform();
-    selection.hidden = false;
-    selection.style.left = `${transform.left + rect.x * transform.scaleX}px`;
-    selection.style.top = `${transform.top + rect.y * transform.scaleY}px`;
-    selection.style.width = `${rect.w * transform.scaleX}px`;
-    selection.style.height = `${rect.h * transform.scaleY}px`;
-}
-
-function startManualMode() {
-    if (!state.sourceImage) return;
-    manualMode = true;
-    document.body.classList.add("manual-mode");
-    manualDoneBtn.hidden = false;
-    manualBtn.disabled = true;
-    updateStampModeUI();
-    status(`手動黒塗りモードです。\n描画方法：${manualDrawMode?.value === "trace" ? "なぞり式" : "自由矩形"}`);
-}
-
-function stopManualMode() {
-    manualMode = false;
-    document.body.classList.remove("manual-mode");
-    isDragging = false;
-    dragStart = null;
-    stampTapStart = null;
-    selection.hidden = true;
-    hideManualDeleteButton();
-    if (stampMode) stampMode.checked = false;
-    manualDoneBtn.hidden = true;
-    manualBtn.disabled = !state.sourceImage;
-    updateStampModeUI();
-    if (state.sourceImage) status(`手動黒塗り終了：追加した黒塗り ${manualStamps.length}箇所`);
-}
-
-function placeStampAt(point) {
-    if (!manualStamps.length) return;
-
-    const last = getLastManualStamp();
-    if (!last) return;
-    const stamp = {
-        x: point.x - last.w / 2,
-        y: point.y - last.h / 2,
-        w: last.w,
-        h: last.h,
-        style: getCurrentRedactionStyle(),
-        kind: "manual"
-    };
-
-    stamp.x = Math.max(0, Math.min(canvas.width - stamp.w, stamp.x));
-    stamp.y = Math.max(0, Math.min(canvas.height - stamp.h, stamp.y));
-
-    pushManualHistory();
-    manualStamps.push(stamp);
-    paintManual(stamp, stamp.style);
-    updateUndoButton();
-    saveBtn.disabled = false;
-    status(`スタンプを追加しました。\n追加済み：${manualStamps.length}箇所`);
-}
-
-function finishStamp(point) {
-    if (!dragStart) return;
-
-    let x, y, w, h;
-    if (manualDrawMode?.value === "trace") {
-        const rect = getTraceRect(dragStart, point);
-        ({ x, y, w, h } = rect);
-    } else {
-        x = Math.min(dragStart.x, point.x);
-        y = Math.min(dragStart.y, point.y);
-        w = Math.abs(point.x - dragStart.x);
-        h = Math.abs(point.y - dragStart.y);
-    }
-    selection.hidden = true;
-
-    // なぞり式は高さ固定なので横幅だけ最低サイズを確認。
-    if (w < MIN_MANUAL_SIZE || h < MIN_MANUAL_SIZE) {
-        dragStart = null;
-        return;
-    }
-
-    const stamp = { x, y, w, h, style: getCurrentRedactionStyle(), kind: "manual" };
-    pushManualHistory();
-    manualStamps.push(stamp);
-    paintManual(stamp, stamp.style);
-    updateUndoButton();
-    saveBtn.disabled = false;
-    status(`${manualDrawMode?.value === "trace" ? "なぞり式" : "手動"}黒塗りを追加しました。\n追加済み：${manualStamps.length}箇所`);
-    dragStart = null;
-}
-
-function getRawManualPoint(event) {
-    return getCanvasPoint(event);
-}
-
-// 新規描画時の指オフセットは画面表示上のCSS pxをcanvas座標へ変換する。
-// これにより等倍・拡大時のどちらでも、指から見た描画位置を同じ感覚に保つ。
-// 横方向は自由矩形・なぞり式とも指の実位置に合わせ、Y方向だけ上へずらす。
-function getManualDrawPoint(event) {
-    if (event.pointerType !== "touch") return getRawManualPoint(event);
-
-    const raw = getRawManualPoint(event);
-    const transform = getCanvasDisplayTransform();
-    const scaleY = Math.max(0.0001, transform.scaleY);
-
-    return {
-        x: raw.x,
-        y: raw.y + TOUCH_Y_OFFSET_SCREEN_PX / scaleY
-    };
-}
-
-function getManualPoint(event, applyOffset = true) {
-    return applyOffset ? getManualDrawPoint(event) : getRawManualPoint(event);
-}
-
-function getTraceManualPoint(event) {
-    return getManualDrawPoint(event);
-}
-
-function getPointerCenter() {
-    const values = [...pointers.values()];
-    if (!values.length) return null;
-    return {
-        x: values.reduce((sum, p) => sum + p.x, 0) / values.length,
-        y: values.reduce((sum, p) => sum + p.y, 0) / values.length
-    };
-}
-
-function resetManualGestureState() {
-    pointers.clear();
-    pinchStartDistance = 0;
-    pinchStartZoom = state.zoom;
-    panLastCenter = null;
-    multiTouchGestureActive = false;
-    isDragging = false;
-    dragStart = null;
-    stampTapStart = null;
-    editMode = null;
-}
-
-function deleteSelectedManualStamp() {
-    if (selectedManualIndex < 0 || !manualStamps[selectedManualIndex]) return;
-    pushManualHistory();
-    manualStamps.splice(selectedManualIndex, 1);
-    selectedManualIndex = -1;
-    resetManualGestureState();
-    hideManualDeleteButton();
-    redrawFromBase();
-    saveBtn.disabled = false;
-    status(`選択した黒塗りを削除しました。\n残り：${manualStamps.length}箇所`);
-}
-
-// ×ボタンはselection/ハンドルとは完全に別要素。
-// pointerdown/pointerupの時点でcanvas側への伝播を止め、clickで削除する。
-manualDeleteBtn?.addEventListener("pointerdown", event => {
-    event.preventDefault();
-    event.stopPropagation();
-    // ×操作はcanvasのポインタ追跡と完全に切り離す。
-    resetManualGestureState();
-});
-
-manualDeleteBtn?.addEventListener("pointerup", event => {
-    event.preventDefault();
-    event.stopPropagation();
-});
-
-manualDeleteBtn?.addEventListener("click", event => {
-    event.preventDefault();
-    event.stopPropagation();
-    deleteSelectedManualStamp();
-});
-
-canvasWrap.addEventListener("pointerdown", event => {
-    if (!state.sourceImage) return;
-
-    // 新しいタッチ列のprimary pointerが来た時点で、前ジェスチャー由来の
-    // pointerId / pinch状態が残っていても必ず破棄する。
-    // 2本目以降の指は isPrimary=false なので、進行中のピンチは壊さない。
-    if (event.pointerType === "touch" && event.isPrimary) {
-        pointers.clear();
-        pinchStartDistance = 0;
-        pinchStartZoom = state.zoom;
-        panLastCenter = null;
-        multiTouchGestureActive = false;
-        isDragging = false;
-        dragStart = null;
-        stampTapStart = null;
-        editMode = null;
-    }
-
-    pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
-    canvasWrap.setPointerCapture?.(event.pointerId);
-
-    if (pointers.size >= 2) {
-        multiTouchGestureActive = true;
-        isDragging = false;
-        dragStart = null;
-        stampTapStart = null;
-        editMode = null;
-        selection.hidden = true;
-        hideManualDeleteButton();
-        pinchStartDistance = getPointerDistance();
-        pinchStartZoom = state.zoom;
-        panLastCenter = getPointerCenter();
-        event.preventDefault();
-        return;
-    }
-
-    panLastCenter = null;
-    pinchStartDistance = 0;
-
-    if (!manualMode) return;
-    event.preventDefault();
-
-    // 新しい操作開始時はいったん削除ボタンを消す。
-    // 既存黒塗りを選択した場合だけ、この後 renderManualSelection() で再表示する。
-    hideManualDeleteButton();
-
-    const rawPoint = getRawManualPoint(event);
-
-    // 既存の手動黒塗りをタップすると編集対象にする。
-    // 編集時はオフセットを使わず、指の位置をそのまま操作位置にする。
-    // スタンプモード中でも、まず既存黒塗りの編集を優先する。
-    const editTarget = findManualEditTarget(rawPoint);
-    if (editTarget) {
-        dragStart = rawPoint;
-        selectedManualIndex = editTarget.index;
-        const hitStamp = manualStamps[editTarget.index];
-        editMode = {
-            type: editTarget.type,
-            handle: editTarget.handle,
-            startPoint: { ...dragStart },
-            original: { ...hitStamp },
-            historyPushed: false
-        };
-        isDragging = true;
-        renderManualSelection();
-        status(editTarget.type === "resize"
-            ? "黒塗りの角を掴みました。\nドラッグでサイズ変更できます。"
-            : "黒塗りを掴みました。\nドラッグで移動できます。");
-        return;
-    }
-
-    selectedManualIndex = -1;
-    editMode = null;
-    renderManualSelection();
-
-    const isStampPlacement = stampMode.checked && getLastManualStamp();
-
-    // スタンプ配置は「ここに置きたい」というタップ位置を最優先し、オフセットを使わない。
-    // 通常の手動描画だけY方向のオフセットを使う。
-    dragStart = isStampPlacement
-        ? getRawManualPoint(event)
-        : (manualDrawMode?.value === "trace"
-            ? getTraceManualPoint(event)
-            : getManualPoint(event, true));
-
-    if (isStampPlacement) {
-        stampTapStart = { x: event.clientX, y: event.clientY };
-        isDragging = false;
-        const last = getLastManualStamp();
-        updateSelection(
-            { x: dragStart.x - last.w / 2, y: dragStart.y - last.h / 2 },
-            { x: dragStart.x + last.w / 2, y: dragStart.y + last.h / 2 }
-        );
-        return;
-    }
-
-    isDragging = true;
-    if (manualDrawMode?.value === "trace") updateTraceSelection(dragStart, dragStart);
-    else updateSelection(dragStart, dragStart);
-});
-
-canvasWrap.addEventListener("pointermove", event => {
-    // PCでmouseupを取りこぼしても、ボタンを離したマウスには追従しない。
-    if (event.pointerType === "mouse" && event.buttons === 0 && isDragging && editMode) {
-        isDragging = false;
-        dragStart = null;
-        editMode = null;
-        pointers.delete(event.pointerId);
-        renderManualSelection();
-        return;
-    }
-
-    if (pointers.has(event.pointerId)) {
-        pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
-    }
-
-    if (pointers.size >= 2) {
-        const distance = getPointerDistance();
-        const center = getPointerCenter();
-        if (pinchStartDistance > 0 && distance > 0) {
-            setZoom(pinchStartZoom * distance / pinchStartDistance);
-        }
-        if (center && panLastCenter) {
-            canvasWrap.scrollLeft -= center.x - panLastCenter.x;
-            canvasWrap.scrollTop -= center.y - panLastCenter.y;
-        }
-        panLastCenter = center;
-        event.preventDefault();
-        return;
-    }
-
-    // 2本指ジェスチャーの途中で1本だけ離れた後は、残った1本を
-    // 手動描画へ切り替えない。全指が離れるまでナビゲーション操作として扱う。
-    if (multiTouchGestureActive) {
-        event.preventDefault();
-        return;
-    }
-
-    if (!manualMode) return;
-    event.preventDefault();
-
-    if (editMode && selectedManualIndex >= 0 && isDragging) {
-        const point = getManualPoint(event, false);
-        if (!editMode.historyPushed) {
-            pushManualHistory();
-            editMode.historyPushed = true;
-        }
-        if (editMode.type === "move") applyMoveEdit(point);
-        else applyResizeEdit(point);
-        redrawFromBase();
-        return;
-    }
-
-    if (stampMode.checked && stampTapStart && getLastManualStamp()) {
-        const point = getRawManualPoint(event);
-        const last = getLastManualStamp();
-        updateSelection(
-            { x: point.x - last.w / 2, y: point.y - last.h / 2 },
-            { x: point.x + last.w / 2, y: point.y + last.h / 2 }
-        );
-        return;
-    }
-
-    if (!isDragging || !dragStart) return;
-    const point = manualDrawMode?.value === "trace"
-        ? getTraceManualPoint(event)
-        : getManualPoint(event, true);
-    if (manualDrawMode?.value === "trace") updateTraceSelection(dragStart, point);
-    else updateSelection(dragStart, point);
-});
-
-function endPointer(event) {
-    pointers.delete(event.pointerId);
-
-    if (multiTouchGestureActive) {
-        isDragging = false;
-        dragStart = null;
-        stampTapStart = null;
-        editMode = null;
-        selection.hidden = true;
-
-        if (pointers.size >= 1) {
-            // 2本→1本になっても、その1本で新規描画を開始しない。
-            panLastCenter = getPointerCenter();
-            return;
-        }
-
-        // 2本指ジェスチャーが完全に終了した時点で、次の1本指操作に備えて
-        // ピンチ関連の状態を確実に初期化する。
-        multiTouchGestureActive = false;
-        pinchStartDistance = 0;
-        pinchStartZoom = state.zoom;
-        panLastCenter = null;
-        return;
-    }
-
-    if (pointers.size >= 1) {
-        isDragging = false;
-        dragStart = null;
-        selection.hidden = true;
-        panLastCenter = getPointerCenter();
-        return;
-    }
-
-    pinchStartDistance = 0;
-    panLastCenter = null;
-
-    if (!manualMode) return;
-    event.preventDefault();
-
-    if (editMode && selectedManualIndex >= 0 && isDragging) {
-        const point = getManualPoint(event, false);
-        if (!editMode.historyPushed) {
-            pushManualHistory();
-            editMode.historyPushed = true;
-        }
-        if (editMode.type === "move") applyMoveEdit(point);
-        else applyResizeEdit(point);
-
-        // PCマウスではpointerup後もeditMode/isDraggingが残ると、
-        // カーソル移動だけで黒塗りが追従し続ける。
-        // 選択状態だけ残し、ドラッグ状態はここで必ず終了する。
-        isDragging = false;
-        dragStart = null;
-        editMode = null;
-        redrawFromBase();
-        renderManualSelection();
-        return;
-    }
-
-    if (stampMode.checked && stampTapStart && getLastManualStamp()) {
-        const moved = Math.hypot(event.clientX - stampTapStart.x, event.clientY - stampTapStart.y);
-        const point = getRawManualPoint(event);
-        stampTapStart = null;
-        selection.hidden = true;
-        dragStart = null;
-        isDragging = false;
-        if (moved < 12) placeStampAt(point);
-        return;
-    }
-
-    if (!isDragging || !dragStart) return;
-    isDragging = false;
-    finishStamp(
-        manualDrawMode?.value === "trace"
-            ? getTraceManualPoint(event)
-            : getManualPoint(event)
-    );
-}
-
-canvasWrap.addEventListener("pointerup", endPointer);
-canvasWrap.addEventListener("lostpointercapture", event => {
-    pointers.delete(event.pointerId);
-
-    if (event.pointerType === "touch") {
-        if (!pointers.size) {
-            multiTouchGestureActive = false;
-            pinchStartDistance = 0;
-            pinchStartZoom = state.zoom;
-            panLastCenter = null;
-        } else if (multiTouchGestureActive) {
-            panLastCenter = getPointerCenter();
-        }
-        return;
-    }
-
-    if (event.pointerType !== "mouse") return;
-    if (isDragging && editMode) {
-        isDragging = false;
-        dragStart = null;
-        editMode = null;
-        renderManualSelection();
-    }
-});
-canvasWrap.addEventListener("dblclick", event => {
-    if (!manualMode || selectedManualIndex < 0 || !manualStamps[selectedManualIndex]) return;
-    const point = getRawManualPoint(event);
-    if (hitTestManual(point) !== selectedManualIndex) return;
-    pushManualHistory();
-    manualStamps.splice(selectedManualIndex, 1);
-    selectedManualIndex = -1;
-    editMode = null;
-    redrawFromBase();
-    saveBtn.disabled = false;
-    status(`選択した黒塗りを削除しました。\n残り：${manualStamps.length}箇所`);
-});
-
-canvasWrap.addEventListener("pointercancel", event => {
-    pointers.delete(event.pointerId);
-    panLastCenter = pointers.size ? getPointerCenter() : null;
-    isDragging = false;
-    dragStart = null;
-    stampTapStart = null;
-    editMode = null;
-    if (!pointers.size) {
-        multiTouchGestureActive = false;
-        pinchStartDistance = 0;
-        pinchStartZoom = state.zoom;
-        panLastCenter = null;
-    }
-    selection.hidden = true;
-    hideManualDeleteButton();
-});
-
-function openManualHelp() {
-    if (!manualHelpDialog) return;
-    manualHelpDialog.hidden = false;
-    document.body.classList.add("help-dialog-open");
-    manualHelpCloseBtn?.focus();
-}
-
-function closeManualHelp() {
-    if (!manualHelpDialog || manualHelpDialog.hidden) return;
-    manualHelpDialog.hidden = true;
-    document.body.classList.remove("help-dialog-open");
-    manualHelpBtn?.focus();
-}
-
-manualHelpBtn?.addEventListener("click", openManualHelp);
-manualHelpCloseBtn?.addEventListener("click", closeManualHelp);
-manualHelpDialog?.addEventListener("click", event => {
-    if (event.target.closest("[data-help-close]")) closeManualHelp();
-});
-document.addEventListener("keydown", event => {
-    if (event.key === "Escape" && manualHelpDialog && !manualHelpDialog.hidden) {
-        closeManualHelp();
-    }
-});
-
-manualDrawMode?.addEventListener("change", () => {
-    savePreferences();
-    selection.hidden = true;
-    hideManualDeleteButton();
-    dragStart = null;
-    isDragging = false;
-    const label = manualDrawMode.value === "trace" ? "なぞり式（表示サイズに自動調整）" : "自由矩形";
-    status(`手動の描画方法を「${label}」にしました。`);
-});
-
-stampMode.addEventListener("change", () => {
-    if (!stampMode.checked) {
-        selection.hidden = true;
-        status("スタンプモードをOFFにしました。\n通常の手動黒塗りに戻ります。");
-    } else if (manualStamps.length) {
-        status("スタンプモードONです。\n画像をタップすると、直前の手動黒塗りと同じサイズで黒塗りします。");
-    }
-});
-
-
 redactionMode?.addEventListener("change", () => {
     updateRedactionStyleUI();
     savePreferences();
@@ -1821,28 +1094,14 @@ targetText?.addEventListener("keydown", event => {
 zoomOutBtn.addEventListener("click", () => setZoom(state.zoom - 0.25));
 zoomInBtn.addEventListener("click", () => setZoom(state.zoom + 0.25));
 
-undoBtn.addEventListener("click", () => {
-    if (!manualHistory.length) return;
-    const previous = manualHistory.pop();
-    restoreManualSnapshot(previous);
-    status(`直前の操作を取り消しました。\n残り：${manualStamps.length}箇所`);
-});
-
 resetBtn.addEventListener("click", () => {
     if (!state.sourceImage) return;
     // 自動(OCR)・手動を問わず、黒塗りを全て取り消して元画像の状態に戻す。
-    manualStamps.length = 0;
-    manualHistory.length = 0;
-    selectedManualIndex = -1;
-    editMode = null;
-    hideManualDeleteButton();
+    manualController.resetState({ redraw: false });
     ocrBaseCanvas = null;
     redrawFromBase();
     status("黒塗りをすべてリセットしました。");
 });
-
-manualBtn.addEventListener("click", startManualMode);
-manualDoneBtn.addEventListener("click", stopManualMode);
 
 // 保存設定/履歴は定数とヘルパー定義が済んでから初期化する。
 loadPreferences();
@@ -1853,18 +1112,14 @@ fileInput.addEventListener("change", async () => {
     if (!file) return;
 
     try {
-        stopManualMode();
+        manualController.stopManualMode();
         ocrDiagnostics.hidden = true;
         ocrDebugLayer.hidden = true;
         ocrDebugLayer.innerHTML = "";
         state.sourceImage = await loadImage(file);
         buildSourceCanvas();
         fileName = (file.name.replace(/\.[^.]+$/, "") || "redacted") + "_redacted.png";
-        manualStamps.length = 0;
-        manualHistory.length = 0;
-        selectedManualIndex = -1;
-        editMode = null;
-        hideManualDeleteButton();
+        manualController.resetState({ redraw: false });
         ocrBaseCanvas = null;
         canvas.width = state.sourceImage.naturalWidth;
         canvas.height = state.sourceImage.naturalHeight;
@@ -1876,7 +1131,7 @@ fileInput.addEventListener("change", async () => {
         manualBtn.disabled = false;
         saveBtn.disabled = false;
         resetBtn.disabled = false;
-        updateUndoButton();
+        manualController.updateUndoButton();
         status(`画像を読み込みました。\n${canvas.width} × ${canvas.height}px`);
     } catch (error) {
         status("画像の読み込みに失敗しました。", error);
