@@ -1,24 +1,11 @@
+import { CONFIG, ENABLE_DIAGNOSTIC } from "./config.js?v=91600";
+import { normalize, getMedian, editDistance } from "./utils.js?v=91600";
+import { state, manualStamps } from "./state.js?v=91600";
+import { createView } from "./view.js?v=91600";
+
 const $ = id => document.getElementById(id);
 
-// 診断モードを不要になったら false にするだけで非表示にできます。
-const ENABLE_DIAGNOSTIC = true;
-
 // 調整値はここに集約。実験時に散在したマジックナンバーを増やさない。
-const CONFIG = Object.freeze({
-  bbox: Object.freeze({
-    shortNameHeightWidthRatio: 1.18,
-    shortNameMedianWidthRatio: 1.22
-  }),
-  near: Object.freeze({
-    minSimilarity: 0.50
-  }),
-  italic: Object.freeze({
-    minScore: 0.62,
-    minForeground: 0.47,
-    minBackground: 0.93
-  })
-});
-
 const fileInput = $("fileInput");
 const targetText = $("targetText");
 const targetHistory = $("targetHistory");
@@ -59,7 +46,6 @@ if (!ENABLE_DIAGNOSTIC) {
     ocrDebugLayer.hidden = true;
 }
 
-let sourceImage = null;
 let worker = null;
 let workerLang = null;
 let ocrBusy = false;
@@ -69,13 +55,11 @@ let stampTapStart = null;
 let isDragging = false;
 let dragStart = null;
 let ocrBaseCanvas = null;
-const manualStamps = [];
 const manualHistory = [];
 let selectedManualIndex = -1;
 let editMode = null; // { type: "move" | "resize", handle: string|null, startPoint, original }
 const MIN_MANUAL_SIZE = 4;
 
-let zoom = 1;
 const MIN_ZOOM = 1;
 const MAX_ZOOM = 4;
 const pointers = new Map();
@@ -95,6 +79,32 @@ const MAX_TARGET_HISTORY = 5;
 let sourceCanvasRef = null;
 let sourceCtxRef = null;
 
+const {
+    getBaseDisplaySize,
+    updateZoomUI,
+    setZoom,
+    redrawFromBase,
+    getCanvasDisplayTransform
+} = createView({
+    canvas,
+    ctx,
+    canvasWrap,
+    zoomLabel,
+    state,
+    manualStamps,
+    getBaseSource: () => ocrBaseCanvas || state.sourceImage,
+    getBaseSize: () => ocrBaseCanvas
+        ? { width: ocrBaseCanvas.width, height: ocrBaseCanvas.height }
+        : state.sourceImage
+            ? { width: state.sourceImage.naturalWidth, height: state.sourceImage.naturalHeight }
+            : { width: canvas.width, height: canvas.height },
+    paintStamp: stamp => paintStamp(stamp),
+    updateUndoButton: () => updateUndoButton(),
+    renderManualSelection: () => renderManualSelection(),
+    minZoom: MIN_ZOOM,
+    maxZoom: MAX_ZOOM
+});
+
 function status(message, error = null) {
     statusEl.textContent = message;
     errorEl.hidden = !error;
@@ -108,8 +118,8 @@ function status(message, error = null) {
 
 function setOcrBusy(busy) {
     ocrBusy = !!busy;
-    redactBtn.disabled = ocrBusy || !sourceImage;
-    diagnoseBtn.disabled = ocrBusy || !ENABLE_DIAGNOSTIC || !sourceImage;
+    redactBtn.disabled = ocrBusy || !state.sourceImage;
+    diagnoseBtn.disabled = ocrBusy || !ENABLE_DIAGNOSTIC || !state.sourceImage;
 }
 
 function safeLoadJson(key, fallback) {
@@ -211,16 +221,16 @@ function renderTargetHistory() {
 }
 
 function buildSourceCanvas() {
-    if (!sourceImage) {
+    if (!state.sourceImage) {
         sourceCanvasRef = null;
         sourceCtxRef = null;
         return;
     }
     sourceCanvasRef = document.createElement("canvas");
-    sourceCanvasRef.width = sourceImage.naturalWidth;
-    sourceCanvasRef.height = sourceImage.naturalHeight;
+    sourceCanvasRef.width = state.sourceImage.naturalWidth;
+    sourceCanvasRef.height = state.sourceImage.naturalHeight;
     sourceCtxRef = sourceCanvasRef.getContext("2d", { willReadFrequently: true });
-    sourceCtxRef.drawImage(sourceImage, 0, 0);
+    sourceCtxRef.drawImage(state.sourceImage, 0, 0);
 }
 
 function sampleBackgroundColor(rect) {
@@ -309,12 +319,6 @@ function loadImage(file) {
     });
 }
 
-function normalize(text) {
-    return String(text || "")
-        .normalize("NFKC")
-        .replace(/[^\p{L}\p{N}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Han}]/gu, "")
-        .toLowerCase();
-}
 
 // OCRの最終矩形は、対象文字のsymbol bboxをまとめて一度だけ作る。
 // 位置の推定や多段補正はここでは行わず、怪しいsymbol列はextractLineUnits側で
@@ -366,12 +370,6 @@ function getOcrPaintBox(box, symbols = []) {
     return out;
 }
 
-function getMedian(values) {
-    const a = (values || []).filter(Number.isFinite).sort((x, y) => x - y);
-    if (!a.length) return 0;
-    const m = Math.floor(a.length / 2);
-    return a.length % 2 ? a[m] : (a[m - 1] + a[m]) / 2;
-}
 
 function getOcrVisualRect(box, symbols = [], meta = {}) {
     let paintBox = getOcrPaintBox(box, symbols);
@@ -490,44 +488,8 @@ function paintStamp(stamp) {
     paintManual(stamp, style);
 }
 
-function getBaseDisplaySize() {
-    if (!sourceImage) return { width: canvas.width, height: canvas.height };
-    const availableWidth = Math.max(1, canvasWrap.clientWidth);
-    const scale = Math.min(1, availableWidth / canvas.width);
-    return { width: canvas.width * scale, height: canvas.height * scale };
-}
 
-function updateZoomUI() {
-    if (!sourceImage) return;
-    const oldRect = canvas.getBoundingClientRect();
-    const wrapRect = canvasWrap.getBoundingClientRect();
-    const centerX = (oldRect.left + oldRect.right) / 2 - wrapRect.left;
-    const centerY = (oldRect.top + oldRect.bottom) / 2 - wrapRect.top;
-    const base = getBaseDisplaySize();
 
-    canvasWrap.classList.toggle("zoomed", zoom > 1.001);
-    canvas.style.width = `${base.width * zoom}px`;
-    canvas.style.height = `${base.height * zoom}px`;
-    zoomLabel.textContent = `${Math.round(zoom * 100)}%`;
-
-    if (zoom > 1.001) {
-        const newRect = canvas.getBoundingClientRect();
-        const newWrapRect = canvasWrap.getBoundingClientRect();
-        const newCenterX = (newRect.left + newRect.right) / 2 - newWrapRect.left;
-        const newCenterY = (newRect.top + newRect.bottom) / 2 - newWrapRect.top;
-        canvasWrap.scrollLeft += newCenterX - centerX;
-        canvasWrap.scrollTop += newCenterY - centerY;
-    } else {
-        canvasWrap.scrollLeft = 0;
-        canvasWrap.scrollTop = 0;
-    }
-}
-
-function setZoom(nextZoom) {
-    if (!sourceImage) return;
-    zoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, nextZoom));
-    updateZoomUI();
-}
 
 function getPointerDistance() {
     const values = [...pointers.values()];
@@ -699,52 +661,6 @@ function applyResizeEdit(current) {
     b.x = x; b.y = y; b.w = w; b.h = h;
 }
 
-function redrawFromBase() {
-    if (!sourceImage) return;
-
-    // 編集中は OCR 済み/未実行に関係なく、現在のズーム率とスクロール位置を維持する。
-    const keepZoom = zoom;
-    const keepScrollLeft = canvasWrap.scrollLeft;
-    const keepScrollTop = canvasWrap.scrollTop;
-
-    const baseSource = ocrBaseCanvas || sourceImage;
-    const targetWidth = ocrBaseCanvas ? ocrBaseCanvas.width : sourceImage.naturalWidth;
-    const targetHeight = ocrBaseCanvas ? ocrBaseCanvas.height : sourceImage.naturalHeight;
-
-    // 同じサイズなら width/height を再代入しない。再代入はCanvasの再確保と状態初期化を伴う。
-    if (canvas.width !== targetWidth || canvas.height !== targetHeight) {
-        canvas.width = targetWidth;
-        canvas.height = targetHeight;
-    } else {
-        ctx.clearRect(0, 0, canvas.width, canvas.height);
-    }
-    ctx.drawImage(baseSource, 0, 0);
-
-    for (const stamp of manualStamps) {
-        paintStamp(stamp);
-    }
-    updateUndoButton();
-
-    // サイズ変更が必要だった場合も含め、ズームとスクロール位置は維持する。
-    zoom = keepZoom;
-    const base = getBaseDisplaySize();
-    if (keepZoom > 1.001) {
-        canvasWrap.classList.add("zoomed");
-        canvas.style.width = `${base.width * keepZoom}px`;
-        canvas.style.height = `${base.height * keepZoom}px`;
-    } else {
-        canvasWrap.classList.remove("zoomed");
-        canvas.style.width = `${base.width}px`;
-        canvas.style.height = `${base.height}px`;
-    }
-    zoomLabel.textContent = `${Math.round(keepZoom * 100)}%`;
-
-    requestAnimationFrame(() => {
-        canvasWrap.scrollLeft = keepScrollLeft;
-        canvasWrap.scrollTop = keepScrollTop;
-        renderManualSelection();
-    });
-}
 
 async function getWorker(preferredLang = "jpn") {
     if (!window.Tesseract) {
@@ -1127,7 +1043,6 @@ async function collectTextRegionMatches(worker, sourceCanvas, target, coordScale
   };
 }
 
-function editDistance(a,b){const A=[...a],B=[...b],d=Array.from({length:A.length+1},()=>Array(B.length+1).fill(0));for(let i=0;i<=A.length;i++)d[i][0]=i;for(let j=0;j<=B.length;j++)d[0][j]=j;for(let i=1;i<=A.length;i++)for(let j=1;j<=B.length;j++)d[i][j]=Math.min(d[i-1][j]+1,d[i][j-1]+1,d[i-1][j-1]+(A[i-1]===B[j-1]?0:1));return d[A.length][B.length];}
 function sequenceSimilarity(a, b) {
   const A = [...a], B = [...b];
   if (!A.length || !B.length) return 0;
@@ -1279,7 +1194,7 @@ function makeSourceCandidateCrop(candidate, scale) {
   const cc = c.getContext('2d');
   cc.imageSmoothingEnabled = true;
   cc.imageSmoothingQuality = 'high';
-  cc.drawImage(sourceImage, sx0, sy0, c.width, c.height, 0, 0, c.width, c.height);
+  cc.drawImage(state.sourceImage, sx0, sy0, c.width, c.height, 0, 0, c.width, c.height);
   return { canvas: c, x0: sx0, y0: sy0 };
 }
 
@@ -1318,7 +1233,7 @@ function makeWhiteBorderCanvas(src,pad){
 const ANALYSIS_CANVAS_MAX_WIDTH = 1000;
 const ANALYSIS_CANVAS_MAX_PIXELS = 2500000;
 
-function buildAnalysisCanvas(source=sourceImage){
+function buildAnalysisCanvas(source=state.sourceImage){
   const sw=source?.naturalWidth||source?.width||canvas.width;
   const sh=source?.naturalHeight||source?.height||canvas.height;
   if(!sw||!sh) return {canvas:source,scale:1,resized:false,width:sw||0,height:sh||0};
@@ -1344,7 +1259,7 @@ function buildAnalysisCanvas(source=sourceImage){
   return {canvas:c,scale:outScale,resized:outScale!==1,width:c.width,height:c.height};
 }
 
-function buildOcrCanvas(baseCanvas=sourceImage){
+function buildOcrCanvas(baseCanvas=state.sourceImage){
   // 解析用の基準キャンバスからOCRキャンバスを作る。
   // これでOCR・局所OCR・イタリック探索が同じ座標系を共有しつつ、OCRだけは必要な倍率を保てる。
   const srcW=baseCanvas?.width||canvas.width;
@@ -1722,7 +1637,7 @@ async function run(){
   setOcrBusy(true);
   errorEl.hidden=true; ocrDiagnostics.hidden=true; ocrDebugLayer.hidden=true; ocrDebugLayer.innerHTML="";
   try{
-    if(!sourceImage) throw new Error("先に画像を選択してください。");
+    if(!state.sourceImage) throw new Error("先に画像を選択してください。");
     const target=normalize(targetText.value);
     if(!target) throw new Error("黒塗りする文字を入力してください。");
     saveTargetHistoryEntry(targetText.value);
@@ -1802,7 +1717,7 @@ async function run(){
     ocrBaseCanvas=document.createElement("canvas");
     ocrBaseCanvas.width=canvas.width; ocrBaseCanvas.height=canvas.height;
     const baseCtx=ocrBaseCanvas.getContext("2d");
-    baseCtx.drawImage(sourceImage,0,0);
+    baseCtx.drawImage(state.sourceImage,0,0);
 
     pushManualHistory();
     for(const b of paintBoxes){
@@ -2393,7 +2308,7 @@ async function diagnoseOCR(){
   canvas.hidden=false;
   canvas.style.display='block';
   try{
-    if(!sourceImage)throw new Error("先に画像を選択してください。");
+    if(!state.sourceImage)throw new Error("先に画像を選択してください。");
     const target=normalize(targetText.value);
     if(!target)throw new Error("黒塗りする文字を入力してください。");
     saveTargetHistoryEntry(targetText.value);
@@ -2620,16 +2535,6 @@ function getCanvasPoint(event) {
 // canvas が中央寄せ・ズーム・スクロールされていても、
 // canvasWrap 内の「実際に見えているcanvas」の位置と表示倍率を正しく取得する。
 // offsetLeft / offsetTop は margin:auto やスクロールの影響を受けるため使わない。
-function getCanvasDisplayTransform() {
-    const canvasRect = canvas.getBoundingClientRect();
-    const wrapRect = canvasWrap.getBoundingClientRect();
-    return {
-        left: canvasRect.left - wrapRect.left + canvasWrap.scrollLeft,
-        top: canvasRect.top - wrapRect.top + canvasWrap.scrollTop,
-        scaleX: canvasRect.width / canvas.width,
-        scaleY: canvasRect.height / canvas.height
-    };
-}
 
 function updateSelection(start, current) {
     const x = Math.min(start.x, current.x);
@@ -2675,7 +2580,7 @@ function updateTraceSelection(start, current) {
 }
 
 function startManualMode() {
-    if (!sourceImage) return;
+    if (!state.sourceImage) return;
     manualMode = true;
     document.body.classList.add("manual-mode");
     manualDoneBtn.hidden = false;
@@ -2694,9 +2599,9 @@ function stopManualMode() {
     hideManualDeleteButton();
     if (stampMode) stampMode.checked = false;
     manualDoneBtn.hidden = true;
-    manualBtn.disabled = !sourceImage;
+    manualBtn.disabled = !state.sourceImage;
     updateStampModeUI();
-    if (sourceImage) status(`手動黒塗り終了：追加した黒塗り ${manualStamps.length}箇所`);
+    if (state.sourceImage) status(`手動黒塗り終了：追加した黒塗り ${manualStamps.length}箇所`);
 }
 
 function placeStampAt(point) {
@@ -2795,7 +2700,7 @@ function getPointerCenter() {
 function resetManualGestureState() {
     pointers.clear();
     pinchStartDistance = 0;
-    pinchStartZoom = zoom;
+    pinchStartZoom = state.zoom;
     panLastCenter = null;
     multiTouchGestureActive = false;
     isDragging = false;
@@ -2837,7 +2742,7 @@ manualDeleteBtn?.addEventListener("click", event => {
 });
 
 canvasWrap.addEventListener("pointerdown", event => {
-    if (!sourceImage) return;
+    if (!state.sourceImage) return;
 
     // 新しいタッチ列のprimary pointerが来た時点で、前ジェスチャー由来の
     // pointerId / pinch状態が残っていても必ず破棄する。
@@ -2845,7 +2750,7 @@ canvasWrap.addEventListener("pointerdown", event => {
     if (event.pointerType === "touch" && event.isPrimary) {
         pointers.clear();
         pinchStartDistance = 0;
-        pinchStartZoom = zoom;
+        pinchStartZoom = state.zoom;
         panLastCenter = null;
         multiTouchGestureActive = false;
         isDragging = false;
@@ -2866,7 +2771,7 @@ canvasWrap.addEventListener("pointerdown", event => {
         selection.hidden = true;
         hideManualDeleteButton();
         pinchStartDistance = getPointerDistance();
-        pinchStartZoom = zoom;
+        pinchStartZoom = state.zoom;
         panLastCenter = getPointerCenter();
         event.preventDefault();
         return;
@@ -3027,7 +2932,7 @@ function endPointer(event) {
         // ピンチ関連の状態を確実に初期化する。
         multiTouchGestureActive = false;
         pinchStartDistance = 0;
-        pinchStartZoom = zoom;
+        pinchStartZoom = state.zoom;
         panLastCenter = null;
         return;
     }
@@ -3094,7 +2999,7 @@ canvasWrap.addEventListener("lostpointercapture", event => {
         if (!pointers.size) {
             multiTouchGestureActive = false;
             pinchStartDistance = 0;
-            pinchStartZoom = zoom;
+            pinchStartZoom = state.zoom;
             panLastCenter = null;
         } else if (multiTouchGestureActive) {
             panLastCenter = getPointerCenter();
@@ -3133,7 +3038,7 @@ canvasWrap.addEventListener("pointercancel", event => {
     if (!pointers.size) {
         multiTouchGestureActive = false;
         pinchStartDistance = 0;
-        pinchStartZoom = zoom;
+        pinchStartZoom = state.zoom;
         panLastCenter = null;
     }
     selection.hidden = true;
@@ -3196,8 +3101,8 @@ targetText?.addEventListener("keydown", event => {
     if (event.key === "Enter") saveTargetHistoryEntry(targetText.value);
 });
 
-zoomOutBtn.addEventListener("click", () => setZoom(zoom - 0.25));
-zoomInBtn.addEventListener("click", () => setZoom(zoom + 0.25));
+zoomOutBtn.addEventListener("click", () => setZoom(state.zoom - 0.25));
+zoomInBtn.addEventListener("click", () => setZoom(state.zoom + 0.25));
 
 undoBtn.addEventListener("click", () => {
     if (!manualHistory.length) return;
@@ -3207,7 +3112,7 @@ undoBtn.addEventListener("click", () => {
 });
 
 resetBtn.addEventListener("click", () => {
-    if (!sourceImage) return;
+    if (!state.sourceImage) return;
     // 自動(OCR)・手動を問わず、黒塗りを全て取り消して元画像の状態に戻す。
     manualStamps.length = 0;
     manualHistory.length = 0;
@@ -3235,7 +3140,7 @@ fileInput.addEventListener("change", async () => {
         ocrDiagnostics.hidden = true;
         ocrDebugLayer.hidden = true;
         ocrDebugLayer.innerHTML = "";
-        sourceImage = await loadImage(file);
+        state.sourceImage = await loadImage(file);
         buildSourceCanvas();
         fileName = (file.name.replace(/\.[^.]+$/, "") || "redacted") + "_redacted.png";
         manualStamps.length = 0;
@@ -3244,10 +3149,10 @@ fileInput.addEventListener("change", async () => {
         editMode = null;
         hideManualDeleteButton();
         ocrBaseCanvas = null;
-        canvas.width = sourceImage.naturalWidth;
-        canvas.height = sourceImage.naturalHeight;
-        zoom = 1;
-        ctx.drawImage(sourceImage, 0, 0);
+        canvas.width = state.sourceImage.naturalWidth;
+        canvas.height = state.sourceImage.naturalHeight;
+        state.zoom = 1;
+        ctx.drawImage(state.sourceImage, 0, 0);
         updateZoomUI();
         redactBtn.disabled = false;
         diagnoseBtn.disabled = !ENABLE_DIAGNOSTIC;
@@ -3304,7 +3209,7 @@ async function saveBlobWithPicker(blob, name) {
 }
 
 async function saveImage() {
-    if (!sourceImage || !canvas.width || !canvas.height) {
+    if (!state.sourceImage || !canvas.width || !canvas.height) {
         status("先に画像を処理してください。");
         return;
     }

@@ -1,3 +1,13 @@
+# V91.6 基盤ファイル分割テスト
+
+- **ロジック変更なし**を優先し、V91.5.1のOCR・黒塗り・手動編集挙動を維持したまま基盤だけ分割。
+- `config.js`: 共有設定値と診断ON/OFF。
+- `utils.js`: `normalize` / `getMedian` / `editDistance`。
+- `state.js`: `sourceImage` / `zoom` / `manualStamps` の共有状態。
+- `view.js`: `redrawFromBase` / `updateZoomUI` / `setZoom` / `getCanvasDisplayTransform` などキャンバス表示処理。
+- `app.js` は ES module 化。依存方向を `app.js → 各基盤ファイル` に固定し、逆参照を作らない構成。
+- GitHub Pages / HTTP(S) 配信前提。`file://` でHTMLを直接開く方法ではES modulesの制約により動作しない場合があります。
+
 V91.5.1 重複処理整理テスト
 
 - V91.3の検出・黒塗り・診断枠同期を維持。
