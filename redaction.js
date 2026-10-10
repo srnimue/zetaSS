@@ -1,5 +1,5 @@
-import { CONFIG } from "./config.js?v=91700";
-import { getMedian } from "./utils.js?v=91700";
+import { CONFIG } from "./config.js?v=91800";
+import { getMedian } from "./utils.js?v=91800";
 
 // 黒塗り・ぼかし・背景色塗りと、OCR bbox → 最終描画矩形の変換を担当する。
 // OCR判定そのものや手動操作の状態管理はここでは行わない。
@@ -58,9 +58,10 @@ export function createRedaction({
     function renderRedactionRect(rect, style = null) {
         const applied = cloneRedactionStyle(style);
         if (applied.mode === "blur") {
-            // SafariではCanvasRenderingContext2D.filterのblurが効かない/弱いことがあるため、
-            // 対象範囲を一度縮小してから滑らかに拡大する方式で確実にぼかす。
-            const blurMargin = 8;
+            // 名前が判読できない強さを優先した強ぼかし。
+            // Safariでfilterが弱い/無効でも効くよう、まず大きく縮小して情報量を落とし、
+            // 対応ブラウザではその上からガウス系blurを重ねる。描画はrect内にclipする。
+            const blurMargin = Math.max(10, Math.min(28, Math.round(rect.h * 0.55)));
             const sx = Math.max(0, Math.floor(rect.x - blurMargin));
             const sy = Math.max(0, Math.floor(rect.y - blurMargin));
             const sw = Math.max(1, Math.min(canvas.width - sx, Math.ceil(rect.w + blurMargin * 2)));
@@ -72,14 +73,27 @@ export function createRedaction({
             const sctx = source.getContext("2d");
             sctx.drawImage(canvas, sx, sy, sw, sh, 0, 0, sw, sh);
 
-            // およそ1/6まで縮小。文字が読めない程度にしつつ、モザイクより柔らかい見た目にする。
+            // 旧版の約1/6より強い約1/12縮小。カタカナの線形状も残りにくくする。
             const small = document.createElement("canvas");
-            small.width = Math.max(1, Math.round(sw / 6));
-            small.height = Math.max(1, Math.round(sh / 6));
+            small.width = Math.max(2, Math.round(sw / 12));
+            small.height = Math.max(2, Math.round(sh / 12));
             const smctx = small.getContext("2d");
             smctx.imageSmoothingEnabled = true;
             smctx.imageSmoothingQuality = "high";
             smctx.drawImage(source, 0, 0, sw, sh, 0, 0, small.width, small.height);
+
+            const blurred = document.createElement("canvas");
+            blurred.width = sw;
+            blurred.height = sh;
+            const bctx = blurred.getContext("2d");
+            bctx.imageSmoothingEnabled = true;
+            bctx.imageSmoothingQuality = "high";
+            if ("filter" in bctx) {
+                const radius = Math.max(10, Math.min(24, Math.round(rect.h * 0.45)));
+                bctx.filter = `blur(${radius}px)`;
+            }
+            bctx.drawImage(small, 0, 0, small.width, small.height, 0, 0, sw, sh);
+            bctx.filter = "none";
 
             ctx.save();
             ctx.beginPath();
@@ -87,7 +101,7 @@ export function createRedaction({
             ctx.clip();
             ctx.imageSmoothingEnabled = true;
             ctx.imageSmoothingQuality = "high";
-            ctx.drawImage(small, 0, 0, small.width, small.height, sx, sy, sw, sh);
+            ctx.drawImage(blurred, 0, 0, sw, sh, sx, sy, sw, sh);
             ctx.restore();
         } else {
             ctx.save();
