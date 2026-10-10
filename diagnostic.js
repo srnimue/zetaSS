@@ -1,10 +1,10 @@
-import { normalize, editDistance } from "./utils.js?v=91800";
+import { normalize, editDistance } from "./utils.js?v=91900";
 import {
     getOcrLanguage,
     detectTextLikeRegions,
     collectTextRegionMatches,
     OCR_BORDER_PX
-} from "./ocr.js?v=91800";
+} from "./ocr.js?v=91900";
 import {
     ITALIC_VARIANT_SKEWS,
     ITALIC_DIAGNOSTIC_SKEWS,
@@ -16,7 +16,7 @@ import {
     chooseItalicVariantHeights,
     italicVariantDiagnosticSearch,
     collectItalicRescueCandidates
-} from "./italic.js?v=91800";
+} from "./italic.js?v=91900";
 
 // OCR診断専用。通常の自動黒塗り経路から診断UIとログ生成を切り離す。
 export function createDiagnostic({
