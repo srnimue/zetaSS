@@ -1,5 +1,5 @@
-import { ENABLE_DIAGNOSTIC } from "./config.js?v=91900";
-import { normalize, editDistance } from "./utils.js?v=91900";
+import { ENABLE_DIAGNOSTIC } from "./config.js?v=92000";
+import { normalize, editDistance } from "./utils.js?v=92000";
 import {
     getOcrLanguage,
     makeOcrVariant,
@@ -10,18 +10,18 @@ import {
     OCR_BORDER_PX,
     ANALYSIS_CANVAS_MAX_WIDTH,
     ANALYSIS_CANVAS_MAX_PIXELS
-} from "./ocr.js?v=91900";
-import { state, manualStamps } from "./state.js?v=91900";
-import { createView } from "./view.js?v=91900";
+} from "./ocr.js?v=92000";
+import { state, manualStamps } from "./state.js?v=92000";
+import { createView } from "./view.js?v=92000";
 import {
     chooseItalicVariantHeights,
     collectItalicRescueCandidates
-} from "./italic.js?v=91900";
-import { createRedaction } from "./redaction.js?v=91900";
-import { createManual } from "./manual.js?v=91900";
-import { createDiagnostic } from "./diagnostic.js?v=91900";
-import { createPreferences } from "./preferences.js?v=91900";
-import { createImageExporter } from "./export.js?v=91900";
+} from "./italic.js?v=92000";
+import { createRedaction } from "./redaction.js?v=92000";
+import { createManual } from "./manual.js?v=92000";
+import { createDiagnostic } from "./diagnostic.js?v=92000";
+import { createPreferences } from "./preferences.js?v=92000";
+import { createImageExporter } from "./export.js?v=92000";
 
 
 const $ = id => document.getElementById(id);

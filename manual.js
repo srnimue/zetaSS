@@ -1,4 +1,4 @@
-import { state, manualStamps } from "./state.js?v=91900";
+import { state, manualStamps } from "./state.js?v=92000";
 
 export function createManual({
     canvas,
