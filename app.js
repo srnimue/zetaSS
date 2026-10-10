@@ -1,5 +1,5 @@
-import { ENABLE_DIAGNOSTIC } from "./config.js?v=92000";
-import { normalize, editDistance } from "./utils.js?v=92000";
+import { ENABLE_DIAGNOSTIC } from "./config.js?v=92100";
+import { normalize, editDistance } from "./utils.js?v=92100";
 import {
     getOcrLanguage,
     makeOcrVariant,
@@ -10,18 +10,18 @@ import {
     OCR_BORDER_PX,
     ANALYSIS_CANVAS_MAX_WIDTH,
     ANALYSIS_CANVAS_MAX_PIXELS
-} from "./ocr.js?v=92000";
-import { state, manualStamps } from "./state.js?v=92000";
-import { createView } from "./view.js?v=92000";
+} from "./ocr.js?v=92100";
+import { state, manualStamps } from "./state.js?v=92100";
+import { createView } from "./view.js?v=92100";
 import {
     chooseItalicVariantHeights,
     collectItalicRescueCandidates
-} from "./italic.js?v=92000";
-import { createRedaction } from "./redaction.js?v=92000";
-import { createManual } from "./manual.js?v=92000";
-import { createDiagnostic } from "./diagnostic.js?v=92000";
-import { createPreferences } from "./preferences.js?v=92000";
-import { createImageExporter } from "./export.js?v=92000";
+} from "./italic.js?v=92100";
+import { createRedaction } from "./redaction.js?v=92100";
+import { createManual } from "./manual.js?v=92100";
+import { createDiagnostic } from "./diagnostic.js?v=92100";
+import { createPreferences } from "./preferences.js?v=92100";
+import { createImageExporter } from "./export.js?v=92100";
 
 
 const $ = id => document.getElementById(id);
@@ -42,6 +42,9 @@ const undoBtn = $("undoBtn");
 const resetBtn = $("resetBtn");
 const manualDoneBtn = $("manualDoneBtn");
 const saveBtn = $("saveBtn");
+const appHelpBtn = $("appHelpBtn");
+const appHelpDialog = $("appHelpDialog");
+const appHelpCloseBtn = $("appHelpCloseBtn");
 const manualHelpBtn = $("manualHelpBtn");
 const manualHelpDialog = $("manualHelpDialog");
 const manualHelpCloseBtn = $("manualHelpCloseBtn");
@@ -57,6 +60,30 @@ const ocrDiagnostics = $("ocrDiagnostics");
 const zoomOutBtn = $("zoomOutBtn");
 const zoomInBtn = $("zoomInBtn");
 const zoomLabel = $("zoomLabel");
+
+
+function openAppHelp() {
+    if (!appHelpDialog) return;
+    appHelpDialog.hidden = false;
+    document.body.classList.add("help-dialog-open");
+    appHelpCloseBtn?.focus();
+}
+
+function closeAppHelp() {
+    if (!appHelpDialog || appHelpDialog.hidden) return;
+    appHelpDialog.hidden = true;
+    document.body.classList.remove("help-dialog-open");
+    appHelpBtn?.focus();
+}
+
+appHelpBtn?.addEventListener("click", openAppHelp);
+appHelpCloseBtn?.addEventListener("click", closeAppHelp);
+appHelpDialog?.addEventListener("click", event => {
+    if (event.target.closest("[data-app-help-close]")) closeAppHelp();
+});
+document.addEventListener("keydown", event => {
+    if (event.key === "Escape" && appHelpDialog && !appHelpDialog.hidden) closeAppHelp();
+});
 
 // 手動描画の初期モードは「なぞり式」。
 if (manualDrawMode) manualDrawMode.value = "trace";

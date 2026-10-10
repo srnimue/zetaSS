@@ -3,8 +3,8 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>スクショ黒塗りツール V92</title>
-<link rel="stylesheet" href="style.css?v=92000">
+<title>スクショ黒塗りツール V92.1</title>
+<link rel="stylesheet" href="style.css?v=92100">
 <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
   <link rel="icon" type="image/png" href="./favicon.png">
   <link rel="icon" href="./favicon.ico">
@@ -12,8 +12,11 @@
 </head>
 <body>
 <main class="container">
-<h1>スクショ黒塗りツール</h1>
-<p class="description">OCRで名前を自動で黒塗りしたあと、手動で追加の黒塗りができます。</p>
+<div class="app-title-row">
+  <h1>スクショ黒塗りツール</h1>
+  <button id="appHelpBtn" class="app-help-button" type="button" aria-label="このアプリの使い方" aria-haspopup="dialog" aria-controls="appHelpDialog">?</button>
+</div>
+<p class="description quick-guide"><strong>① 画像を選ぶ</strong><span>② 隠したい名前を入力</span><span>③「自動検出」を押す</span></p>
 
 <section class="panel">
 <label for="fileInput">スクリーンショット</label>
@@ -71,6 +74,54 @@
   </div>
 </details>
 
+<div id="appHelpDialog" class="help-dialog" hidden role="dialog" aria-modal="true" aria-labelledby="appHelpTitle">
+  <div class="help-dialog-backdrop" data-app-help-close></div>
+  <div class="help-dialog-card app-help-card" role="document">
+    <div class="help-dialog-header">
+      <h2 id="appHelpTitle">使い方・ヘルプ</h2>
+      <button id="appHelpCloseBtn" class="help-dialog-close" type="button" aria-label="説明を閉じる">×</button>
+    </div>
+    <div class="help-dialog-body app-help-body">
+      <section class="help-section">
+        <h3>基本の使い方</h3>
+        <p>① 画像を選ぶ<br>② 隠したい名前を入力する<br>③「自動検出」を押す</p>
+        <p>検出後は、必要に応じて手動で追加・修正できます。最後に「画像を保存」を押してください。</p>
+      </section>
+
+      <section class="help-section">
+        <h3>隠し方の違い</h3>
+        <p><strong>黒塗り：</strong>文字の上を黒く塗りつぶします。</p>
+        <p><strong>背景色：</strong>周囲の背景色に近い色で文字を隠します。</p>
+        <p><strong>ぼかし：</strong>文字が読めない程度まで強くぼかします。</p>
+        <p><strong>任意の色：</strong>好きな色を選んで文字を隠します。</p>
+      </section>
+
+      <section class="help-section">
+        <h3>手動編集</h3>
+        <p><strong>なぞり式：</strong>指でなぞった位置に、一定の高さで隠し範囲を追加します。</p>
+        <p><strong>スタンプ：</strong>タップした位置に、直前に作った手動の隠し範囲と同じサイズで追加します。</p>
+        <p>既存の範囲をタップすると選択でき、移動・リサイズできます。「×」で削除、「戻す」で直前の操作を取り消せます。</p>
+        <p>画像の移動・拡大縮小は2本指で操作できます。</p>
+      </section>
+
+      <section class="help-section">
+        <h3>うまくいかないとき</h3>
+        <p>名前は画像に表示されている文字と同じ表記で入力してください。</p>
+        <p>自動検出で見つからない部分は手動で追加できます。余計な場所まで隠れた場合は、その範囲を選択して「×」で削除できます。</p>
+        <p>小さい文字や特殊な字体、背景との区別がつきにくい文字は、自動検出しにくい場合があります。</p>
+      </section>
+
+      <section class="help-section help-contact">
+        <h3>不具合・検出について</h3>
+        <p>自動検出は、文字の大きさ・字体・背景・画質などによって正しく検出できない場合があります。すべての名前を100%検出できるものではありません。</p>
+        <p>動かない、表示がおかしいなどの不具合や、特定の画像で明らかに検出しにくい場合は、問題が起きたスクリーンショットを添えて、X（旧Twitter）<a href="https://x.com/SRotofuuu" target="_blank" rel="noopener noreferrer">@SRotofuuu</a> までご連絡ください。</p>
+        <p>名前や文字だけでは原因を確認できないため、可能な範囲で実際に使用した画像を添えていただけると助かります。</p>
+        <p class="help-note">※個人情報や見せたくない部分は隠してからお送りください。</p>
+      </section>
+    </div>
+  </div>
+</div>
+
 <div id="manualHelpDialog" class="help-dialog" hidden role="dialog" aria-modal="true" aria-labelledby="manualHelpTitle">
   <div class="help-dialog-backdrop" data-help-close></div>
   <div class="help-dialog-card" role="document">
@@ -113,6 +164,6 @@
 <pre id="errorDetails" class="error" hidden></pre>
 <pre id="ocrDiagnostics" class="diagnostics" hidden></pre>
 </main>
-<script type="module" src="app.js?v=92000"></script>
+<script type="module" src="app.js?v=92100"></script>
 </body>
 </html>

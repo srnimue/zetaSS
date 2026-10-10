@@ -392,3 +392,82 @@ body.help-dialog-open{
 }
 
 .standalone-stamp[hidden]{ display:none !important; }
+
+
+/* V92.1: 上部クイックガイド + 全体ヘルプ */
+.app-title-row{
+  display:flex;
+  align-items:center;
+  gap:8px;
+  margin:0 0 8px;
+}
+.app-title-row h1{
+  margin:0;
+}
+.app-help-button{
+  flex:0 0 30px;
+  width:30px;
+  min-width:30px;
+  height:30px;
+  padding:0;
+  border-radius:999px;
+  background:#666;
+  font-size:16px;
+  line-height:30px;
+  text-align:center;
+}
+.quick-guide{
+  display:flex;
+  flex-wrap:wrap;
+  align-items:center;
+  gap:4px 12px;
+}
+.quick-guide strong,
+.quick-guide span{
+  white-space:nowrap;
+}
+.app-help-card{
+  width:min(520px,100%);
+}
+.app-help-body{
+  padding-top:4px;
+}
+.help-section{
+  padding:8px 0 10px;
+  border-bottom:1px solid #ececec;
+}
+.help-section:last-child{
+  border-bottom:0;
+}
+.help-section h3{
+  margin:4px 0 8px;
+  font-size:15px;
+}
+.help-section p{
+  margin:7px 0;
+}
+.help-section a{
+  color:inherit;
+  font-weight:700;
+  text-decoration:underline;
+  text-underline-offset:2px;
+}
+.help-note{
+  color:#666;
+  font-size:12px;
+}
+@media (max-width:600px){
+  .app-help-button{
+    flex:0 0 30px !important;
+    width:30px !important;
+    min-width:30px !important;
+    height:30px !important;
+    padding:0 !important;
+    font-size:16px !important;
+    line-height:30px !important;
+  }
+  .quick-guide{
+    gap:2px 8px;
+    font-size:13px;
+  }
+}
