@@ -1,5 +1,5 @@
-import { CONFIG } from "./config.js?v=92000";
-import { getMedian } from "./utils.js?v=92000";
+import { CONFIG } from "./config.js?v=10000";
+import { getMedian } from "./utils.js?v=10000";
 
 // 黒塗り・ぼかし・背景色塗りと、OCR bbox → 最終描画矩形の変換を担当する。
 // OCR判定そのものや手動操作の状態管理はここでは行わない。

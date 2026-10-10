@@ -1,5 +1,5 @@
-import { CONFIG } from "./config.js?v=92000";
-import { editDistance } from "./utils.js?v=92000";
+import { CONFIG } from "./config.js?v=10000";
+import { editDistance } from "./utils.js?v=10000";
 
 // ===== イタリック補助探索用テンプレート =====
 // 14pxで描画した文字のアルファ領域を切り出し、目標高さへ拡大して検索する。

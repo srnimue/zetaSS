@@ -1,5 +1,5 @@
-import { ENABLE_DIAGNOSTIC } from "./config.js?v=92100";
-import { normalize, editDistance } from "./utils.js?v=92100";
+import { ENABLE_DIAGNOSTIC } from "./config.js?v=10000";
+import { normalize, editDistance } from "./utils.js?v=10000";
 import {
     getOcrLanguage,
     makeOcrVariant,
@@ -10,18 +10,18 @@ import {
     OCR_BORDER_PX,
     ANALYSIS_CANVAS_MAX_WIDTH,
     ANALYSIS_CANVAS_MAX_PIXELS
-} from "./ocr.js?v=92100";
-import { state, manualStamps } from "./state.js?v=92100";
-import { createView } from "./view.js?v=92100";
+} from "./ocr.js?v=10000";
+import { state, manualStamps } from "./state.js?v=10000";
+import { createView } from "./view.js?v=10000";
 import {
     chooseItalicVariantHeights,
     collectItalicRescueCandidates
-} from "./italic.js?v=92100";
-import { createRedaction } from "./redaction.js?v=92100";
-import { createManual } from "./manual.js?v=92100";
-import { createDiagnostic } from "./diagnostic.js?v=92100";
-import { createPreferences } from "./preferences.js?v=92100";
-import { createImageExporter } from "./export.js?v=92100";
+} from "./italic.js?v=10000";
+import { createRedaction } from "./redaction.js?v=10000";
+import { createManual } from "./manual.js?v=10000";
+import { createDiagnostic } from "./diagnostic.js?v=10000";
+import { createPreferences } from "./preferences.js?v=10000";
+import { createImageExporter } from "./export.js?v=10000";
 
 
 const $ = id => document.getElementById(id);
@@ -796,7 +796,7 @@ async function run(){
     saveBtn.disabled=false; manualBtn.disabled=false;
     const italicAdded = italicRescue?.accepted?.length || 0;
     const localAdded = Math.max(0, paintBoxes.length - matches.length - italicAdded);
-    status(`黒塗り完了：${manualStamps.length}箇所\n通常OCR：${matches.length}箇所 / 追加局所OCR：${localAdded}箇所 / イタリック救出：${italicAdded}箇所\nイタリック探索：${italicRescue.searchMode} ${italicRescue.searchRegionCount}領域 / 評価${italicRescue.scoredPositions}地点 / HIT済み省略${italicRescue.skippedExisting}地点${stats.fallbackSkippedForSpeed ? " / 重い全画面fallback省略" : ""}`);
+    status(`黒塗り完了：${manualStamps.length}箇所`);
   }catch(error){
     status("OCRでエラーが発生しました。下のエラー詳細を確認してください。",error);
   }finally{

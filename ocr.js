@@ -1,5 +1,5 @@
-import { CONFIG } from "./config.js?v=92000";
-import { normalize, editDistance } from "./utils.js?v=92000";
+import { CONFIG } from "./config.js?v=10000";
+import { normalize, editDistance } from "./utils.js?v=10000";
 
 export function getOcrLanguage(target) {
     return /[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff]/u.test(target) ? "jpn" : "eng";
